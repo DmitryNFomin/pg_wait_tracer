@@ -840,12 +840,16 @@ def main():
             "information": {
                 name: metrics_resp["response"].get(name)
                 if isinstance(metrics_resp.get("response"), dict) else None
-                for name in ("lifecycle_init_lost_total",
+                for name in ("wp_attach_exit_race_total",
+                             "lifecycle_exit_before_attach_total",
+                             "lifecycle_init_lost_total",
                              "lifecycle_init_lost_no_opportunity_total",
                              "lifecycle_init_lost_untraced_ns_total")
             },
             "note": ("/".join(drlib.DAEMON_INTEGRITY_COUNTERS) +
                      " == 0 -- INIT losses with attach opportunity gate integrity. "
+                     "Attach exit races and exits before attach with unknown INIT/opportunity "
+                     "are reported pending an owner gate decision. "
                      "Owner decision #871 comment 6863203475, "
                      "'Count, don't fail (Recommended)': no-opportunity losses "
                      "are counted and reported with total losses and untraced ns "

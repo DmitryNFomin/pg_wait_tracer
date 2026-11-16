@@ -39,11 +39,11 @@ struct pgwt_percpu_transport;
 struct pgwt_counters {
     uint64_t events_total;             /* trace events consumed from event_ringbuf */
     uint64_t lifecycle_events_total;   /* fork/init/exit/query_text events */
-    uint64_t wp_attach_failures_total; /* attach/enable failure on live or unknown target;
+    uint64_t wp_attach_failures_total; /* operation failure without ESRCH + exit proof;
                                       * includes bootstrap and validation refusals */
-    uint64_t wp_attach_exit_race_total; /* attach/enable failure with original target gone */
+    uint64_t wp_attach_exit_race_total; /* ESRCH with pinned gone/Z/X or PF_EXITING + zero vsize proof */
     /* Subsets recorded after failed hardware operations, excluding lifecycle
-     * eligibility refusals. Gone is wp_attach_exit_race_total above. */
+     * eligibility refusals and proven ESRCH exit races. */
     uint64_t wp_attach_failures_live_total;
     uint64_t wp_attach_failures_unknown_total;
     uint64_t prev_events_total;        /* events_total at previous timer tick */
@@ -109,6 +109,7 @@ struct pgwt_counters {
     uint64_t writer_push_fail_total; /* every rejected event/sample push call */
     uint64_t init_state_read_fail_total; /* sticky unknown INIT accounting */
     uint64_t state_map_full_total;     /* userspace state_map inserts failed (map full, CAP-1) */
+    uint64_t lifecycle_exit_before_attach_total; /* state existed, never attached, INIT/opportunity unknown */
     uint64_t lifecycle_init_lost_total; /* INIT evidence/missing state, never attached */
     uint64_t lifecycle_init_lost_with_opportunity_total; /* lost minus no-opportunity; gates integrity */
     uint64_t lifecycle_init_lost_no_opportunity_total; /* init_ts > last sweep start */

@@ -30,14 +30,16 @@ TRACER = Path(__file__).resolve().parents[1] / "pg_wait_tracer"
 TICK_SECONDS = 1
 ATTACH_COUNTERS = ("wp_attach_failures_total", "wp_attach_exit_race_total",
                    "wp_attach_failures_live_total", "wp_attach_failures_unknown_total")
+EXIT_BEFORE_ATTACH = "lifecycle_exit_before_attach_total"
 DIAGNOSTIC_LINES = 40
 DIAGNOSTIC_WIDTH = 512
 
 
-def print_failure_diagnostics(text, after):
-    # Bound both line count and width, even under an attach-failure storm.
+def print_failure_diagnostics(text, after, failing_pids=()):
+    # Bound general streams; failing PIDs below retain every matching line.
     for prefix, title in (("INIT-LOST:", "INIT loss diagnostics (CLOCK_MONOTONIC)"),
                           ("WP-ATTACH-FAIL:", "Watchpoint attach diagnostics"),
+                          ("EXIT-BEFORE-ATTACH:", "Exit before attach diagnostics"),
                           ("ERROR: cannot validate lifecycle target", "Lifecycle target refusals")):
         lines = deque(maxlen=DIAGNOSTIC_LINES)
         total = 0
@@ -51,7 +53,64 @@ def print_failure_diagnostics(text, after):
         print({name: after[name] for name in (
             "lifecycle_init_lost_total", "lifecycle_init_lost_with_opportunity_total",
             "lifecycle_init_lost_no_opportunity_total",
-            "lifecycle_init_lost_untraced_ns_total", *ATTACH_COUNTERS)})
+            "lifecycle_init_lost_untraced_ns_total", "init_state_read_fail_total",
+            EXIT_BEFORE_ATTACH, *ATTACH_COUNTERS)})
+    for pid in sorted(failing_pids):
+        print(f"Daemon lines for failing PID {pid}:")
+        pattern = re.compile(rf"(?:\bpid=|\bPID ){pid}\b")
+        print("\n".join(line for line in text.splitlines() if pattern.search(line)))
+
+
+class CohortFailure(AssertionError):
+    def __init__(self, message, pids):
+        super().__init__(f"{message}: {sorted(pids)}")
+        self.pids = set(pids)
+
+
+def exit_race_diagnostics(text):
+    counts = Counter()
+    for line in text.splitlines():
+        if not line.startswith("WP-ATTACH-FAIL:"):
+            continue
+        fields = dict(re.findall(r"(\w+)=([^ ]+)", line))
+        if (fields.get("errno") == "3" and fields.get("exit_proof") in ("1", "2") and
+                fields.get("liveness") in ("gone", "exiting")):
+            counts[int(fields["pid"])] += 1
+    return counts
+
+
+def check_cohort(text, pids, short_lived, before, after):
+    """Every PID has one evidenced outcome; all diagnostics conserve counters."""
+    def require(ok, message, failing):
+        if not ok:
+            raise CohortFailure(message, failing)
+
+    attached = Counter(map(int, re.findall(r"INFO: PID (\d+) initialized \(", text)))
+    no_opportunity = Counter(map(int, re.findall(
+        r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=1(?: |$)", text)))
+    before_attach = Counter(map(int, re.findall(r"^EXIT-BEFORE-ATTACH: pid=(\d+) ", text, re.M)))
+    race = exit_race_diagnostics(text)
+    classes = (attached, no_opportunity, race, before_attach)
+    for counts in classes:
+        duplicates = {pid for pid in pids if counts[pid] > 1}
+        require(not duplicates, "duplicate outcome diagnostic", duplicates)
+    overlap = {pid for pid in pids if sum(pid in c for c in classes) > 1}
+    require(not overlap, "overlapping retirement classes", overlap)
+    missing = pids - set().union(*classes)
+    require(not missing, "backend has no counted outcome", missing)
+    not_short = (pids & (set(race) | set(before_attach))) - short_lived
+    require(not not_short, "retirement without attachment outlived a tick", not_short)
+    for counts, counter in ((no_opportunity, "lifecycle_init_lost_no_opportunity_total"),
+                            (race, "wp_attach_exit_race_total"),
+                            (before_attach, EXIT_BEFORE_ATTACH)):
+        # Log and metrics start at daemon creation. Subtract the baseline
+        # from both totals, including unrelated PostgreSQL backends; every
+        # cohort PID must still have its own diagnostic above.
+        total = sum(counts.values())
+        delta = after[counter] - before[counter]
+        require(total - before[counter] == delta and delta >= 0,
+                f"{counter} delta does not match PID diagnostics", pids | set(counts))
+    return attached, no_opportunity, race, before_attach
 
 
 def ctl(directory):
@@ -72,7 +131,8 @@ def ctl(directory):
                 "lifecycle_init_lost_no_opportunity_total",
                 "lifecycle_init_lost_untraced_ns_total",
                 "ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
-                "state_map_full_total", *ATTACH_COUNTERS):
+                "state_map_full_total", "init_state_read_fail_total",
+                EXIT_BEFORE_ATTACH, *ATTACH_COUNTERS):
         assert type(metrics.get(key)) is int and metrics[key] >= 0, (key, metrics)
     return metrics
 
@@ -187,6 +247,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                  "-T", str(directory), "-i", str(TICK_SECONDS), "--duration", "90", "-q", "-v"],
                 stdout=subprocess.DEVNULL, stderr=err, env=env)
             after = None
+            pids = set()
             try:
                 wait_for(proc, lambda: (directory / "pgwt.sock").exists(), 45,
                          "daemon control socket did not become ready")
@@ -197,7 +258,9 @@ def run_arm(pm_pid, skip_store, churn=False):
                 def retired():
                     text = log.read_text()
                     exited = {int(pid) for pid in re.findall(r"INFO: PID (\d+) exited \(", text)}
-                    return pids <= exited
+                    raced = set(exit_race_diagnostics(text))
+                    before_attach = {int(pid) for pid in re.findall(r"EXIT-BEFORE-ATTACH: pid=(\d+) ", text)}
+                    return pids <= exited | raced | before_attach
                 wait_for(proc, retired, 10, "not every cohort EXIT was handled")
                 after = ctl(directory)
                 text = log.read_text()
@@ -211,7 +274,8 @@ def run_arm(pm_pid, skip_store, churn=False):
                     after["lifecycle_init_lost_no_opportunity_total"]), after
                 assert hint_delta > 0, "no bootstrap INIT hint was actually suppressed"
                 for key in ("ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
-                            "state_map_full_total", "wp_attach_failures_total"):
+                            "state_map_full_total", "init_state_read_fail_total",
+                            "wp_attach_failures_total"):
                     assert after[key] == 0, (key, after[key])
                 attach_counts = Counter(int(pid) for pid in re.findall(r"INFO: PID (\d+) initialized \(", text))
                 attached = set(attach_counts)
@@ -227,12 +291,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                     assert pids - attached, "control attached everything despite discarding all INIT facts"
                 else:
                     assert after["lifecycle_init_lost_with_opportunity_total"] == 0, after
-                    no_opportunity = {int(pid) for pid in re.findall(
-                        r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=1(?: |$)", text)}
-                    assert not (attached & no_opportunity), "attached backend counted lost"
-                    assert pids <= attached | no_opportunity, (
-                        f"backends not attached or counted without opportunity: "
-                        f"{sorted(pids - attached - no_opportunity)}")
+                    check_cohort(text, pids, short_lived, before, after)
                     # Every attached member attaches once, including delayed hints.
                     for pid in pids & attached:
                         assert attach_counts[pid] == 1, pid
@@ -241,13 +300,14 @@ def run_arm(pm_pid, skip_store, churn=False):
                       f"{len(pids & attached)}/{len(pids)} attached, "
                       f"hint drops +{hint_delta}, INIT lost +{lost_delta}, "
                       f"attach exit races {after['wp_attach_exit_race_total']}, "
+                      f"exit before attach {after[EXIT_BEFORE_ATTACH]}, "
                       f"with opportunity {after['lifecycle_init_lost_with_opportunity_total']}, "
                       f"no opportunity {after['lifecycle_init_lost_no_opportunity_total']}, "
                       f"untraced ns {after['lifecycle_init_lost_untraced_ns_total']}, "
                       f"{len(short_lived & pending)} pending backends shorter than a tick")
-            except Exception:
+            except Exception as error:
                 text = log.read_text()
-                print_failure_diagnostics(text, after)
+                print_failure_diagnostics(text, after, getattr(error, "pids", pids))
                 raise
             finally:
                 stop(proc)

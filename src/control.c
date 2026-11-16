@@ -380,6 +380,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     for (unsigned i = 0; i < sizeof(new_counters) / sizeof(*new_counters); ++i)
         cjson_add_counter(root, new_counters[i].name, cv.components[new_counters[i].component]);
     cjson_add_uint64(root, "init_state_read_fail_total", ctr->init_state_read_fail_total);
+    cjson_add_uint64(root, "lifecycle_exit_before_attach_total",
+                     ctr->lifecycle_exit_before_attach_total);
     cjson_add_uint64(root, "lifecycle_init_lost_total",
                      ctr->lifecycle_init_lost_total);
     cjson_add_uint64(root, "lifecycle_init_lost_with_opportunity_total",

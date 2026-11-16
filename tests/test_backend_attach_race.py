@@ -35,10 +35,11 @@ static struct pgwt_daemon d;
 static int attempts, enables, closes, stat_opens, stat_closes, stat_reads;
 static int target_state, operation_failed, enable_failure, open_error, anchor_error;
 static int resolve_ready, direct_inits, replacement;
-static int resolve_error, diagnostic_count;
+static int resolve_error, diagnostic_count, failure_reads, proof_state;
 static char diagnostic[1024];
 static int pinned_generation[32];
-enum { LIVE, GONE, ZOMBIE, FOREIGN, UNKNOWN, MALFORMED, REUSED };
+enum { LIVE, GONE, ZOMBIE, FOREIGN, UNKNOWN, MALFORMED, REUSED, EXITING,
+       EXITING_VSIZE, ZERO_VSIZE, INCOMPLETE, EMPTY_STAT, DEAD };
 #define CHECK(x, msg) do { if (!(x)) { fprintf(stderr, "FAIL %s\n", msg); exit(1); } } while (0)
 
 static int fake_open(const char *path, int flags)
@@ -63,6 +64,7 @@ static ssize_t fake_pread(int fd, void *buf, size_t size, off_t offset)
     CHECK(fd > 0 && fd <= stat_opens && offset == 0, "read retained stat fd");
     ++stat_reads;
     int state = operation_failed ? target_state : LIVE;
+    if (operation_failed && ++failure_reads == 2 && proof_state >= 0) state = proof_state;
     /* The pathname now names a live replacement with the SAME parent.
      * Only the retained handle still observes the original's exit. */
     if (state == REUSED)
@@ -71,9 +73,16 @@ static ssize_t fake_pread(int fd, void *buf, size_t size, off_t offset)
         errno = state == GONE ? ESRCH : EACCES;
         return -1;
     }
-    const char *line = state == ZOMBIE ? "42 (backend (worker)) Z 7" :
-                       state == FOREIGN ? "42 (backend (worker)) R 8" :
-                       state == MALFORMED ? "broken stat" : "42 (backend (worker)) R 7";
+    /* Ported proof fixtures from the escalation branch, limited to stat. */
+    char stat_line[512];
+    unsigned flags = state == EXITING || state == EXITING_VSIZE ? 4 : 0;
+    unsigned vsize = state == EXITING || state == ZERO_VSIZE ? 0 : 8192;
+    char status = state == ZOMBIE ? 'Z' : state == DEAD ? 'X' : 'R';
+    int parent = state == FOREIGN ? 8 : 7;
+    snprintf(stat_line, sizeof(stat_line), "42 (backend (worker)) %c %d 0 0 0 0 %u 0 0 0 0 0 0 0 0 0 0 0 0 123 %u", status, parent, flags, vsize);
+    const char *line = state == MALFORMED ? "broken stat" :
+                       state == INCOMPLETE ? "42 (backend) R 7" :
+                       state == EMPTY_STAT ? "" : stat_line;
     size_t len = strlen(line);
     CHECK(size > len, "stat buffer capacity");
     memcpy(buf, line, len);
@@ -127,7 +136,11 @@ static struct pgwt_backend *alloc_backend(struct pgwt_backend_table *bt, pid_t p
     return be;
 }
 struct pgwt_backend *pgwt_find_backend(struct pgwt_backend_table *bt, pid_t pid)
-{ (void)bt; (void)pid; return NULL; }
+{
+    for (int i = 0; i < bt->count; ++i)
+        if (bt->entries[i].pid == pid) return &bt->entries[i];
+    return NULL;
+}
 uint64_t pgwt_resolve_backend_wait_addr(struct pgwt_daemon *ctx, pid_t pid)
 { (void)ctx; (void)pid; errno = resolve_error; return resolve_ready ? 1234 : 0; }
 int pgwt_handle_init(struct pgwt_daemon *ctx, pid_t pid, uint64_t addr, uint64_t ts)
@@ -165,72 +178,102 @@ static void reset(int state)
     attempts = enables = closes = stat_opens = stat_closes = stat_reads = 0;
     operation_failed = enable_failure = anchor_error = resolve_ready = direct_inits = replacement = 0;
     open_error = ESRCH; target_state = state;
-    resolve_error = EFAULT; diagnostic_count = 0; diagnostic[0] = '\0';
+    resolve_error = EFAULT; failure_reads = 0; proof_state = -1; diagnostic_count = 0; diagnostic[0] = '\0';
 }
-static void check_counts(int state)
+static void check_counts(int state, int error)
 {
-    int gone = state == GONE || state == ZOMBIE || state == FOREIGN || state == REUSED;
+    int gone = error == ESRCH && (state == GONE || state == ZOMBIE ||
+               state == DEAD || state == REUSED || state == EXITING);
     CHECK(d.counters.wp_attach_failures_total == (uint64_t)!gone,
           "live or unknown failure stays a real failure");
     CHECK(d.counters.wp_attach_exit_race_total == (uint64_t)gone,
           "confirmed exit counted separately");
-    CHECK(d.counters.wp_attach_failures_live_total == (uint64_t)(state == LIVE),
+    int live = state == LIVE || state == EXITING || state == EXITING_VSIZE ||
+               state == ZERO_VSIZE || state == INCOMPLETE;
+    CHECK(d.counters.wp_attach_failures_live_total == (uint64_t)(!gone && live),
           "live diagnostic count");
     CHECK(d.counters.wp_attach_failures_unknown_total ==
-          (uint64_t)(state == UNKNOWN || state == MALFORMED), "unknown diagnostic count");
+          (uint64_t)(!gone && !live), "unknown diagnostic count");
     CHECK(attempts == 1, "exactly one hardware attempt");
     CHECK(stat_opens == stat_closes, "retained handles closed");
 }
 static void check_record(int state, const char *site, int error, int resolution_error)
 {
-    int live = state == LIVE ? 1 : state == UNKNOWN || state == MALFORMED ? -1 : 0;
-    int read_error = state == UNKNOWN ? EACCES : state == MALFORMED ? EINVAL : 0;
+    int live = state == UNKNOWN || state == MALFORMED || state == EMPTY_STAT ? -1 :
+               state == GONE || state == ZOMBIE || state == DEAD ||
+               state == FOREIGN || state == REUSED ? 0 : 1;
+    int read_error = state == UNKNOWN ? EACCES : state == MALFORMED ? EINVAL :
+                     state == EMPTY_STAT ? EIO : 0;
     char expected[1024];
     snprintf(expected, sizeof(expected),
              "WP-ATTACH-FAIL: pid=42 site=%s errno=%d resolve_errno=%d "
-             "liveness=%s liveness_result=%d liveness_errno=%d\n",
+             "liveness=%s liveness_result=%d liveness_errno=%d exit_proof=%d\n",
              site, error, resolution_error,
-             live > 0 ? "live" : live == 0 ? "gone" : "unknown", live, read_error);
+             error == ESRCH && state == EXITING ? "exiting" :
+             live > 0 ? "live" : live == 0 ? "gone" : "unknown", live, read_error,
+             error != ESRCH ? 0 : state == EXITING ? 2 :
+             state == GONE || state == ZOMBIE || state == DEAD || state == REUSED ? 1 :
+             state == UNKNOWN || state == MALFORMED || state == FOREIGN ||
+             state == INCOMPLETE || state == EMPTY_STAT ? -1 : 0);
     CHECK(diagnostic_count == 1, "one diagnostic per recorded failure");
     CHECK(strcmp(diagnostic, expected) == 0, "exact failure evidence");
 }
 int main(void)
 {
     int errors[] = {ESRCH, EACCES, EMFILE, ENOSPC, EIO};
-    for (int state = LIVE; state <= REUSED; ++state) {
+    for (int state = LIVE; state <= DEAD; ++state) {
         for (size_t i = 0; i < sizeof(errors)/sizeof(errors[0]); ++i) {
             reset(state); open_error = errors[i];
             struct pgwt_backend be = {.pid=42, .wp_addr=1234, .wp_fd=-1};
             CHECK(pgwt_attach_backend_watchpoint(&d, &be) == -1, "real open failure returned");
             CHECK(errno == open_error, "hardware errno preserved");
-            check_counts(state);
+            check_counts(state, open_error);
             check_record(state, "watchpoint_open", open_error, 0);
             if (i == 0 && (state == LIVE || state == GONE || state == UNKNOWN))
                 fputs(diagnostic, stdout);
-            CHECK(stat_reads == 1, "post-failure liveness read");
+            CHECK(stat_reads == 1 + (open_error == ESRCH), "post-failure liveness and proof reads");
 
             reset(state); open_error = errors[i];
             CHECK(pgwt_handle_fork(&d, 42) == -1, "bootstrap failure returned");
             CHECK(errno == open_error, "bootstrap hardware errno preserved");
-            check_counts(state);
+            check_counts(state, open_error);
             check_record(state, "bootstrap_watchpoint_open/backend_wait_addr_resolve",
                          open_error, EFAULT);
-            CHECK(stat_reads == 2, "eligibility and post-failure reads");
+            CHECK(stat_reads == 2 + (open_error == ESRCH), "eligibility and post-failure proof reads");
+            if (open_error == ESRCH && state == EXITING) {
+                CHECK(d.backends.entries[0].wp_attach_exit_race &&
+                      d.backends.entries[0].pid == 42, "retain counted exit identity");
+                CHECK(pgwt_attach_backend_watchpoint(&d, &d.backends.entries[0]) == -1 &&
+                      attempts == 1, "proven exit is never retried");
+            }
         }
         reset(state); enable_failure = 1;
         struct pgwt_backend be = {.pid=42, .wp_addr=1234, .wp_fd=-1};
         CHECK(pgwt_attach_backend_watchpoint(&d, &be) == -1, "enable failure returned");
         CHECK(errno == EIO, "enable errno preserved after cleanup");
-        check_counts(state);
+        check_counts(state, EIO);
         check_record(state, "watchpoint_enable", EIO, 0);
         CHECK(enables == 1 && closes == 1 && be.wp_fd == -1, "enable failure cleans up");
     }
+    /* The pinned task can change between the diagnostic read and proof.
+     * Only the actual proof result decides the counter and PID class. */
+    reset(GONE); proof_state = UNKNOWN;
+    struct pgwt_backend changing = {.pid=42, .wp_addr=1234, .wp_fd=-1};
+    CHECK(pgwt_attach_backend_watchpoint(&d, &changing) == -1, "changing proof failure returned");
+    CHECK(d.counters.wp_attach_failures_total == 1 &&
+          d.counters.wp_attach_exit_race_total == 0 && strstr(diagnostic, "exit_proof=-1"),
+          "unknown second read refuses exit classification");
+    reset(LIVE); proof_state = GONE;
+    CHECK(pgwt_attach_backend_watchpoint(&d, &changing) == -1, "exit during proof returned");
+    CHECK(d.counters.wp_attach_failures_total == 0 &&
+          d.counters.wp_attach_exit_race_total == 1 && strstr(diagnostic, "liveness=gone") &&
+          strstr(diagnostic, "exit_proof=1"), "positive second read records proven exit");
     reset(LIVE); resolve_error = 0;
     CHECK(pgwt_handle_fork(&d, 42) == -1, "unassigned bootstrap pointer handled");
     CHECK(errno == ESRCH, "unassigned pointer preserves bootstrap errno");
     check_record(LIVE, "bootstrap_watchpoint_open/backend_wait_addr_resolve", ESRCH, 0);
-    puts("real open, bootstrap open, enable: gone +1 race/+0 failures; live/unknown +1 failure: PASS");
-    puts("same-parent PID reuse retains original handle; errno independent classification: PASS");
+    puts("real open, bootstrap open, enable: ESRCH+gone/exiting +1 race; live/unknown/other errno +1 failure: PASS");
+    puts("same-parent PID reuse retains original handle; ESRCH plus positive proof required: PASS");
 
     int errors_before[] = {ENOENT, ESRCH, EACCES, EMFILE};
     for (size_t i = 0; i < sizeof(errors_before)/sizeof(errors_before[0]); ++i) {
@@ -245,7 +288,7 @@ int main(void)
         CHECK(d.counters.wp_attach_failures_unknown_total == (uint64_t)!gone &&
               d.counters.wp_attach_failures_live_total == 0, "identity diagnostic counts");
         char expected[64];
-        snprintf(expected, sizeof(expected), "liveness_errno=%d\n", gone ? 0 : anchor_error);
+        snprintf(expected, sizeof(expected), "liveness_errno=%d exit_proof=", gone ? 0 : anchor_error);
         CHECK(diagnostic_count == 1 && strstr(diagnostic, expected), "identity read errno recorded");
     }
     reset(LIVE); anchor_error = EACCES;
@@ -345,7 +388,8 @@ def check_bounded_failure_output():
     metrics = dict.fromkeys((
         "lifecycle_init_lost_total", "lifecycle_init_lost_with_opportunity_total",
         "lifecycle_init_lost_no_opportunity_total", "lifecycle_init_lost_untraced_ns_total",
-        "lifecycle_init_hint_drops_total", "ringbuf_lifecycle_fork_drops_total",
+        "lifecycle_init_hint_drops_total", "init_state_read_fail_total",
+        recovery.EXIT_BEFORE_ATTACH, "ringbuf_lifecycle_fork_drops_total",
         "ringbuf_lifecycle_exit_drops_total", "state_map_full_total", *ATTACH_COUNTERS), 0)
     after = {**metrics, "lifecycle_init_hint_drops_total": 1,
              "wp_attach_failures_total": 1, "wp_attach_failures_unknown_total": 1}
@@ -382,7 +426,7 @@ def check_bounded_failure_output():
     text = output.getvalue()
     assert "unrelated daemon noise" not in text and diagnostic in text, text
     assert "'wp_attach_failures_unknown_total': 1" in text, text
-    assert len(text.splitlines()) <= 9, text  # three titled sections, one line, counters, error
+    assert len(text.splitlines()) <= 14, text  # three titled sections, one line, counters, error
     print("Forced churn failure output (23,000 unrelated log lines excluded):")
     print(text, end="")
     # Bound both selected streams, including pathological line width.
@@ -393,7 +437,7 @@ def check_bounded_failure_output():
             for prefix in ("INIT-LOST:", "WP-ATTACH-FAIL:", "ERROR: cannot validate lifecycle target")
             for i in range(100)), after)
     lines = output.getvalue().splitlines()
-    assert len(lines) == 124 and sum("last 40 of 100" in line for line in lines) == 3
+    assert len(lines) == 126 and sum("last 40 of 100" in line for line in lines) == 3
     assert all(len(line) <= 512 for line in lines[:-1])
     print("bounded failure streams: last 40 each, 512 chars/line: PASS")
 
@@ -406,6 +450,7 @@ def main():
     cmdline = (ROOT / "src/cmdline.c").read_text()
     functions = "\n\n".join([
         function(cmdline, "pgwt_backend_target_live_fd"),
+        function(cmdline, "pgwt_backend_no_command_fd"),
         function(cmdline, "pgwt_backend_target_live"),
         *(function(backend, name) for name in (
             "open_watchpoint_target", "record_watchpoint_failure",
@@ -416,12 +461,20 @@ def main():
         assert f'cjson_add_uint64(root, "{name}",' in control
     variants = [("baseline", functions, None)]
     if args.mutants:
-        needle = "if (live == 0)\n        d->counters.wp_attach_exit_race_total++;"
+        needle = "bool exit_race = error == ESRCH && proof > 0;"
         assert functions.count(needle) == 1
         variants.append(("every_failure_is_exit_race", functions.replace(
-            needle, "if (1)\n        d->counters.wp_attach_exit_race_total++;"),
+            needle, "bool exit_race = true;"),
                          "FAIL live or unknown failure stays a real failure"))
         for name, old, new, intended in (
+            ("missing_exit_race_count", "wp_attach_exit_race_total++", "wp_attach_exit_race_total += 0",
+             "confirmed exit counted separately"),
+            ("ESRCH_alone_excused", "error == ESRCH && proof > 0", "error == ESRCH && proof >= -1",
+             "live or unknown failure stays a real failure"),
+            ("PF_EXITING_mask_wrong", "flags & 0x4ULL", "flags & 0x8ULL",
+             "live or unknown failure stays a real failure"),
+            ("ignore_vsize", "(flags & 0x4ULL) && vsize == 0", "(flags & 0x4ULL) && vsize >= 0",
+             "live or unknown failure stays a real failure"),
             ("missing_live_count", "wp_attach_failures_live_total++", "wp_attach_failures_live_total += 0",
              "live diagnostic count"),
             ("missing_unknown_count", "wp_attach_failures_unknown_total++", "wp_attach_failures_unknown_total += 0",
@@ -434,7 +487,7 @@ def main():
              "exact failure evidence"),
             ("gone_logged_live", 'live == 0 ? "gone"', 'live == 0 ? "live"',
              "exact failure evidence"),
-            ("unknown_logged_gone", ': "unknown", live, live_error', ': "gone", live, live_error',
+            ("unknown_logged_gone", ': "unknown",\n            live, live_error, proof', ': "gone",\n            live, live_error, proof',
              "exact failure evidence"),
             ("lost_resolution_errno", "pid, site, error, resolve_error,", "pid, site, error, resolve_error * 0,",
              "exact failure evidence"),

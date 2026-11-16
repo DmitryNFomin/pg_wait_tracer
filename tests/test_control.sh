@@ -151,7 +151,8 @@ import json, sys
 r = json.load(sys.stdin)
 assert r['ok'] is True, r
 for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
-          'wp_attach_failures_total', 'backends_tracked',
+          'wp_attach_failures_total', 'wp_attach_exit_race_total',
+          'wp_attach_failures_live_total', 'wp_attach_failures_unknown_total', 'backends_tracked',
           'trace_events_written_total', 'trace_bytes_written_total',
           'uptime_s',
           # Per-site event-ring and lifecycle/query-text reserve failures.
@@ -160,6 +161,7 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'ringbuf_marker_drops_total',
           'ringbuf_command_boundary_drops_total',
           'lifecycle_init_hint_drops_total', 'lifecycle_init_lost_total',
+          'lifecycle_exit_before_attach_total',
           'lifecycle_init_lost_with_opportunity_total',
           'lifecycle_init_lost_no_opportunity_total',
           'lifecycle_init_lost_untraced_ns_total',

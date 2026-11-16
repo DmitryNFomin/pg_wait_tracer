@@ -308,17 +308,21 @@ static int open_watchpoint_target(pid_t pid)
     return fd >= 0 ? fd : -errno;
 }
 
-/* Failure-only diagnostics. The legacy split deliberately ignores errno;
- * these observations allow a later box run to establish a stricter rule. */
+/* ESRCH is excused only with positive proof from the original pinned task. */
 static void record_watchpoint_failure(struct pgwt_daemon *d, int target_fd,
                                       pid_t pid, const char *site,
                                       int error, int resolve_error)
 {
     int live = pgwt_backend_target_live_fd(target_fd, d->postmaster_pid);
     int live_error = live < 0 ? errno : 0;
-    if (live == 0)
+    int proof = error == ESRCH
+              ? pgwt_backend_no_command_fd(target_fd, d->postmaster_pid) : 0;
+    bool exit_race = error == ESRCH && proof > 0;
+    if (exit_race) {
         d->counters.wp_attach_exit_race_total++;
-    else {
+        struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+        if (be) be->wp_attach_exit_race = true;
+    } else {
         d->counters.wp_attach_failures_total++;
         if (live > 0)
             d->counters.wp_attach_failures_live_total++;
@@ -327,9 +331,11 @@ static void record_watchpoint_failure(struct pgwt_daemon *d, int target_fd,
     }
     fprintf(stderr,
             "WP-ATTACH-FAIL: pid=%d site=%s errno=%d "
-            "resolve_errno=%d liveness=%s liveness_result=%d liveness_errno=%d\n",
+            "resolve_errno=%d liveness=%s liveness_result=%d liveness_errno=%d exit_proof=%d\n",
             pid, site, error, resolve_error,
-            live > 0 ? "live" : live == 0 ? "gone" : "unknown", live, live_error);
+            proof == 2 ? "exiting" : proof == 1 ? "gone" :
+            live > 0 ? "live" : live == 0 ? "gone" : "unknown",
+            live, live_error, proof);
     if (target_fd >= 0) close(target_fd);
     errno = error;
 }
@@ -337,6 +343,7 @@ static void record_watchpoint_failure(struct pgwt_daemon *d, int target_fd,
 int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
                                    struct pgwt_backend *be)
 {
+    if (be->wp_attach_exit_race) { errno = ESRCH; return -1; }
     if (be->wp_addr == 0 || be->wp_fd >= 0)
         return be->wp_fd >= 0 ? 0 : -1;
 
@@ -386,6 +393,7 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
         errno = error;
         return -1;
     }
+    be->init_attached = true; /* retained proof of a completed real attachment */
     pgwt_debug_block_end(d, "watchpoint_enable", be->pid, started_ns);
     if (target_fd >= 0) close(target_fd);
     return 0;
@@ -563,9 +571,7 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
          * time is not lost). The same helper is reused on escalation. */
         be->attach_ts = now_ns();
         if (pgwt_attach_backend_watchpoint(d, be) != 0) {
-            /* Silently skip — process likely exited before attach */
-            be->is_alive = false;
-            be->pid = 0;
+            /* Retain identity and any counted exit proof until EXIT cleanup. */
             continue;
         }
 
@@ -631,7 +637,7 @@ int pgwt_recover_unattached_backends(struct pgwt_daemon *d)
         /* Already attached with a live watchpoint — nothing to recover. This
          * is the common case (every healthy backend), kept cheap. */
         struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
-        if (be && be->wp_fd >= 0)
+        if (be && (be->wp_fd >= 0 || be->wp_attach_exit_race))
             continue;
 
         /* Postmaster child? (ppid == postmaster, field 4 of /proc/pid/stat). */
@@ -964,8 +970,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
         record_watchpoint_failure(d, target_fd, child_pid,
                                   "bootstrap_watchpoint_open/backend_wait_addr_resolve",
                                   error, resolve_error);
-        be->is_alive = false;
-        be->pid = 0;
+        /* Retain identity and the counted exit proof until final EXIT cleanup. */
         return -1;
     }
     pgwt_debug_block_end(d, "bootstrap_watchpoint_open", child_pid, started_ns);
@@ -1069,6 +1074,8 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
         be = alloc_backend(&d->backends, pid, d->pg_major_version == 13);
         if (!be) return -1;
     }
+
+    if (be->wp_attach_exit_race) { errno = ESRCH; return -1; }
 
     /* Close bootstrap watchpoint if any */
     pgwt_pending_init_remove(&d->backends, be);
@@ -1206,8 +1213,14 @@ int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
      * INIT evidence even if enrollment/attach failed before registry entry.
      * Deleting the entry below makes repeated EXIT cleanup idempotent. */
     uint64_t init_ts;
-    if (pgwt_exit_init_lost(be, pid, d, read_init_state, &init_ts))
+    bool before_attach;
+    if (pgwt_exit_init_lost(be, pid, d, read_init_state, &init_ts, &before_attach))
         record_init_loss(d, pid, init_ts, exit_ts);
+    else if (before_attach && pgwt_mode_uses_watchpoints(d)) {
+        d->counters.lifecycle_exit_before_attach_total++;
+        fprintf(stderr, "EXIT-BEFORE-ATTACH: pid=%d exited before real attach; "
+                "INIT/opportunity unknown\n", pid);
+    }
     if (be)
         be->bootstrap_fd = -1;
 

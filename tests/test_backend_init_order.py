@@ -206,7 +206,7 @@ def main():
     assert loop.index("pgwt_sweep_bootstrap_backends(d);", wake) < fd_loop
     assert "pgwt_handle_exit_at(d, ev->pid, ev->timestamp);" in function(
         daemon, "process_lifecycle_event")
-    for name in ("lifecycle_init_lost_total",
+    for name in ("lifecycle_exit_before_attach_total", "lifecycle_init_lost_total",
                  "lifecycle_init_lost_with_opportunity_total",
                  "lifecycle_init_lost_no_opportunity_total",
                  "lifecycle_init_lost_untraced_ns_total"):

@@ -1049,6 +1049,17 @@ assertion unchanged.
   `writer_push_fail_total` counts rejected calls for both events and sample
   batches, including every later push after an open or flush failure.
   Intentional no-recording remains a successful no-op.
+  `wp_attach_exit_race_total` counts ESRCH with a positive pinned-task exit
+  proof (gone/Z/X, or PF_EXITING plus zero vsize). Each counted operation emits
+  `WP-ATTACH-FAIL` with errno=3; the PF_EXITING class has `liveness=exiting`.
+  `lifecycle_exit_before_attach_total` counts a retired state entry that never
+  attached and has no INIT evidence, excluding an already-counted attach exit
+  race. Each counted PID emits `EXIT-BEFORE-ATTACH`; INIT time and opportunity
+  remain unknown, with no invented duration or no-opportunity classification.
+  Both counters appear as information in rehearsal JSON, outside
+  `DAEMON_INTEGRITY_COUNTERS` pending an owner decision. Unknown INIT/opportunity
+  cannot inherit the owner's no-opportunity exclusion. The frozen merge-v1
+  vector schema is unchanged.
   `lifecycle_init_lost_total` counts an unattached backend with
   missing state, or INIT evidence never attached before backend exit. A missing
   state entry at bootstrap is only diagnostic (`lifecycle_init_no_state_total`):

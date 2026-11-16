@@ -1134,6 +1134,9 @@ def daemon_integrity_ok(metrics):
     "Count, don't fail (Recommended)": total losses, no-opportunity losses
     and their untraced ns are reported as information; only
     lifecycle_init_lost_with_opportunity_total gates INIT integrity.
+    wp_attach_exit_race_total and lifecycle_exit_before_attach_total are
+    reported outside this gate pending an owner decision. The latter has
+    unknown INIT/opportunity and cannot claim the no-opportunity exclusion.
     The final per-pid exit sweep
     recognises raced INITs but cannot recover coverage after exit. The BPF
     lifecycle_init_no_state_total diagnostic alone does not decide loss:

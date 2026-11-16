@@ -313,6 +313,30 @@ direct connection.
 - `anomaly_fires_total`, `anomaly_near_total`, `anomaly_dropped_budget_total`,
   `anomaly_dropped_cooldown_total`, `anomaly_baseline_aas`
 
+`wp_attach_exit_race_total` counts failed watchpoint operations only when errno
+is ESRCH and the pinned original task is gone, Z/X, or has both PF_EXITING and
+zero vsize. PF_EXITING proof is logged as `liveness=exiting` in
+`WP-ATTACH-FAIL` (`exit_proof=1` for gone/Z/X, `2` for PF_EXITING).
+ESRCH alone remains `wp_attach_failures_total`. Other errnos
+remain failures even when the target has gone. The live/unknown subsets are
+`wp_attach_failures_live_total` and `wp_attach_failures_unknown_total`.
+
+In watchpoint capture, `lifecycle_exit_before_attach_total` counts a state
+entry retired before any
+real watchpoint attached, with no retained INIT evidence. Each counted PID has
+an `EXIT-BEFORE-ATTACH` diagnostic. A previously counted attach exit race is
+excluded. INIT time and attach opportunity are unknown: this counter adds no
+INIT timestamp, duration, or no-opportunity loss. Retained INIT evidence still
+uses `lifecycle_init_lost_total`, split into
+`lifecycle_init_lost_with_opportunity_total` and
+`lifecycle_init_lost_no_opportunity_total`; the latter's duration is
+`lifecycle_init_lost_untraced_ns_total`.
+
+Both retirement counters are reported outside `DAEMON_INTEGRITY_COUNTERS`.
+Whether they should gate integrity needs an owner decision: an attach exit race
+proves task exit, while exit-before-attach leaves INIT/opportunity unknown and
+must not inherit the no-opportunity exclusion.
+
 ## Operating Modes
 
 pg_wait_tracer has three operating modes:

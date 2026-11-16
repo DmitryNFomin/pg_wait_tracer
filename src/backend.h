@@ -22,7 +22,8 @@ struct pgwt_backend {
     int      wp_addr_shared;
     uint64_t attach_ts;        /* monotonic ns when attached */
     uint64_t init_ts;          /* captured bootstrap time; 0 for direct attach */
-    bool     init_attached;    /* INIT attach completed, retained across tiers */
+    bool     init_attached;    /* real attach completed, retained across tiers */
+    bool     wp_attach_exit_race; /* proven exit already counted; retain until EXIT */
     bool     is_alive;
     /* meta has been filled by pgwt_parse_cmdline. A zeroed meta reads as
      * backend_type == CLIENT (enum value 0), which is WRONG for an unparsed

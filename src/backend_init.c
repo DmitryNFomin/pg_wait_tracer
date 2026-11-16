@@ -69,8 +69,9 @@ bool pgwt_stored_init_lost(const struct pgwt_backend *be,
 
 bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
                          void *ctx, pgwt_init_state_reader read_state,
-                         uint64_t *init_ts)
+                         uint64_t *init_ts, bool *before_attach)
 {
+    *before_attach = false;
     *init_ts = be ? be->init_ts : 0;
     struct pgwt_pid_state st = {0};
     int rc = read_state(ctx, pid, &st);
@@ -85,5 +86,11 @@ bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
         return false;
     if (st.init_ts)
         *init_ts = st.init_ts;
-    return pgwt_stored_init_lost(be, &st);
+    /* With the producer quiesced, retained INIT facts also preclude the
+     * no-evidence retirement class even if publication was interrupted. */
+    bool lost = pgwt_stored_init_lost(be, &st) ||
+                ((!be || !be->init_attached) && (st.init_ts || st.init_wait_addr));
+    *before_attach = !lost && (!be || (!be->init_attached &&
+                                     !be->wp_attach_exit_race));
+    return lost;
 }
