@@ -227,7 +227,7 @@ cmd_create() {
             --arg loc "$loc" \
             --argjson key "$ssh_key_id" \
             --argjson labels "$labels_json" \
-            '{name:$name, server_type:$st, image:$img, location:$loc, ssh_keys:[$key], user_data:$ud, labels:$labels}' \
+            '{name:$name, server_type:$st, image:$img, location:$loc, ssh_keys:[$key], user_data:$ud, labels:$labels, public_net:{enable_ipv4:true, enable_ipv6:false}}' \
             | curl -s -X POST "$API/servers" \
                 -H "Authorization: Bearer $HCLOUD_TOKEN" \
                 -H "Content-Type: application/json" \
