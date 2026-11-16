@@ -169,7 +169,7 @@ def main():
     pm_pid = args.pid or find_postmaster()
     assert pm_pid, "no postmaster for capture live test"
     assert INSPECTOR.is_file(), "build tests/test_evidence_capture before live tier"
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip() or "unknown (no .git: box-check syncs the tree without it)"
     print(f"capture live commit={commit}", flush=True)
     unknown = checkpointer(pm_pid)
     for label in ("optout", "optin", "tiny", "unwritable"):
