@@ -845,7 +845,7 @@ the reader.
   with a 100 ms hold, rather than this unthrottled load; it does not settle
   the cause.
 
-  **B1 round 2 (consumer changes only; no new box result):** every single
+  **B1 round 2 (`f38ebdd0`, consumer changes only):** every single
   `ring_buffer__consume` call is timed, and the L callback samples
   producer-minus-consumer bytes on every record, including TEXT and
   boundaries. EXIT only marks its matching PID/cookie slot for close,
@@ -883,6 +883,65 @@ the reader.
   calls, the next step is a failure-time snapshot of positions and length
   in the BPF reservation path, kept outside the ring (A1). Every L failure
   still fails the run; this round makes no new Linux measurement claim.
+
+  **B1 round 2 box result on `f38ebdd0` (supplied by the lead, Ubuntu
+  6.8, `pgwt-gate-2`):** PG18 churn passed 10 of 10 runs, with every
+  ringbuf site drop counter 0 (previously FORK 9 and EXIT 13). Changing only
+  the consumer settled those earlier drops as probe lag. Deferred teardown
+  still took about 71,000–83,000 us per backend, with 11,998–15,505
+  teardowns per run. PG13 churn stopped at the first run: twelve
+  `PROBE-FAIL: probe backend registry full` lines, drops 0, lifecycle-ring
+  peak 10,112 / 65,536 bytes, teardown total 11,101 and attaches total 938.
+  The PG13 and PG18 full tests passed; the deliberate spin arm had four
+  FORK drops. Evidence: `tests/results/session-20261116/b1-r2-f38ebdd0/`
+  on the lead's machine. These are dispatch measurements, not runs made
+  during round 3.
+
+  **B1 round 3 (probe only):** activity and query uprobes now attach once,
+  with pid -1, like `src/exact_probe.c`. PG13 selects
+  `on_executor_start`; PG17+ selects `on_report_query_id`. The links live
+  until probe shutdown, including when their original backends exit. The
+  self-reuse arm attaches no PostgreSQL uprobes. A global attach error
+  fails setup, and partial setup releases its successfully attached link.
+  Backend teardown closes only its bootstrap/wait watchpoint descriptors
+  (normally only the remaining wait descriptor), then clears the slot.
+  After each drain all closing slots are reclaimed outside the callback;
+  the former K=1 queue of costly link destructions is gone. Consume and
+  per-backend teardown timing keep their existing meanings; global link
+  destruction at shutdown is not backend teardown. Backend service now
+  attempts at most one watchpoint attach before draining; the two startup
+  global attaches also contribute to the attach statistics.
+
+  PID/cookie and FORK/EXIT-position checks still read the wire records and
+  the retained per-cookie identity table, including TEXT records that can
+  arrive before watchpoint attachment. A closing slot remains reserved
+  until its descriptors are closed. Exhausting the fixed backend slots
+  still fails, now with `used`, `size`, `closing`, `pending`, `active`,
+  `boot_fds` and `wait_fds` counts. Pending excludes closing; active is the
+  remaining occupied slots, not a claim that those tasks are still live.
+  The added exit diagnostic, forwarded on successful live runs too, is:
+
+  ```text
+  PROBE-STAT: registry max_used=<peak occupied backend slots> size=<MAX_BACKENDS>
+  ```
+
+  The host simulation runs the actual registration, instrumentation, record
+  callback and teardown functions with 4,096 arrivals at 1,000 backends/s,
+  after 16 instrumented backends exit together. Descriptor closes advance
+  a simulated clock by 1 us, and each link destruction by 37.5 ms (75 ms
+  per backend for the restored two-link path). The global-link version
+  retires every lifetime without registry exhaustion. A built mutant
+  restores per-backend attaches and destroys and must fill the registry,
+  failing `FAIL churn registry accepts backends without exhaustion`.
+  The callback, reserved-slot and drain-between-attaches mutants remain
+  required. This is a synthetic regression, not a Linux throughput claim.
+
+  For the next box run, read **all eleven PROBE-STAT lines**: the four
+  site-drop counters, lifecycle-ring peak/size/samples, attaches, proc_reads,
+  consume max_us/calls, in-callback occupancy, teardown max_us/total, and
+  registry max_used/size. Compare teardown cost and registry occupancy on
+  PG13 churn against the dispatch measurement above. All L failure gates
+  remain strict. This revision has no new Linux measurement result.
 
 ### What is still unproven, and what was found
 

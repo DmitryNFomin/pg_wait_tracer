@@ -35,7 +35,6 @@ struct probe_backend {
      * raced: an attach step met the exit race; nothing more is attempted.
      * closing: teardown queued; keep the slot occupied and never attach. */
     bool pending, raced, closing;
-    struct bpf_link *activity, *query;
 };
 struct probe_helper {
     pthread_t thread; struct transport_request_channel channel;
@@ -53,7 +52,7 @@ struct probe_stats {
     struct probe_work_stat attaches, proc_reads;
     u64 lifecycle_peak, lifecycle_size, lifecycle_samples;
     u64 lifecycle_callback_peak, consume_max_ns, consume_calls;
-    u64 teardown_max_ns, teardown_total;
+    u64 teardown_max_ns, teardown_total, registry_max_used;
     u64 site_drops[4]; bool sites_valid;
 };
 static void probe_note_work(struct probe_work_stat *work)
@@ -65,7 +64,7 @@ struct probe {
     struct probe_stats stats; bool loaded;
     struct pg_wait_tracer_bpf *skel;
     struct ring_buffer *rings; struct perf_buffer *perf;
-    struct bpf_link *fork, *exit, *helper;
+    struct bpf_link *fork, *exit, *helper, *activity, *query;
     struct probe_identity *identities; size_t identities_cap;
     struct probe_pid_cookie *pid_lifetimes;
     struct probe_backend backends[MAX_BACKENDS];
@@ -127,7 +126,6 @@ static void probe_close_backend(struct probe_backend *b)
 {
     if (b->boot >= 0) close(b->boot);
     if (b->wait >= 0) close(b->wait);
-    bpf_link__destroy(b->activity); bpf_link__destroy(b->query);
     memset(b, 0, sizeof(*b)); b->boot = b->wait = -1;
 }
 static void probe_fail(struct probe *p, const char *why)
@@ -271,18 +269,27 @@ static void probe_new_backend(struct probe *p, u32 pid, u64 cookie)
 {
     if (p->self || p->stopping) return;
     struct probe_backend *slot = NULL;
+    unsigned used=0, closing=0, pending=0, boot=0, wait=0;
     for (int i=0; i<MAX_BACKENDS; ++i) {
-        if (p->backends[i].pid == pid) p->backends[i].closing = true;
-        if (!p->backends[i].pid && !slot) slot = &p->backends[i];
+        struct probe_backend *b = &p->backends[i];
+        if (b->pid == pid) b->closing = true;
+        if (!b->pid) { if (!slot) slot=b; continue; }
+        ++used;
+        closing += b->closing;
+        pending += b->pending && !b->closing;
+        boot += b->boot >= 0;
+        wait += b->wait >= 0;
     }
-    if (!slot) { probe_fail(p, "probe backend registry full"); return; }
-    /* Registration only. This runs inside the lifecycle ring's consume
-     * callback: a watchpoint and two per-pid uprobes per FORK here kept the
-     * reader from the 64 KiB ring for milliseconds per connection, and under
-     * `pgbench -C` the ring then refused reservations (measured as sequence
-     * gaps and lost FORK records). The main loop instruments pending
-     * backends between drains. */
+    if (!slot) {
+        fprintf(stderr, "PROBE-FAIL: backend slots exhausted used=%u size=%u closing=%u pending=%u active=%u boot_fds=%u wait_fds=%u\n",
+            used, (unsigned)MAX_BACKENDS, closing, pending, used-closing-pending, boot, wait);
+        p->failed=1; return;
+    }
+    /* Registration only inside the lifecycle callback. Uprobes belong to
+     * the whole probe; only per-backend watchpoints are deferred to the
+     * main loop. No slow uprobe link destruction can hold these slots. */
     slot->pid = pid; slot->cookie = cookie; slot->boot = slot->wait = -1; slot->pending = true;
+    if (++used > p->stats.registry_max_used) p->stats.registry_max_used = used;
 }
 /* Main loop only, never from a ring callback. */
 static void probe_instrument(struct probe *p, struct probe_backend *b)
@@ -292,24 +299,36 @@ static void probe_instrument(struct probe *p, struct probe_backend *b)
     int fd = probe_watchpoint(p, b->pid, p->ptr, bpf_program__fd(p->skel->progs.on_bootstrap), true);
     if (fd < 0) { b->boot = -1; probe_attach_error(p, b, "open the bootstrap watchpoint", -fd); }
     else b->boot = fd;
-    /* Already gone: do not pay for two more attaches that can only fail. */
-    if (b->raced || p->failed) return;
+}
+/* Match the daemon's exact_probe.c: one link per symbol, all processes of
+ * this executable. Identity checks use each wire record's PID and cookie,
+ * never an attach-time PID or current BPF map entry. */
+static int probe_attach_uprobes(struct probe *p)
+{
+    if (p->self) return 0;
     if (p->activity_offset) {
         probe_note_work(&p->stats.attaches);
-        b->activity = bpf_program__attach_uprobe(p->skel->progs.on_report_activity, false,
-            (pid_t)b->pid, p->exe, (size_t)p->activity_offset);
-        long error = libbpf_get_error(b->activity);
-        if (error) { b->activity = NULL; probe_attach_error(p, b, "attach the activity uprobe", (int)-error); }
+        p->activity = bpf_program__attach_uprobe(p->skel->progs.on_report_activity, false,
+            -1, p->exe, (size_t)p->activity_offset);
+        long error = libbpf_get_error(p->activity);
+        if (error) { p->activity=NULL; probe_fail(p, "attach global activity uprobe"); return -1; }
     }
-    if (p->query_offset && !b->raced && !p->failed) {
+    if (p->query_offset) {
         struct bpf_program *program = p->skel->rodata->pg13_query_attr
             ? p->skel->progs.on_executor_start : p->skel->progs.on_report_query_id;
         probe_note_work(&p->stats.attaches);
-        b->query = bpf_program__attach_uprobe(program, false, (pid_t)b->pid, p->exe, (size_t)p->query_offset);
-        long error = libbpf_get_error(b->query);
-        if (error) { b->query = NULL; probe_attach_error(p, b, "attach the query uprobe", (int)-error); }
+        p->query = bpf_program__attach_uprobe(program, false, -1, p->exe, (size_t)p->query_offset);
+        long error = libbpf_get_error(p->query);
+        if (error) { p->query=NULL; probe_fail(p, "attach global query uprobe"); return -1; }
     }
+    return 0;
 }
+static void probe_close_uprobes(struct probe *p)
+{
+    bpf_link__destroy(p->activity); p->activity=NULL;
+    bpf_link__destroy(p->query); p->query=NULL;
+}
+
 static int probe_record(struct probe *p, int dest, const void *data, size_t size, int perf_cpu)
 {
     struct pgwt_wire_hdr hdr;
@@ -490,9 +509,9 @@ static void *probe_requester_loop(void *arg)
     }
     return NULL;
 }
-/* Main thread only, after consume returns. K=1 backend teardown per drain:
- * a teardown may close two descriptors and destroy two uprobe links. The
- * slot remains occupied until all of that work finishes. */
+/* Main thread only, after consume returns. Each backend teardown closes
+ * only bootstrap/wait watchpoint descriptors, with no uprobe RCU waits.
+ * The slot remains occupied until both descriptors have been closed. */
 static bool probe_teardown_one(struct probe *p)
 {
     for (int i=0; i<MAX_BACKENDS; ++i) if (p->backends[i].closing) {
@@ -523,11 +542,13 @@ static int probe_drain(struct probe *p)
     ++p->stats.consume_calls;
     int b = perf_buffer__consume(p->perf);
     p->stats.attaches.since_drain = p->stats.proc_reads.since_drain = 0;
-    probe_teardown_one(p);
+    /* Retire all consumed EXITs: cheap descriptor closes cannot accumulate
+     * behind a count-limited queue of uprobe link RCU waits. */
+    while (probe_teardown_one(p)) {}
     if (a < 0 || b < 0) { probe_fail(p, "buffer consume"); return -1; }
     return a+b;
 }
-/* At most K=3 attaches (bootstrap plus activity/query uprobes) per drain.
+/* At most one backend watchpoint attach per drain.
  * The wait attach and /proc inspection get a separate drain, even for an
  * already instrumented backend. Draining can retire/reuse b's slot: never
  * retain a PID, cookie or fd across it. try_attach rechecks pending/pid and
@@ -673,11 +694,13 @@ static void probe_finish(struct probe *p)
     for (int i=0; i<p->helpers_started; ++i) transport_request_stop(&p->helpers[i].channel);
     for (int i=0; i<p->helpers_started; ++i) { pthread_join(p->helpers[i].thread, NULL); transport_request_destroy(&p->helpers[i].channel); }
     p->helpers_started=0;
+    /* Stop global producers once, before the final drains/reconciliation. */
+    probe_close_uprobes(p);
     bpf_link__destroy(p->helper); p->helper=NULL;
     bpf_link__destroy(p->fork); p->fork=NULL;
     for (int i=0; i<MAX_BACKENDS; ++i)
         if (p->backends[i].pid) p->backends[i].closing=true;
-    /* Also bound shutdown work; no saved backend identity crosses a drain.
+    /* Shutdown uses the same cheap descriptor cleanup; no saved identity crosses a drain.
      * A partial setup without consumers has no producer links to service. */
     for (int i=0; i<MAX_BACKENDS; ++i) if (p->backends[i].closing) {
         if (p->rings && p->perf) probe_drain(p);
@@ -870,6 +893,8 @@ static void probe_print_stats(const struct probe_stats *stats)
         stats->lifecycle_callback_peak);
     fprintf(stderr, "PROBE-STAT: teardown max_us=%"PRIu64" total=%"PRIu64"\n",
         stats->teardown_max_ns / 1000, stats->teardown_total);
+    fprintf(stderr, "PROBE-STAT: registry max_used=%"PRIu64" size=%u\n",
+        stats->registry_max_used, (unsigned)MAX_BACKENDS);
 }
 static int probe_run(int argc, char **argv, struct probe_stats *stats)
 {
@@ -953,6 +978,7 @@ static int probe_run(int argc, char **argv, struct probe_stats *stats)
      * threads BEFORE attaching fork/exit so their clone events are excluded. */
     if (probe_link(&p.fork,p.skel->progs.on_fork,"sched","sched_process_fork") ||
         probe_link(&p.exit,p.skel->progs.on_exit,"sched","sched_process_exit")) goto cleanup;
+    if (probe_attach_uprobes(&p)) goto cleanup;
     signal(SIGINT,probe_signal); signal(SIGTERM,probe_signal);
     printf("PROBE-READY exact_perf_mode=1 cpus=%d kernel-pid=%d\n",p.online,getpid()); fflush(stdout);
     if (p.self) {

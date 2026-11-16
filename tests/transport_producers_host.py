@@ -107,7 +107,8 @@ def run(source, directory, header=None):
 
 def run_probe_loop(source, directory):
     functions = ('probe_note_work', 'probe_close_backend', 'probe_identity',
-                 'probe_new_backend', 'probe_instrument', 'probe_record', 'probe_l',
+                 'probe_new_backend', 'probe_instrument', 'probe_attach_uprobes', 'probe_close_uprobes',
+                 'probe_record', 'probe_l',
                  'probe_teardown_one', 'probe_drain',
                  'probe_service_backends', 'probe_read_stats', 'probe_print_stats')
     stats = source[source.index('struct probe_work_stat {'):source.index('static void probe_note_work(')]
@@ -132,21 +133,24 @@ def check_probe_loop(directory):
     result = run_probe_loop(source, directory)
     assert result.returncode == 0, result.stdout + result.stderr
     stats = [line for line in result.stderr.splitlines() if line.startswith('PROBE-STAT:')]
-    assert len(stats) == 20, stats
+    assert len(stats) == 22, stats
     assert stats[:4] == [f'PROBE-STAT: ringbuf_site_drops site={site} value={value}'
                          for site, value in zip(('LIFECYCLE_FORK', 'LIFECYCLE_EXIT', 'QUERY_TEXT',
                                                  'PG13_QUERY_TEXT'), (11, 13, 15, 17))], stats
-    assert all(line.endswith('value=null') for line in stats[10:14]), stats
+    assert all(line.endswith('value=null') for line in stats[11:15]), stats
     assert stats[7:10] == [
         'PROBE-STAT: consume max_us=25 total_calls=2',
         'PROBE-STAT: lifecycle_rb in_callback_max_producer_minus_consumer_bytes=44000',
-        'PROBE-STAT: teardown max_us=6 total=2'], stats
+        'PROBE-STAT: teardown max_us=2 total=2'], stats
+    assert stats[10] == 'PROBE-STAT: registry max_used=16 size=1024', stats
+    assert ('PROBE-FAIL: backend slots exhausted used=1024 size=1024 closing=1024 '
+            'pending=0 active=0 boot_fds=0 wait_fds=0') in result.stderr, result.stderr
     print(result.stdout, end='')
     # The real Linux driver removes its temporary log directory after each
     # run. Successful summaries must forward diagnostics before it does.
     from test_transport_producers_live import summary
     log = directory / 'probe.stderr'
-    log.write_text('\n'.join(stats[:10]) + '\n')
+    log.write_text('\n'.join(stats[:11]) + '\n')
     row = {'ok': True}
     class FinishedProbe:
         returncode = 0
@@ -156,8 +160,30 @@ def check_probe_loop(directory):
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         assert summary(FinishedProbe(), log) == row
-    assert output.getvalue().splitlines()[:10] == stats[:10], output.getvalue()
+    assert output.getvalue().splitlines()[:11] == stats[:11], output.getvalue()
     print('probe diagnostics forwarding: PASS (all PROBE-STAT lines survive successful live summary)')
+    # Restore per-backend link ownership/RCU teardown in real function bodies.
+    # Run the time-driven churn case first: a built mutant must exhaust slots
+    # at the named assertion, rather than merely fail an operation count.
+    mutated = replace_once(source, '    bool pending, raced, closing;',
+                           '    bool pending, raced, closing;\n    struct bpf_link *activity, *query;')
+    attach = function(mutated, 'probe_attach_uprobes')
+    per_pid = attach[attach.index('    if (p->activity_offset)'):attach.rindex('    return 0;')]
+    per_pid = per_pid.replace('p->activity', 'b->activity').replace('p->query =', 'b->query =')
+    per_pid = per_pid.replace('p->query)', 'b->query)').replace('p->query=NULL', 'b->query=NULL')
+    per_pid = per_pid.replace('b->activity_offset', 'p->activity_offset')
+    per_pid = per_pid.replace('-1, p->exe', '(pid_t)b->pid, p->exe').replace('return -1;', 'return;')
+    instrument = function(mutated, 'probe_instrument')
+    mutated = replace_once(mutated, instrument, instrument[:-1] + per_pid + '}')
+    mutated = replace_once(mutated, attach, 'static int probe_attach_uprobes(struct probe *p) { (void)p; return 0; }')
+    mutated = replace_once(mutated, '    if (b->boot >= 0) close(b->boot);',
+                           '    bpf_link__destroy(b->activity); bpf_link__destroy(b->query);\n'
+                           '    if (b->boot >= 0) close(b->boot);')
+    result = run_probe_loop(mutated, directory)
+    assertion = 'FAIL churn registry accepts backends without exhaustion'
+    assert result.returncode != 0 and assertion in result.stderr, result.stdout + result.stderr
+    assert 'backend slots exhausted used=1024 size=1024' in result.stderr, result.stderr
+    print(f'mutant per-backend-uprobes-restored: KILLED ({assertion})')
     # Built mutation of the actual loop: both drains move after all backend
     # attaches, precisely the original reader-lag failure. The simulated
     # producers overrun their finite queue before that late drain runs.
