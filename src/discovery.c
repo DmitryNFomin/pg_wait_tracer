@@ -2,6 +2,7 @@
  *                PG version detection, st_query_id offset detection */
 #include "discovery.h"
 #include "pg_wait_tracer.h"   /* pgwt_classify_wei, PGWT_WEI_* */
+#include "backend_status_layout.h" /* struct PgBackendStatusLayout (pgwt_pg13_status_offsets) */
 
 #include <stdio.h>
 #include <stdlib.h>
