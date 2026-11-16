@@ -105,10 +105,13 @@ shorten the single sleep. The host test replaces the sleep and checks its
 position, duration, cached setting and disabled path.
 
 The live arm already propagates `PGWT_DEBUG_*` environment variables; its
-assertions, classes, tolerances and transport are unchanged. The following
-Linux commands are a handoff, **not executed results**. Do not run them on
-macOS. Use provisioned PG13 gate boxes and retain all evidence outside the
-repository. A passing natural arm must have empty `late_attribution_ticks`
+assertions, classes, tolerances and transport are unchanged. These Linux
+commands were run for commit 2cf5cbf6 on 2026-11-16 (Ubuntu 6.8 and EL8 4.18,
+PG 13.23): 8 fixed-build arms passed with 0 late, the pre-fix tracer went RED
+(200/200 missing) and the EL8 control below went RED (97 one-tick lates) while
+its fixed arm passed; evidence in `tests/results/session-20261117/p866-pg13-live8/`
+on the lead's Mac (git-ignored). Do not run them on macOS. Use provisioned PG13
+boxes and retain all evidence outside the repository. A passing natural arm must have empty `late_attribution_ticks`
 and `missing_attribution_pids`, and no timing or other errors.
 
 On the Ubuntu 6.8 box, from the fixed checkout:
@@ -171,8 +174,9 @@ sudo env PGWT_DEBUG_SAMPLE_TICK_DELAY_US=20000 python3 -B \
 
 This invocation first requires the fixed arm to pass with zero extra ticks,
 then requires the control to go RED on missing/late first attribution. A
-setup/perf failure cannot satisfy that RED. Both daemon stderr files must
-show `PGWT_DEBUG_SAMPLE_TICK_DELAY_US=20000`; both binary hashes and the
+setup/perf failure cannot satisfy that RED. Check by hand that both daemon
+stderr files show `PGWT_DEBUG_SAMPLE_TICK_DELAY_US=20000` (the harness does not
+assert it); both binary hashes and the
 per-PID timing verdicts are saved in their respective `summary.json` files.
 The natural runs' pending-negative-control notice is resolved by this
 separate paired control. If the control stays green or the fixed arm is
