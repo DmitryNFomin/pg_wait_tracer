@@ -73,6 +73,12 @@ except ImportError:
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "web", "static")
 
+# Frozen evidence-v1 scenarios 01 and 05, serialized as the pilot wire format.
+# Shared with the snapshot registrations; the route test checks these against
+# the real server before they can serve as visual evidence.
+with open(os.path.join(os.path.dirname(__file__), "fixtures", "pilot-responses.json")) as _pilot_file:
+    PILOT_FIXTURES = json.load(_pilot_file)
+
 # ── Canned data ──────────────────────────────────────────────────────────────
 
 def _env_int(name, default):
@@ -1059,6 +1065,13 @@ def handle_request(msg):
 
 
 def _handle_request_inner(cmd, req_id, msg):
+    if cmd == "pilot_wait_metrics":
+        for fixture in PILOT_FIXTURES:
+            if all(msg.get(key) == value for key, value in fixture["request"].items()):
+                return {"id": req_id, **fixture["response"]}
+        return {"id": req_id, "error": "No pilot fixture for this target and window",
+                "code": "pilot_unsupported"}
+
     if cmd == "info":
         global _INFO_TICKS, _NEARTIE_TICKS
         resp = {"id": req_id, **_CANNED["info"]}

@@ -18,6 +18,8 @@
 #include "pid_index.h"
 #include "alloc_tune.h"
 #include "backend_span.h"
+#include "core/evidence_query.h"
+#include <glob.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -4778,8 +4780,34 @@ static int server_init(struct pgwt_server *srv, const char *trace_dir)
      * because step 2 needs a header to read. */
     srv->num_files = pgwt_scan_trace_files(trace_dir, srv->files, 256);
     if (srv->num_files <= 0) {
-        fprintf(stderr, "pgwt-server: no trace files found in %s\n", trace_dir);
-        return -1;
+        glob_t pilot_paths={0};
+        char pilot_pattern[PATH_MAX];
+        snprintf(pilot_pattern,sizeof(pilot_pattern),"%s/*.trace*",trace_dir);
+        int pilot_found=0;
+        if (glob(pilot_pattern,0,NULL,&pilot_paths)==0) {
+            for (size_t i=0;i<pilot_paths.gl_pathc && !pilot_found;++i) {
+                const char *path=pilot_paths.gl_pathv[i];
+                size_t len=strlen(path);
+                /* A sidecar or an unreadable/empty trace cannot admit a
+                 * server with no legacy files. Only readable v5 bytes can. */
+                if (!((len>=6 && !strcmp(path+len-6,".trace")) ||
+                      (len>=10 && !strcmp(path+len-10,".trace.lz4")))) continue;
+                struct stat st;
+                if (stat(path,&st) || !S_ISREG(st.st_mode)) continue;
+                FILE *fp=fopen(path,"rb");
+                if (!fp) continue;
+                unsigned char magic[6];
+                pilot_found=fread(magic,1,sizeof(magic),fp)==sizeof(magic) &&
+                            !memcmp(magic,"PGWT\005\000",sizeof(magic));
+                fclose(fp);
+            }
+        }
+        globfree(&pilot_paths);
+        if (!pilot_found) {
+            fprintf(stderr, "pgwt-server: no trace files found in %s\n", trace_dir);
+            return -1;
+        }
+        srv->num_files=0;
     }
 
     int hdr_major = 0;
@@ -8751,10 +8779,199 @@ static void handle_control(struct pgwt_server *srv, struct pgwt_request *req,
     emit_json(root);
 }
 
+/* evidence-v1 pilot: IO and serialization only; the stateless core owns meaning. */
+static bool pilot_u64(const cJSON *item, uint64_t *out)
+{
+    if (!cJSON_IsString(item) || !item->valuestring[0]) return false;
+    uint64_t v = 0;
+    for (const unsigned char *p=(const unsigned char *)item->valuestring;*p;++p) {
+        if (*p<'0' || *p>'9' || v>(UINT64_MAX-(*p-'0'))/10) return false;
+        v=v*10+(*p-'0');
+    }
+    *out=v;
+    return true;
+}
+
+static void pilot_optional(cJSON *obj, const char *key, pgwt_core_optional_u64 v)
+{
+    if (v.present) cjson_add_uint64_string(obj,key,v.value);
+    else cJSON_AddNullToObject(obj,key);
+}
+
+static cJSON *pilot_metric(const pgwt_core_result *m)
+{
+    cJSON *obj=cJSON_CreateObject();
+    cJSON_AddStringToObject(obj,"metric",m->metric);
+    cJSON_AddNumberToObject(obj,"version",m->version);
+    pilot_optional(obj,"value",m->value);
+    cJSON_AddStringToObject(obj,"unit",m->unit);
+    cJSON_AddStringToObject(obj,"basis",m->basis);
+    cJSON_AddStringToObject(obj,"completeness",m->completeness);
+    cJSON *reasons=cJSON_AddArrayToObject(obj,"reasons");
+    for (size_t i=0;i<m->reason_count;++i) cJSON_AddItemToArray(reasons,cJSON_CreateString(m->reasons[i]));
+    if (m->detail_present) {
+        cJSON *detail=cJSON_AddObjectToObject(obj,"detail");
+        cjson_add_uint64_string(detail,"closed_ns",m->detail.closed_ns);
+        cjson_add_uint64_string(detail,"open_ns",m->detail.open_ns);
+    }
+    cJSON *diag=cJSON_AddObjectToObject(obj,"diagnostic");
+    pilot_optional(diag,!strcmp(m->metric,"wait_time") ? "recorded_ns" : "recorded_count",m->diagnostic.recorded);
+    pilot_optional(diag,"covered_ns",m->diagnostic.covered_ns);
+    pilot_optional(diag,"required_ns",m->diagnostic.required_ns);
+    return obj;
+}
+
+static cJSON *pilot_stop(const pgwt_query_stop *s, bool replay)
+{
+    cJSON *obj=cJSON_CreateObject();
+    cJSON_AddNumberToObject(obj,"file",(double)s->file);
+    /* Replay positions are logical indices, invariant under block splitting. */
+    if (!replay) cjson_add_uint64_string(obj,"block_offset",s->block_offset);
+    const char *position=replay ? "record" : "record_offset";
+    if (s->has_record_offset) cjson_add_uint64_string(obj,position,s->record_offset);
+    else cJSON_AddNullToObject(obj,position);
+    cJSON_AddStringToObject(obj,"reason",s->reason);
+    if (replay) cJSON_AddBoolToObject(obj,"descriptor",s->descriptor);
+    return obj;
+}
+
+static void pilot_baseline(cJSON *obj, const char *key, bool known, const uint64_t values[15])
+{
+    if (!known) { cJSON_AddNullToObject(obj,key); return; }
+    cJSON *array=cJSON_AddArrayToObject(obj,key);
+    for (size_t i=0;i<15;++i) {
+        char text[32];
+        snprintf(text,sizeof(text),"%llu",(unsigned long long)values[i]);
+        cJSON_AddItemToArray(array,cJSON_CreateString(text));
+    }
+}
+
+static void pilot_storage(cJSON *root, const pgwt_query_storage *s)
+{
+    cJSON *obj=cJSON_AddObjectToObject(root,"storage");
+    cJSON_AddNumberToObject(obj,"files",(double)s->files);
+    cJSON_AddBoolToObject(obj,"codec_failed",s->codec_failed);
+    cJSON *stops=cJSON_AddArrayToObject(obj,"codec_stops");
+    for (size_t i=0;i<s->codec_stop_count;++i) cJSON_AddItemToArray(stops,pilot_stop(&s->codec_stops[i],false));
+    if (s->has_replay_stop) {
+        cJSON *stop=pilot_stop(&s->replay_stop,true);
+        if (s->baseline_mismatch) {
+            pilot_baseline(stop,"expected_baseline",s->expected_baseline_known,s->expected_baseline);
+            pilot_baseline(stop,"declared_baseline",s->declared_baseline_known,s->declared_baseline);
+        }
+        cJSON_AddItemToObject(obj,"replay_stop",stop);
+    } else cJSON_AddNullToObject(obj,"replay_stop");
+    cJSON_AddBoolToObject(obj,"capture_ambiguous",s->capture_ambiguous);
+}
+
+/* Reject embedded NULs before cJSON's zero-terminated string API loses them. */
+static bool pilot_has_nul(const char *line)
+{
+    for (const char *p=line;*p;++p) if (*p=='\\') {
+        ++p;
+        if (!*p) break;
+        if (!strncmp(p,"u0000",5)) return true;
+    }
+    return false;
+}
+
+/* Read every trace byte, including evidence later than the requested window.
+ * A stopped bounded pilot refuses above 256 files or 256 MiB, never samples or
+ * truncates. glob's sorted paths make file loading independent of readdir. */
+static int pilot_buffers(const char *directory, pgwt_evidence_buffer *buffers,
+                         size_t *count)
+{
+    char pattern[PATH_MAX];
+    glob_t paths={0};
+    *count=0;
+    if (snprintf(pattern,sizeof(pattern),"%s/*.trace*",directory)>=(int)sizeof(pattern)) return -1;
+    int rc=glob(pattern,0,NULL,&paths);
+    if (rc) { globfree(&paths); return -1; }
+    size_t total=0;
+    for (size_t i=0;i<paths.gl_pathc;++i) {
+        /* Sidecars are not trace deliveries. */
+        const char *name=paths.gl_pathv[i];
+        size_t len=strlen(name);
+        if (!((len>=6 && !strcmp(name+len-6,".trace")) ||
+              (len>=10 && !strcmp(name+len-10,".trace.lz4")))) continue;
+        if (*count==PGWT_PILOT_MAX_FILES) { rc=-1;break; }
+        FILE *fp=fopen(name,"rb");
+        if (!fp) { rc=-1; break; }
+        struct stat st;
+        if (fstat(fileno(fp),&st) || !S_ISREG(st.st_mode) || st.st_size<0 ||
+            (uint64_t)st.st_size>256u*1024u*1024u-total) { fclose(fp);rc=-1;break; }
+        size_t size=(size_t)st.st_size;
+        unsigned char *data=malloc(size ? size : 1);
+        if (!data) { fclose(fp);rc=-1;break; }
+        bool ok=fread(data,1,size,fp)==size && !ferror(fp);
+        if (fclose(fp)) ok=false;
+        if (!ok) { free(data);rc=-1;break; }
+        buffers[(*count)++]=(pgwt_evidence_buffer){data,size};
+        total+=size;
+    }
+    globfree(&paths);
+    return rc || !*count ? -1 : 0;
+}
+
+static void handle_pilot_wait_metrics(struct pgwt_server *srv, struct pgwt_request *req,
+                                      const char *line)
+{
+    cJSON *root=cJSON_CreateObject();
+    cJSON_AddNumberToObject(root,"id",(double)req->id);
+    cJSON *request=cJSON_ParseWithOpts(line,NULL,1);
+    cJSON *target=cJSON_GetObjectItemCaseSensitive(request,"target");
+    cJSON *query=cJSON_GetObjectItemCaseSensitive(request,"query");
+    cJSON *capture=cJSON_GetObjectItemCaseSensitive(target,"capture");
+    cJSON *pid=cJSON_GetObjectItemCaseSensitive(target,"pid");
+    cJSON *fork=cJSON_GetObjectItemCaseSensitive(target,"fork");
+    cJSON *event=cJSON_GetObjectItemCaseSensitive(query,"event");
+    pgwt_evidence_target t={0};
+    pgwt_core_query q={0};
+    bool nul=pilot_has_nul(line);
+    if (cJSON_IsString(capture)) t.capture=(pgwt_core_event){capture->valuestring,strlen(capture->valuestring)};
+    t.invalid=!cJSON_IsObject(target) || !t.capture.length || nul;
+    if (cJSON_IsNumber(pid) && pid->valuedouble>=1 && pid->valuedouble<=UINT32_MAX &&
+        pid->valuedouble==(double)(uint32_t)pid->valuedouble) t.pid=(uint32_t)pid->valuedouble;
+    else t.invalid=true;
+    if (!cJSON_IsNull(fork)) { t.has_fork=true;if (!pilot_u64(fork,&t.fork)) t.invalid=true; }
+    if (cJSON_IsString(event)) q.event=(pgwt_core_event){event->valuestring,strlen(event->valuestring)};
+    else q.invalid_fields|=PGWT_CORE_QUERY_EVENT_INVALID;
+    if (!cJSON_IsObject(query) || !request || nul) q.invalid_fields|=PGWT_CORE_QUERY_OBJECT_INVALID;
+    if (nul) q.invalid_fields|=PGWT_CORE_QUERY_FROM_INVALID|PGWT_CORE_QUERY_TO_INVALID;
+    if (!pilot_u64(cJSON_GetObjectItemCaseSensitive(query,"from"),&q.from)) q.invalid_fields|=PGWT_CORE_QUERY_FROM_INVALID;
+    if (!pilot_u64(cJSON_GetObjectItemCaseSensitive(query,"to"),&q.to)) q.invalid_fields|=PGWT_CORE_QUERY_TO_INVALID;
+    pgwt_evidence_buffer buffers[PGWT_PILOT_MAX_FILES];
+    size_t count=0;
+    pgwt_core_result wait_time,completed;
+    pgwt_query_storage storage={0};
+    const char *reason="pilot trace read failed or limit exceeded";
+    int status=-1;
+    if (!pilot_buffers(srv->trace_dir,buffers,&count))
+        status=pgwt_evidence_query(buffers,count,&t,&q,&wait_time,&completed,&storage,&reason);
+    for (size_t i=0;i<count;++i) free((void *)buffers[i].data);
+    if (status) {
+        cJSON_AddStringToObject(root,"error",reason ? reason : "pilot evidence unsupported");
+        cJSON_AddStringToObject(root,"code","pilot_unsupported");
+        pilot_storage(root,&storage);
+    } else {
+        cJSON_AddBoolToObject(root,"pilot",true);
+        cJSON_AddStringToObject(root,"contract","evidence-v1");
+        cJSON_AddItemToObject(root,"target",target ? cJSON_Duplicate(target,1) : cJSON_CreateNull());
+        cJSON_AddItemToObject(root,"query",query ? cJSON_Duplicate(query,1) : cJSON_CreateNull());
+        cJSON_AddItemToObject(root,"wait_time",pilot_metric(&wait_time));
+        cJSON_AddItemToObject(root,"completed_waits",pilot_metric(&completed));
+        pilot_storage(root,&storage);
+    }
+    cJSON_Delete(request);
+    emit_json(root);
+}
+
 static void dispatch(struct pgwt_server *srv, struct pgwt_request *req,
                      const char *line)
 {
-    if (strcmp(req->cmd, "info") == 0)
+    if (strcmp(req->cmd, "pilot_wait_metrics") == 0)
+        handle_pilot_wait_metrics(srv, req, line);
+    else if (strcmp(req->cmd, "info") == 0)
         handle_info(srv, req);
     else if (strcmp(req->cmd, "aas") == 0)
         handle_aas(srv, req);

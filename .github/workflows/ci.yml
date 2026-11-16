@@ -1070,6 +1070,14 @@ jobs:
       - name: Run web UI tests (mock server)
         run: python3 tests/test_web_ui.py
 
+      # The unit tier runs the portable route arms without browser modules.
+      # Like the other browser suites, the Chromium arm gates in this job.
+      - name: Run pilot route with required browser
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev liblz4-dev
+          python3 -B tests/test_pilot_route.py --require-browser
+
       - name: Run web UI chaos tests (adversarial mock — Phase B2)
         # Drives the UI against mock_server.py in chaos mode (latency jitter,
         # out-of-order + late responses). Race-exposing tests are classified
