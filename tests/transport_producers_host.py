@@ -318,10 +318,15 @@ done
         early = replace_once(early, '    if (marker_edge(pid, marker, bpf_ktime_get_ns(), &evt)) {',
                              '    if (marker_edge(pid, marker, early, &evt)) {')
         mutants = [('timestamp-before-reserve', early, None, 'timestamp after reserve')]
-        # Each DATA submit site is exercised through its actual producer.
+        # FORK keeps adaptive wakeup so attachment can start promptly.
+        fork = function(source, 'on_fork')
+        mutants.append(('DATA-fork-wakeup-removed', replace_once(source, fork,
+            replace_once(fork, 'bpf_ringbuf_submit(wire, 0);',
+                         'bpf_ringbuf_submit(wire, BPF_RB_NO_WAKEUP);')),
+            None, 'DATA fork L adaptive wakeup'))
+        # Each other DATA submit site is exercised through its actual producer.
         # The two lifecycle EXIT branches share text but have separate cases.
         for name, producer, pointer, occurrence, assertion in (
-                ('DATA-fork-wakeup', 'on_fork', 'wire', 0, 'DATA fork L no-wakeup'),
                 ('DATA-marker-wakeup', 'transport_marker', 'wire', 0, 'DATA marker E no-wakeup'),
                 ('DATA-command-wakeup', 'transport_activity', 'wire', 0, 'DATA command E no-wakeup'),
                 ('DATA-exit-E-wakeup', 'transport_exit', 'out', 0, 'DATA exit E no-wakeup'),
@@ -336,8 +341,24 @@ done
             changed = body[:at] + f'bpf_ringbuf_submit({pointer}, 0);' + body[at + len(submit):]
             mutants.append((name, replace_once(source, body, changed), None, assertion))
         mutants.append(('BOUNDARY-wakeup-removed', replace_once(source,
-            'bpf_ringbuf_submit(cut, 0);',
-            'bpf_ringbuf_submit(cut, BPF_RB_NO_WAKEUP);'), None, 'BOUNDARY E wakeup'))
+            'bpf_ringbuf_submit(cut, BPF_RB_FORCE_WAKEUP);',
+            'bpf_ringbuf_submit(cut, BPF_RB_NO_WAKEUP);'), None, 'BOUNDARY E forced wakeup'))
+        # Adaptive wakeup is insufficient on either ring when DATA precedes
+        # the cut. Check each destination at its own named assertion.
+        for dest in ('E', 'L'):
+            mutants.append((f'BOUNDARY-{dest}-adaptive-wakeup', replace_once(source,
+                'bpf_ringbuf_submit(cut, BPF_RB_FORCE_WAKEUP);',
+                f'bpf_ringbuf_submit(cut, dest == PGWT_WIRE_DEST_{dest} ? 0 : BPF_RB_FORCE_WAKEUP);'),
+                None, f'BOUNDARY {dest} forced wakeup'))
+        # Flag-off keeps E NO_WAKEUP and L adaptive, independently of the
+        # exact-perf policy. Both mutants reach the raw submit shim.
+        mutants.append(('mode-zero-E-wakeup', replace_once(source,
+            '                                 BPF_RB_NO_WAKEUP);',
+            '                                 0);'), None, 'mode zero submit flags unchanged'))
+        mutants.append(('mode-zero-fork-wakeup-removed', replace_once(source, fork,
+            replace_once(fork, 'bpf_ringbuf_submit(ev, 0);',
+                         'bpf_ringbuf_submit(ev, BPF_RB_NO_WAKEUP);')),
+            None, 'mode zero submit flags unchanged'))
         # Take the attempt number only when the reservation succeeded.
         mutants.append(('seq-only-on-success', replace_once(source,
             '    *seq = transport_attempt(PGWT_WIRE_DEST_E);\n'

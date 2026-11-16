@@ -465,9 +465,9 @@ static __always_inline void transport_boundary(void *ctx, u32 dest, u32 round)
         if (!cut) { transport_failure(dest); return; }
         transport_header(&cut->hdr, PGWT_WIRE_BOUNDARY, sizeof(cut->payload), seq, 0);
         cut->payload = (struct pgwt_wire_boundary){ .w = w, .round = round, .dest = dest };
-        /* Completion waits for E/L cuts: retain adaptive wakeup here. DATA
-         * on both rings is polled and suppresses per-record wakeups. */
-        bpf_ringbuf_submit(cut, 0);
+        /* Force one wake per ring per round: preceding NO_WAKEUP DATA can
+         * leave the consumer behind the cut, suppressing adaptive wakeup. */
+        bpf_ringbuf_submit(cut, BPF_RB_FORCE_WAKEUP);
     }
 }
 /* One parked helper per online CPU calls getppid ONLY on demand. Register
@@ -1063,7 +1063,7 @@ int on_fork(struct trace_event_raw_sched_process_fork *ctx)
             seq, child_seed.cookie);
         wire->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_FORK,
             .pid = child, .timestamp = bpf_ktime_get_ns() };
-        bpf_ringbuf_submit(wire, BPF_RB_NO_WAKEUP);
+        bpf_ringbuf_submit(wire, 0);
         return 0;
     }
     struct pgwt_lifecycle_event *ev;

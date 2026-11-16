@@ -10,9 +10,13 @@ The overhead profile supplied for the 2026-11-16 screen measured the adaptive
 event-ring submit wakeup chain at about 21–22 µs per transaction on Ubuntu and
 12–13 µs on EL8, inside PostgreSQL. Under `exact_perf_mode`, ordinary E-ring
 TRACE records (markers, command boundaries and terminal transitions) and
-L-ring LIFECYCLE/TEXT records now submit with `BPF_RB_NO_WAKEUP`; both readers
-are polled. E/L BOUNDARY cuts retain flags 0 because round completion waits
-for them; CPU perf boundaries/acknowledgements and the INIT perf wake-up hint
+L-ring EXIT/TEXT records submit with `BPF_RB_NO_WAKEUP`; both readers
+are polled. L-ring FORK retains flags 0 (adaptive wakeup) to avoid delaying
+attachment: it fires once per connection, not per transaction. E/L BOUNDARY
+cuts use `BPF_RB_FORCE_WAKEUP`, at most one wake per ring per round. Adaptive
+wakeup only wakes when the consumer position equals the submitted record's
+position, which preceding NO_WAKEUP DATA can prevent. CPU perf
+boundaries/acknowledgements and the INIT perf wake-up hint
 are unchanged. Each main-loop pass polls the transport and attempts the common
 E drain (`src/daemon.c`, `pgwt_daemon_run`), with a 10 ms maximum outer epoll
 timeout (0 after a budget yield); the inner completion wait is at most 1 ms
