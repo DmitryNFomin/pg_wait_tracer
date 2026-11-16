@@ -153,7 +153,9 @@ int main(int argc, char **argv) {
 def read_cohort_samples(reader, trace, cohort):
     pidfile = trace / "churn.pids"
     pidfile.write_text("".join(f"{row['pid']}\n" for row in cohort))
-    paths = sorted(trace.glob("*.trace")) + sorted(trace.glob("*.trace.lz4"))
+    # Only the daemon's own files (src/event_writer.c): current.trace and the
+    # rotated YYYY-MM-DD_HH[.N].trace.lz4; no other tool's output can match.
+    paths = sorted(trace.glob("current.trace")) + sorted(trace.glob("????-??-??_??*.trace.lz4"))
     assert paths, "no persisted trace files"
     result = subprocess.run([str(reader), str(pidfile), *map(str, paths)],
                             check=True, capture_output=True, text=True, timeout=60)
@@ -360,12 +362,13 @@ def decode_pg13_perf(perf, tick_event, trace, stem="perf"):
     stop(perf, signal.SIGINT)
     record_errors = (trace / (stem + ".stderr")).read_text()
     assert perf.returncode in (0, -signal.SIGINT), record_errors
-    with (trace / (stem + ".trace")).open("w") as output, \
+    # Never *.trace: read_cohort_samples globs the daemon's binary trace files.
+    with (trace / (stem + ".script.txt")).open("w") as output, \
          (trace / (stem + ".script.stderr")).open("w") as errors:
         subprocess.run(["perf", "script", "-i", str(trace / (stem + ".data")),
                         "--ns", "--show-lost-events", "-F", "tid,time,event,trace"],
                        check=True, stdout=output, stderr=errors, timeout=30)
-    text = (trace / (stem + ".trace")).read_text()
+    text = (trace / (stem + ".script.txt")).read_text()
     streams = (record_errors, (trace / (stem + ".script.stderr")).read_text())
     parsed = parse_vm_trace(text, streams, tick_event)
     assert len(parsed["ticks"]) >= 2, "PG13 perf produced no closed tick interval"

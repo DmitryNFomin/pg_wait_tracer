@@ -466,6 +466,63 @@ def vm_parser_cases():
     print("PG13 readv: Ubuntu/EL8 recorded fragments; raw tid/timestamp pairs, ambiguous discovery budget, loss guards PASS")
 
 
+def cohort_file_cases():
+    """The sample reader gets only the daemon's trace files, never perf text.
+
+    Live on Ubuntu the perf decode wrote perf.trace/perf.attach.trace beside
+    current.trace and the binary reader refused them ("bad magic").
+    """
+    import test_sampler_batch_live as live
+    with tempfile.TemporaryDirectory(prefix="pgwt866-cohort-test-") as tmp:
+        trace = Path(tmp)
+        for name in ("current.trace", "2026-11-16_18.trace.lz4", "2026-11-16_18.1.trace.lz4",
+                     "perf.trace", "perf.attach.trace", "perf.script.txt", "perf.attach.script.txt",
+                     "perf.data", "2026-11-16_18.summary.lz4"):
+            (trace / name).write_bytes(b"x")
+        seen = []
+        def run(command, **kwargs):
+            seen.append(command)
+            return live.subprocess.CompletedProcess(command, 0, '{"pid":5,"timestamp_ns":1,"query_id":0}\n',
+                                                    "persisted sample census=1\n")
+        with mock.patch.object(live.subprocess, "run", side_effect=run):
+            samples = live.read_cohort_samples(Path("/reader"), trace, [{"pid": 5}])
+        assert samples == [{"pid": 5, "timestamp_ns": 1, "query_id": 0}], samples
+        assert seen == [["/reader", str(trace / "churn.pids"), str(trace / "current.trace"),
+                         str(trace / "2026-11-16_18.1.trace.lz4"), str(trace / "2026-11-16_18.trace.lz4")]], seen
+        for name in ("perf.trace", "perf.attach.trace"):
+            (trace / name).unlink()
+    print("cohort_file_cases: only current.trace and rotated *.trace.lz4 reach the sample reader PASS")
+
+
+def postmaster_name_cases():
+    """PGDG EL starts PG13 as comm `postmaster` (exe /usr/pgsql-13/bin/postgres);
+    its children inherit that comm. Debian/Ubuntu's comm is `postgres`."""
+    import testutil
+    for comm, exe in (("postmaster", "/usr/pgsql-13/bin/postgres"),
+                      ("postgres", "/usr/lib/postgresql/13/bin/postgres")):
+        # pid 10 postmaster (parent 1 = systemd), pid 11 its child.
+        status = {10: "PPid:\t1\n", 11: "PPid:\t10\n"}
+        comms = {1: "systemd", 10: comm}
+        def run(command, **kwargs):
+            assert command[:2] == ["pgrep", "-x"], command
+            out = "10\n11\n" if command[2] == comm else ""
+            return testutil.subprocess.CompletedProcess(command, 0 if out else 1, out, "")
+        def fake_open(path, *args, **kwargs):
+            parts = path.split("/")
+            pid = int(parts[2])
+            import io
+            if parts[3] == "status":
+                return io.StringIO(status[pid])
+            return io.StringIO(comms[pid] + "\n")
+        with mock.patch.object(testutil.subprocess, "run", side_effect=run), \
+             mock.patch.object(testutil.os, "readlink", side_effect=lambda path: exe), \
+             mock.patch("builtins.open", side_effect=fake_open):
+            assert testutil.find_postmaster(pg_version=13) == 10, comm
+            assert testutil.find_postmaster(pg_version=16) is None, comm
+            assert testutil.find_postmaster() == 10, comm
+    print("postmaster_name_cases: PGDG `postmaster` and Debian `postgres` comm both found, children skipped PASS")
+
+
 def main():
     parser_cases()
     bound_cases()
@@ -474,6 +531,8 @@ def main():
     recorded_file_vm_cases()
     file_capture_cases()
     pg13_selection_cases()
+    cohort_file_cases()
+    postmaster_name_cases()
     vm_parser_cases()
     print("sampler batch summary: PASS")
 
