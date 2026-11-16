@@ -47,7 +47,19 @@ struct probe_helper {
 struct probe_requester {
     pthread_t thread; int cpu, error; atomic_int ready; struct probe *probe;
 };
+struct probe_work_stat { u64 total, since_drain, max; };
+struct probe_stats {
+    struct probe_work_stat attaches, proc_reads;
+    u64 lifecycle_peak, lifecycle_size, lifecycle_samples;
+    u64 site_drops[4]; bool sites_valid;
+};
+static void probe_note_work(struct probe_work_stat *work)
+{
+    ++work->total;
+    if (++work->since_drain > work->max) work->max = work->since_drain;
+}
 struct probe {
+    struct probe_stats stats; bool loaded;
     struct pg_wait_tracer_bpf *skel;
     struct ring_buffer *rings; struct perf_buffer *perf;
     struct bpf_link *fork, *exit, *helper;
@@ -94,11 +106,12 @@ static int probe_pin(int cpu)
     return sched_setaffinity(0, sizeof(mask), &mask);
 }
 /* The open descriptor, or the negative errno of the step that failed. */
-static int probe_watchpoint(u32 pid, u64 addr, int program, bool enabled)
+static int probe_watchpoint(struct probe *p, u32 pid, u64 addr, int program, bool enabled)
 {
     struct perf_event_attr attr = { .type=PERF_TYPE_BREAKPOINT, .size=sizeof(attr),
         .bp_addr=addr, .bp_type=HW_BREAKPOINT_W, .bp_len=HW_BREAKPOINT_LEN_4,
         .sample_period=1, .disabled=1, .exclude_kernel=1, .exclude_hv=1 };
+    probe_note_work(&p->stats.attaches);
     int fd = (int)syscall(__NR_perf_event_open, &attr, pid, -1, -1, PERF_FLAG_FD_CLOEXEC);
     if (fd < 0) return errno ? -errno : -EIO;
     if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, program) ||
@@ -118,10 +131,11 @@ static void probe_fail(struct probe *p, const char *why)
 {
     fprintf(stderr, "PROBE-FAIL: %s\n", why); p->failed = 1;
 }
-static bool probe_task_live(u32 pid)
+static bool probe_task_live(struct probe *p, u32 pid)
 {
     char name[64], text[768]; snprintf(name, sizeof(name), "/proc/%u/stat", pid);
     int fd = open(name, O_RDONLY | O_CLOEXEC); if (fd < 0) return false;
+    probe_note_work(&p->stats.proc_reads);
     ssize_t n = read(fd, text, sizeof(text) - 1); close(fd);
     if (n <= 0) return false;
     text[n] = '\0';
@@ -134,7 +148,7 @@ static bool probe_task_live(u32 pid)
  * a live backend: it is printed with its errno and fails the probe. */
 static void probe_attach_error(struct probe *p, struct probe_backend *b, const char *step, int error)
 {
-    if (probe_attach_is_exit_race(error, probe_task_live(b->pid))) {
+    if (probe_attach_is_exit_race(error, probe_task_live(p, b->pid))) {
         if (!b->raced) { b->raced = true; ++p->attach_exit_races; }
         return;
     }
@@ -171,6 +185,7 @@ static void probe_observe_stored_init(struct probe *p, struct probe_backend *b)
     char name[64], title[512], needle[128];
     snprintf(name,sizeof(name),"/proc/%u/cmdline",b->pid);
     int fd=open(name,O_RDONLY|O_CLOEXEC); if (fd<0) return;
+    probe_note_work(&p->stats.proc_reads);
     ssize_t n=read(fd,title,sizeof(title)-1); close(fd); if (n<=0) return;
     for (ssize_t i=0;i<n;++i) if (!title[i]) title[i]=' ';
     title[n]='\0'; snprintf(needle,sizeof(needle)," %s ",p->cohort_db);
@@ -185,12 +200,14 @@ static void probe_observe_stored_init(struct probe *p, struct probe_backend *b)
  * the first instruction, pointing at a process-local placeholder until
  * InitProcess() switches it to the PGPROC field in shared memory, so a
  * non-zero value alone proves nothing. Returns 1 only for a shared target. */
-static int probe_addr_is_shared(u32 pid, u64 addr)
+static int probe_addr_is_shared(struct probe *p, u32 pid, u64 addr)
 {
     char name[64], line[512]; snprintf(name, sizeof(name), "/proc/%u/maps", pid);
     FILE *maps=fopen(name, "r"); if (!maps) return -1;
     int result=0;
-    while (fgets(line, sizeof(line), maps)) {
+    while (true) {
+        probe_note_work(&p->stats.proc_reads);
+        if (!fgets(line, sizeof(line), maps)) break;
         unsigned long long start=0, end=0; char perms[8]="";
         if (sscanf(line, "%llx-%llx %7s", &start, &end, perms) != 3) continue;
         if (addr < start) break;
@@ -210,6 +227,7 @@ static void probe_try_attach(struct probe *p, struct probe_backend *b)
     int mem = open(name, O_RDONLY | O_CLOEXEC);
     if (mem < 0) { probe_attach_error(p, b, "open /proc/<pid>/mem", errno); return; }
     u64 ptr = 0;
+    probe_note_work(&p->stats.proc_reads);
     ssize_t n = pread(mem, &ptr, sizeof(ptr), (off_t)p->ptr);
     if (n != sizeof(ptr)) {
         int error = n < 0 ? errno : EIO; close(mem);
@@ -217,7 +235,7 @@ static void probe_try_attach(struct probe *p, struct probe_backend *b)
     }
     if (!ptr) { close(mem); return; }
     /* Not initialised yet: leave the armed bootstrap watchpoint in place. */
-    int shared = probe_addr_is_shared(b->pid, ptr);
+    int shared = probe_addr_is_shared(p, b->pid, ptr);
     if (shared != 1) {
         int error = errno; close(mem);
         if (shared < 0) probe_attach_error(p, b, "read /proc/<pid>/maps", error ? error : ENOENT);
@@ -225,10 +243,11 @@ static void probe_try_attach(struct probe *p, struct probe_backend *b)
     }
     u64 addr = ptr + p->wait_offset;
     u32 wait = 0;
+    probe_note_work(&p->stats.proc_reads);
     n = pread(mem, &wait, sizeof(wait), (off_t)addr);
     int read_error = n < 0 ? errno : EIO; close(mem);
     if (n != sizeof(wait)) { probe_attach_error(p, b, "read the wait word", read_error); return; }
-    int fd = probe_watchpoint(b->pid, addr, bpf_program__fd(p->skel->progs.on_watchpoint), false);
+    int fd = probe_watchpoint(p, b->pid, addr, bpf_program__fd(p->skel->progs.on_watchpoint), false);
     if (fd < 0) { probe_attach_error(p, b, "open the wait watchpoint", -fd); return; }
     u32 key = b->pid; struct pgwt_pid_state st;
     int map = bpf_map__fd(p->skel->maps.state_map);
@@ -266,12 +285,13 @@ static void probe_new_backend(struct probe *p, u32 pid, u64 cookie)
 static void probe_instrument(struct probe *p, struct probe_backend *b)
 {
     b->pending = false;
-    int fd = probe_watchpoint(b->pid, p->ptr, bpf_program__fd(p->skel->progs.on_bootstrap), true);
+    int fd = probe_watchpoint(p, b->pid, p->ptr, bpf_program__fd(p->skel->progs.on_bootstrap), true);
     if (fd < 0) { b->boot = -1; probe_attach_error(p, b, "open the bootstrap watchpoint", -fd); }
     else b->boot = fd;
     /* Already gone: do not pay for two more attaches that can only fail. */
     if (b->raced || p->failed) return;
     if (p->activity_offset) {
+        probe_note_work(&p->stats.attaches);
         b->activity = bpf_program__attach_uprobe(p->skel->progs.on_report_activity, false,
             (pid_t)b->pid, p->exe, (size_t)p->activity_offset);
         long error = libbpf_get_error(b->activity);
@@ -280,6 +300,7 @@ static void probe_instrument(struct probe *p, struct probe_backend *b)
     if (p->query_offset && !b->raced && !p->failed) {
         struct bpf_program *program = p->skel->rodata->pg13_query_attr
             ? p->skel->progs.on_executor_start : p->skel->progs.on_report_query_id;
+        probe_note_work(&p->stats.attaches);
         b->query = bpf_program__attach_uprobe(program, false, (pid_t)b->pid, p->exe, (size_t)p->query_offset);
         long error = libbpf_get_error(b->query);
         if (error) { b->query = NULL; probe_attach_error(p, b, "attach the query uprobe", (int)-error); }
@@ -368,9 +389,9 @@ static int probe_record(struct probe *p, int dest, const void *data, size_t size
             id->exit_seen=true; id->exit_ts=ev.timestamp;
         }
         if (ev.type == PGWT_LIFECYCLE_INIT) {
+            /* Restoration mutant only. Keep even its /proc and attach work
+             * in the main loop, never inside the lifecycle drain callback. */
             ++p->init_records;
-            for (int i=0; i<MAX_BACKENDS; ++i)
-                if (p->backends[i].pid == pid && p->backends[i].cookie == hdr.cookie) probe_try_attach(p, &p->backends[i]);
         }
         if (ev.type == PGWT_LIFECYCLE_EXIT) for (int i=0; i<MAX_BACKENDS; ++i)
             if (p->backends[i].pid == pid && p->backends[i].cookie == hdr.cookie) {
@@ -454,9 +475,36 @@ static void *probe_requester_loop(void *arg)
 }
 static int probe_drain(struct probe *p)
 {
+    /* Sample before EVERY drain, including the top of the main loop and
+     * completion loops. Only this thread advances the consumer position. */
+    struct ring *lifecycle = ring_buffer__ring(p->rings, 1);
+    if (lifecycle) {
+        u64 consumed = ring__consumer_pos(lifecycle);
+        u64 distance = ring__producer_pos(lifecycle) - consumed;
+        if (distance > p->stats.lifecycle_peak) p->stats.lifecycle_peak = distance;
+        ++p->stats.lifecycle_samples;
+    }
     int a = ring_buffer__consume(p->rings), b = perf_buffer__consume(p->perf);
+    p->stats.attaches.since_drain = p->stats.proc_reads.since_drain = 0;
     if (a < 0 || b < 0) { probe_fail(p, "buffer consume"); return -1; }
     return a+b;
+}
+/* At most K=3 attaches (bootstrap plus activity/query uprobes) per drain.
+ * The wait attach and /proc inspection get a separate drain, even for an
+ * already instrumented backend. Draining can retire/reuse b's slot: never
+ * retain a PID, cookie or fd across it. try_attach rechecks pending/pid. */
+static void probe_service_backends(struct probe *p)
+{
+    for (int i=0; i<MAX_BACKENDS && !p->failed; ++i) {
+        struct probe_backend *b = &p->backends[i];
+        if (!b->pid) continue;
+        if (b->pending) {
+            probe_instrument(p, b);
+            if (probe_drain(p) < 0 || p->failed) return;
+        }
+        probe_try_attach(p, b);
+        if (probe_drain(p) < 0) return;
+    }
 }
 static int probe_round(struct probe *p, bool el)
 {
@@ -487,7 +535,7 @@ static int probe_self_child(struct probe *p, int *reused)
     close(channel[0]);
     u32 key=(u32)child; struct pgwt_pid_state state;
     int map=bpf_map__fd(p->skel->maps.state_map);
-    int fd=probe_watchpoint(key, (u64)(uintptr_t)&probe_wait, bpf_program__fd(p->skel->progs.on_watchpoint), false);
+    int fd=probe_watchpoint(p, key, (u64)(uintptr_t)&probe_wait, bpf_program__fd(p->skel->progs.on_watchpoint), false);
     if (fd < 0 || bpf_map_lookup_elem(map, &key, &state)) {
         if (fd >= 0) close(fd);
         close(channel[1]); waitpid(child, NULL, 0); return -1;
@@ -734,7 +782,40 @@ static int probe_verifier_matrix(void)
     printf("VERIFIER-MATRIX loads=%d rejected=%d\n", loads, rejected);
     return rejected || !loads ? 1 : 0;
 }
-static int transport_probe(int argc, char **argv)
+static void probe_read_stats(struct probe *p)
+{
+    static const u32 slots[4] = {PGWT_RING_FAIL_LIFECYCLE_FORK,
+        PGWT_RING_FAIL_LIFECYCLE_EXIT, PGWT_RING_FAIL_QUERY_TEXT, PGWT_RING_FAIL_PG13_QUERY_TEXT};
+    if (!p->loaded) return;
+    u64 *values = calloc((size_t)p->possible, sizeof(*values));
+    if (!values) { probe_fail(p, "statistics allocation"); return; }
+    p->stats.sites_valid = true;
+    for (size_t i=0; i<4; ++i) {
+        if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.ringbuf_site_drops), &slots[i], values)) {
+            p->stats.sites_valid = false; probe_fail(p, "statistics site counter read"); break;
+        }
+        for (int cpu=0; cpu<p->possible; ++cpu) p->stats.site_drops[i] += values[cpu];
+    }
+    free(values);
+}
+static void probe_print_stats(const struct probe_stats *stats)
+{
+    static const char *sites[4] = {"LIFECYCLE_FORK", "LIFECYCLE_EXIT", "QUERY_TEXT", "PG13_QUERY_TEXT"};
+    for (size_t i=0; i<4; ++i) {
+        fprintf(stderr, "PROBE-STAT: ringbuf_site_drops site=%s value=", sites[i]);
+        if (stats->sites_valid) fprintf(stderr, "%"PRIu64, stats->site_drops[i]);
+        else fprintf(stderr, "null");
+        fputc('\n', stderr);
+    }
+    fprintf(stderr, "PROBE-STAT: lifecycle_rb max_producer_minus_consumer_bytes=%"PRIu64
+        " ring_size_bytes=%"PRIu64" samples=%"PRIu64"\n",
+        stats->lifecycle_peak, stats->lifecycle_size, stats->lifecycle_samples);
+    fprintf(stderr, "PROBE-STAT: attaches max_between_drains=%"PRIu64" total=%"PRIu64"\n",
+        stats->attaches.max, stats->attaches.total);
+    fprintf(stderr, "PROBE-STAT: proc_reads max_between_drains=%"PRIu64" total=%"PRIu64"\n",
+        stats->proc_reads.max, stats->proc_reads.total);
+}
+static int probe_run(int argc, char **argv, struct probe_stats *stats)
 {
     struct probe p={0}; int result=1; u32 pm=0, pg13=0, qd=0, ps=0, source=0, running=2; u64 debug_text=0;
     for (int i=0; i<MAX_BACKENDS; ++i) p.backends[i].boot=p.backends[i].wait=-1;
@@ -795,6 +876,8 @@ static int transport_probe(int argc, char **argv)
         if (p.spinning) { fprintf(stderr,"PROBE-REFUSED: test spin BPF load/verifier failed; retain verifier log\n"); result=78; }
         goto cleanup;
     }
+    p.loaded = true;
+    p.stats.lifecycle_size = bpf_map__max_entries(p.skel->maps.lifecycle_rb);
     struct pgwt_exact_config config={.generation=1,.admitting=1}; u32 zero=0;
     if (bpf_map_update_elem(bpf_map__fd(p.skel->maps.exact_config_map), &zero, &config,BPF_ANY)) goto cleanup;
     /* The falsifier arm gets 16 MiB per CPU (262,144 boundary records). On
@@ -823,15 +906,8 @@ static int transport_probe(int argc, char **argv)
     } else {
         u64 next=0;
         while (!probe_stop && !p.failed) {
-            probe_drain(&p);
-            /* Instrument what the drain registered, and keep the rings
-             * drained while doing it: an attach costs up to milliseconds. */
-            for (int i=0, work=0;i<MAX_BACKENDS && !p.failed;++i) {
-                struct probe_backend *b=&p.backends[i];
-                if (!b->pid) continue;
-                if (b->pending) { probe_instrument(&p,b); if (++work%4 == 0) probe_drain(&p); }
-                probe_try_attach(&p,b);
-            }
+            if (probe_drain(&p) < 0) break;
+            probe_service_backends(&p);
             if (probe_now() >= next) { if (probe_round(&p,true)) { p.failed=1; break; } next=probe_now()+(p.spinning?1000000:20000000); }
             struct pollfd input={.fd=STDIN_FILENO,.events=POLLIN};
             if (poll(&input,1,1)>0 && (input.revents&(POLLIN|POLLHUP))) {
@@ -864,10 +940,22 @@ static int transport_probe(int argc, char **argv)
     if (!result && p.self && !p.reuses) result=1;
 cleanup:
     probe_finish(&p);
+    probe_read_stats(&p);
+    *stats = p.stats;
+    if (p.failed && !result) result=1;
     ring_buffer__free(p.rings); perf_buffer__free(p.perf); pg_wait_tracer_bpf__destroy(p.skel);
     free(p.identities); free(p.delivered); free(p.last_seq); free(p.acks); free(p.snapshot); free(p.helpers); free(p.helper_stamps); free(p.pid_lifetimes);
     free(p.skipped); free(p.discard_scratch);
     free(p.requests);
     return result;
 }
+/* Keep exit diagnostics independent of argument, refusal and setup paths. */
+static int transport_probe(int argc, char **argv)
+{
+    struct probe_stats stats={0};
+    int result = probe_run(argc, argv, &stats);
+    probe_print_stats(&stats);
+    return result;
+}
+
 #endif

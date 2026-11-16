@@ -774,6 +774,65 @@ the reader.
   before it was silently ignored. The cause above is read from the log and
   the source; the box runs that follow test it.
 
+  **Follow-up failure on `567bf82a` (dispatch evidence, not a run performed
+  in this round).** Ubuntu 6.8, PG18, the producers' `pgbench -C` ten-run
+  loop stopped at run 1 with exit 1, after the earlier callback-stall fix.
+  The log reported `PROBE-FAIL: attempt sequence gap/reorder` and
+  `PROBE-FAIL: L record outside its own FORK/EXIT positions`. L failures
+  totalled 45 (8/9/9/19 per CPU), with 0 discards; CPU and E had 0 failures.
+  There was no `duplicate/nonincreasing` line. Evidence supplied by the lead:
+  `tests/results/session-20261114/b-integration/ubuntu/salvaged-vm/`
+  `final-producers-churn10-pg18.log` and `final-producers-live-pg18.log`.
+  The daemon, reading the same 64 KiB lifecycle ring on that VM/kernel, had
+  0 L failures in nine churn runs. The inference that the probe's remaining
+  attach and `/proc` work starved its reader is still to be measured.
+
+  **This round:** the probe drains after each backend's bootstrap and two
+  uprobe attaches (at most **K=3** attach attempts between drains), then
+  separately after its wait-attach and `/proc` inspection. Already
+  instrumented backends also get that latter drain. Even the INIT-restoration
+  mutant defers attach work from its INIT callback to the main loop. The
+  drain can consume EXIT/FORK and reuse a registry slot, so the next step rechecks its current
+  pid and pending state. The registered host driver executes the actual
+  service/instrument/drain functions against a finite queue model; moving
+  the drains after all attaches must fail
+  `FAIL lifecycle ring drained between attach batches`. Every existing L
+  failure assertion remains in force. Ring sizes, retries, load limits and
+  timeouts are unchanged. A fresh Linux run is still required.
+
+  At every normal probe exit, including failures and setup refusals, stderr
+  now has these seven machine-readable lines (the live driver also forwards
+  them on success):
+
+  ```text
+  PROBE-STAT: ringbuf_site_drops site=LIFECYCLE_FORK value=<sum over CPUs|null>
+  PROBE-STAT: ringbuf_site_drops site=LIFECYCLE_EXIT value=<sum over CPUs|null>
+  PROBE-STAT: ringbuf_site_drops site=QUERY_TEXT value=<sum over CPUs|null>
+  PROBE-STAT: ringbuf_site_drops site=PG13_QUERY_TEXT value=<sum over CPUs|null>
+  PROBE-STAT: lifecycle_rb max_producer_minus_consumer_bytes=<bytes> ring_size_bytes=<bytes> samples=<count>
+  PROBE-STAT: attaches max_between_drains=<count> total=<count>
+  PROBE-STAT: proc_reads max_between_drains=<count> total=<count>
+  ```
+
+  Occupancy is sampled before every drain, including the top of each main
+  and completion loop. The size comes from the loaded lifecycle map; zero
+  samples/size means no usable observation, and an unavailable site read is
+  `null`, never a measured zero. Attach counts include attempted per-backend
+  watchpoint opens and uprobe attaches, successful or failed. `/proc` counts
+  cover explicit `read`, `pread` and `fgets` attempts (each maps line/EOF
+  attempt counts); they exclude libbpf's internal I/O. Maxima include the
+  final partial interval as well as completed intervals.
+
+  On the box, FORK/EXIT refusals with the peak close to `ring_size_bytes`
+  support probe lag. Refusals with a consistently low sampled occupancy
+  warrant producer investigation; a peak sampled between operations cannot
+  prove occupancy at the instant of failure. TEXT site counters include
+  both reservation refusals and negative user-string reads, so nonzero TEXT
+  with low occupancy may be a text-read fault rather than reader lag. These
+  aggregate counters cannot distinguish those two TEXT causes on their own;
+  do not call them all full-ring drops. No result for this revised probe is
+  claimed here.
+
 ### What is still unproven, and what was found
 
 - The kernel premises 1, 3 and 5 above are as open as before. The cut adds no

@@ -4,6 +4,9 @@
 Called by the registered C unit test (and make check). No BPF compilation/load.
 """
 from pathlib import Path
+import contextlib
+import io
+import json
 import os
 import re
 import shlex
@@ -23,7 +26,7 @@ FUNCTIONS = ('count_ring_fail', 'count_map_fail', 'test_fail_once',
 
 
 def function(source, name):
-    matches = list(re.finditer(r'^(?:static __always_inline )?(?:void|bool|u64|int|struct pgwt_wire_(?:trace|lifecycle)) \**' + name + r'\(', source, re.M))
+    matches = list(re.finditer(r'^(?:static(?: __always_inline)? )?(?:void|bool|u64|int|struct pgwt_wire_(?:trace|lifecycle)) \**' + name + r'\(', source, re.M))
     assert len(matches) == 1, (name, len(matches))
     start = matches[0].start()
     brace = source.index('{', matches[0].end())
@@ -100,6 +103,63 @@ def run(source, directory, header=None):
     built = subprocess.run(command, capture_output=True, text=True)
     assert built.returncode == 0, built.stdout + built.stderr
     return subprocess.run([str(binary)], capture_output=True, text=True)
+
+
+def run_probe_loop(source, directory):
+    functions = ('probe_note_work', 'probe_instrument', 'probe_drain',
+                 'probe_service_backends', 'probe_read_stats', 'probe_print_stats')
+    stats = source[source.index('struct probe_work_stat {'):source.index('static void probe_note_work(')]
+    bodies = '\n\n'.join(function(source, name) for name in functions)
+    harness = (ROOT / 'tests/transport_probe_harness.h').read_text()
+    unit, binary = directory / 'probe-loop.c', directory / 'probe-loop'
+    unit.write_text(harness.replace('/* PROBE_STATS */', stats).replace('/* PROBE_FUNCTIONS */', bodies))
+    built = subprocess.run([*shlex.split(os.environ.get('CC', 'cc')), '-std=gnu11',
+                            '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'src'),
+                            str(unit), '-o', str(binary)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stdout + built.stderr
+    return subprocess.run([str(binary)], capture_output=True, text=True)
+
+
+def check_probe_loop(directory):
+    source = (ROOT / 'tests/transport_probe.h').read_text()
+    assert 'probe_service_backends(&p);' in function(source, 'probe_run')
+    assert 'probe_try_attach(' not in function(source, 'probe_record')
+    result = run_probe_loop(source, directory)
+    assert result.returncode == 0, result.stdout + result.stderr
+    stats = [line for line in result.stderr.splitlines() if line.startswith('PROBE-STAT:')]
+    assert len(stats) == 14, stats
+    assert stats[:4] == [f'PROBE-STAT: ringbuf_site_drops site={site} value={value}'
+                         for site, value in zip(('LIFECYCLE_FORK', 'LIFECYCLE_EXIT', 'QUERY_TEXT',
+                                                 'PG13_QUERY_TEXT'), (11, 13, 15, 17))], stats
+    assert all(line.endswith('value=null') for line in stats[7:11]), stats
+    print(result.stdout, end='')
+    # The real Linux driver removes its temporary log directory after each
+    # run. Successful summaries must forward diagnostics before it does.
+    from test_transport_producers_live import summary
+    log = directory / 'probe.stderr'
+    log.write_text('\n'.join(stats[:7]) + '\n')
+    row = {'ok': True}
+    class FinishedProbe:
+        returncode = 0
+        def communicate(self, timeout):
+            assert timeout == 30
+            return json.dumps(row) + '\n', None
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert summary(FinishedProbe(), log) == row
+    assert output.getvalue().splitlines()[:7] == stats[:7], output.getvalue()
+    print('probe diagnostics forwarding: PASS (all PROBE-STAT lines survive successful live summary)')
+    # Built mutation of the actual loop: both drains move after all backend
+    # attaches, precisely the original reader-lag failure. The simulated
+    # producers overrun their finite queue before that late drain runs.
+    original = function(source, 'probe_service_backends')
+    late = original.replace('            if (probe_drain(p) < 0 || p->failed) return;\n', '')
+    late = late.replace('        if (probe_drain(p) < 0) return;\n', '')
+    late = late[:-1] + '    probe_drain(p);\n}'
+    result = run_probe_loop(replace_once(source, original, late), directory)
+    assertion = 'FAIL lifecycle ring drained between attach batches'
+    assert result.returncode != 0 and assertion in result.stderr, result.stdout + result.stderr
+    print(f'mutant drain-after-all-attaches: KILLED ({assertion})')
 
 
 def main():
@@ -192,6 +252,7 @@ done
     source = (ROOT / 'src/bpf/pg_wait_tracer.bpf.c').read_text()
     with tempfile.TemporaryDirectory(prefix='pgwt-producers-host-') as tmp:
         directory = Path(tmp)
+        check_probe_loop(directory)
         result = run(source, directory)
         assert result.returncode == 0, result.stdout + result.stderr
         print(result.stdout, end='')

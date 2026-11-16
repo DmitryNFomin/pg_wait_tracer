@@ -266,7 +266,7 @@ def summary(proc, log):
     rows = [json.loads(line) for line in out.splitlines() if line.startswith('{')]
     assert proc.returncode == 0 and len(rows) == 1 and rows[0]['ok'], (proc.returncode, out, log.read_text())
     for line in log.read_text().splitlines():
-        if line.startswith('SPIN-EVIDENCE '):
+        if line.startswith(('SPIN-EVIDENCE ', 'PROBE-STAT:')):
             print(line, flush=True)
     print(json.dumps(rows[0], sort_keys=True), flush=True)
     return rows[0]
