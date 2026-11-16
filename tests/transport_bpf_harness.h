@@ -52,7 +52,7 @@ static u32 pg13_ps_queryid_off, pg13_qd_sourcetext_off = 8;
 static u32 bs_state_running = 2, bs_state_fastpath = 4, new_wait = 7;
 static u64 edge_stamp;
 static int fail_dest = -1, update_error, outputs, reservations, discards, text_result = 9;
-struct record { unsigned char bytes[512]; int dest, done; u64 reserved_at; size_t length; };
+struct record { unsigned char bytes[512]; int dest, done, submit_flags; u64 reserved_at; size_t length; };
 static struct record records[64];
 static void *bpf_map_lookup_elem(void *map, const void *key)
 {
@@ -115,7 +115,14 @@ static struct record *find_record(void *ptr)
     abort();
 }
 static void bpf_ringbuf_submit(void *ptr, int flags)
-{ (void)flags; CHECK("submit owns live reservation", !find_record(ptr)->done); find_record(ptr)->done = 1; ++outputs; }
+{
+    struct record *r = find_record(ptr);
+    CHECK("submit owns live reservation", !r->done);
+    r->submit_flags = flags; r->done = 1; ++outputs;
+    if (!exact_perf_mode)
+        CHECK("mode zero submit flags unchanged",
+              flags == (r->dest == PGWT_WIRE_DEST_E ? BPF_RB_NO_WAKEUP : 0));
+}
 static void bpf_ringbuf_discard(void *ptr, int flags)
 { (void)flags; CHECK("discard owns live reservation", !find_record(ptr)->done); find_record(ptr)->done = -1; ++discards; }
 static long bpf_ringbuf_output(void *map, void *ptr, size_t len, int flags)
@@ -196,11 +203,17 @@ static void timestamp_order(void)
         CHECK("N mode envelope", h->version == 1 && !h->flags && !h->q && h->cpu == cpu);
     }
 }
+static bool submit_flags(int index, int dest, int flags)
+{
+    return index < reservations && records[index].done == 1 &&
+        records[index].dest == dest && records[index].submit_flags == flags;
+}
 static void tests(void)
 {
     struct trace_event_raw_sched_process_fork fork = {.parent_pid=1, .child_pid=42};
     reset(); on_fork(&fork);
     CHECK("fresh fork cookie", state.cookie == 1 && allocator == 1);
+    CHECK("DATA fork L no-wakeup", submit_flags(0, PGWT_WIRE_DEST_L, BPF_RB_NO_WAKEUP));
     struct pgwt_wire_lifecycle saved = *(struct pgwt_wire_lifecycle *)records[0].bytes;
     on_fork(&fork);
     CHECK("pid reuse fresh cookie", state.cookie == 2 && allocator == 2);
@@ -217,11 +230,13 @@ static void tests(void)
         ((struct pgwt_wire_trace *)records[3].bytes)->hdr.cookie==2);
     reset(); emit_marker(PGWT_MARKER_PLAN_START); timestamp_order();
     CHECK("marker destination", attempts[1] == 1 && attempts[0] == 0);
+    CHECK("DATA marker E no-wakeup", submit_flags(0, PGWT_WIRE_DEST_E, BPF_RB_NO_WAKEUP));
     reset(); fail_dest = 1; emit_marker(PGWT_MARKER_PLAN_START);
     CHECK("marker fail attribution coherent", edge_stamp && attempts[1] == 1 && failures[1] == 1 && drops == 1 && sites[2] == 1);
     fail_dest = -1; emit_marker(PGWT_MARKER_PLAN_START);
     CHECK("failed attempt consumes seq", attempts[1] == 2 && ((struct pgwt_wire_hdr *)records[0].bytes)->seq == 2);
     reset(); struct pt_regs cmd = {.arg1=2}; on_report_activity(&cmd); timestamp_order();
+    CHECK("DATA command E no-wakeup", submit_flags(0, PGWT_WIRE_DEST_E, BPF_RB_NO_WAKEUP));
     reset(); rewrite_wp_live = 0; on_report_activity(&cmd);
     CHECK("command saved admission releases reservation", reservations == 1 && outputs == 1 &&
         records[0].done == 1 && !discards && attempts[1] == 1 && !failures[1]);
@@ -240,6 +255,8 @@ static void tests(void)
     CHECK("command fail attribution coherent", edge_stamp && state.cmd_open == 1 && attempts[1] == 1 && failures[1] == 1);
     reset(); transport_exit(42, &state); timestamp_order();
     CHECK("exit reserves both", attempts[1] == 1 && attempts[2] == 1 && outputs == 2 && !state_present);
+    CHECK("DATA exit E no-wakeup", submit_flags(0, PGWT_WIRE_DEST_E, BPF_RB_NO_WAKEUP));
+    CHECK("DATA exit L no-wakeup", submit_flags(1, PGWT_WIRE_DEST_L, BPF_RB_NO_WAKEUP));
     CHECK("exit shared timestamp", ((struct pgwt_wire_trace *)records[0].bytes)->payload.timestamp_ns ==
         ((struct pgwt_wire_lifecycle *)records[1].bytes)->payload.timestamp);
     for (int dest = 1; dest <= 2; ++dest) {
@@ -250,6 +267,7 @@ static void tests(void)
     reset(); state.wp_live=0; transport_exit(42, &state);
     CHECK("unattached exit submits lifecycle only", outputs==1 && !attempts[1] && attempts[2]==1 &&
         records[0].done==1 && !state_present);
+    CHECK("DATA unattached exit L no-wakeup", submit_flags(0, PGWT_WIRE_DEST_L, BPF_RB_NO_WAKEUP));
     reset(); state.wp_live=0; fail_dest=2; transport_exit(42, &state);
     CHECK("unattached failed exit has no reservation to release", !reservations && !attempts[1] &&
         attempts[2]==1 && failures[2]==1 && !state_present);
@@ -276,6 +294,8 @@ static void tests(void)
     reset(); current_id = (u64)100 << 32 | 100; ctl.el_request = 1;
     on_transport_helper(NULL);
     CHECK("helper destinations", outputs == 3 && attempts[0] == 1 && attempts[1] == 1 && attempts[2] == 1);
+    CHECK("BOUNDARY E wakeup", submit_flags(0, PGWT_WIRE_DEST_E, 0));
+    CHECK("BOUNDARY L wakeup", submit_flags(1, PGWT_WIRE_DEST_L, 0));
     u64 w = ((struct pgwt_wire_cut *)records[0].bytes)->payload.w;
     CHECK("boundary read before reserve", w < records[0].reserved_at);
     current_id = (u64)42 << 32 | 42; emit_marker(PGWT_MARKER_PLAN_START); timestamp_order();
@@ -311,6 +331,8 @@ static void tests(void)
         if (pg13) on_executor_start(&q); else on_report_query_id(&q);
         timestamp_order();
         CHECK("text envelope", outputs==1 && attempts[2]==1 && ((struct pgwt_wire_hdr *)records[0].bytes)->kind==PGWT_WIRE_TEXT);
+        CHECK(pg13 ? "DATA PG13 text L no-wakeup" : "DATA text L no-wakeup",
+              submit_flags(0, PGWT_WIRE_DEST_L, BPF_RB_NO_WAKEUP));
         reset(); fail_dest=2;
         if (pg13) on_executor_start(&q); else on_report_query_id(&q);
         CHECK("text failed reserve", !outputs && attempts[2]==1 && failures[2]==1 && sites[pg13?8:7]==1);
@@ -342,6 +364,13 @@ static void tests(void)
     CHECK("mode zero raw exit and retained state", outputs==2 && state_present && !attempts[1] && !attempts[2] && records[0].length==sizeof(struct pgwt_trace_event) && records[1].length==sizeof(struct pgwt_lifecycle_event));
     reset(); exact_perf_mode=0; on_report_activity(&cmd);
     CHECK("mode zero raw command", outputs==1 && records[0].length==sizeof(struct pgwt_trace_event) && !attempts[1]);
+    for (int pg13=0; pg13<2; ++pg13) {
+        struct pt_regs q = {.arg1=pg13 ? (u64)(uintptr_t)&desc : 99};
+        reset(); exact_perf_mode=0;
+        if (pg13) on_executor_start(&q); else on_report_query_id(&q);
+        CHECK("mode zero raw text", outputs==1 && records[0].length==sizeof(struct pgwt_query_text_event) && !attempts[2]);
+    }
+    puts("submit flags: 10/10 exact-perf site/branch checks PASS; mode zero flags unchanged");
     puts("production producer bodies: PASS (identity, reservation order, accounting, helper, mode zero)");
 }
 int main(void) { tests(); return 0; }

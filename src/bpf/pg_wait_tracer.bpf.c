@@ -465,6 +465,8 @@ static __always_inline void transport_boundary(void *ctx, u32 dest, u32 round)
         if (!cut) { transport_failure(dest); return; }
         transport_header(&cut->hdr, PGWT_WIRE_BOUNDARY, sizeof(cut->payload), seq, 0);
         cut->payload = (struct pgwt_wire_boundary){ .w = w, .round = round, .dest = dest };
+        /* Completion waits for E/L cuts: retain adaptive wakeup here. DATA
+         * on both rings is polled and suppresses per-record wakeups. */
         bpf_ringbuf_submit(cut, 0);
     }
 }
@@ -1061,7 +1063,7 @@ int on_fork(struct trace_event_raw_sched_process_fork *ctx)
             seq, child_seed.cookie);
         wire->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_FORK,
             .pid = child, .timestamp = bpf_ktime_get_ns() };
-        bpf_ringbuf_submit(wire, 0);
+        bpf_ringbuf_submit(wire, BPF_RB_NO_WAKEUP);
         return 0;
     }
     struct pgwt_lifecycle_event *ev;
@@ -1120,10 +1122,10 @@ static __always_inline int transport_exit(u32 pid, struct pgwt_pid_state *st)
                 (quality == PGWT_QUERY_QUALITY_PG13_SYNTH ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0),
             .cpu_ns = (cpu_now && st->last_cpu_ns && cpu_now >= st->last_cpu_ns)
                 ? cpu_now - st->last_cpu_ns : 0 };
-        bpf_ringbuf_submit(out, 0);
+        bpf_ringbuf_submit(out, BPF_RB_NO_WAKEUP);
         life->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_EXIT,
             .pid = pid, .timestamp = now };
-        bpf_ringbuf_submit(life, 0);
+        bpf_ringbuf_submit(life, BPF_RB_NO_WAKEUP);
     } else {
         struct pgwt_wire_lifecycle *life = transport_reserve_lifecycle(&seq_l);
         if (!life) {
@@ -1134,7 +1136,7 @@ static __always_inline int transport_exit(u32 pid, struct pgwt_pid_state *st)
             st->cookie);
         life->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_EXIT,
             .pid = pid, .timestamp = bpf_ktime_get_ns() };
-        bpf_ringbuf_submit(life, 0);
+        bpf_ringbuf_submit(life, BPF_RB_NO_WAKEUP);
     }
 retire:
     bpf_map_delete_elem(&state_map, &pid);
@@ -1309,7 +1311,7 @@ static __always_inline void transport_marker(u32 pid, u32 marker)
         transport_cookie(pid));
     if (marker_edge(pid, marker, bpf_ktime_get_ns(), &evt)) {
         wire->payload = evt;
-        bpf_ringbuf_submit(wire, 0);
+        bpf_ringbuf_submit(wire, BPF_RB_NO_WAKEUP);
     } else {
         /* State vanished or admission closed: nothing to publish, exactly
          * as flag-off publishes nothing. Count the withdrawn attempt as a
@@ -1442,7 +1444,7 @@ static __always_inline bool transport_text(u32 pid, u64 query_id, u64 text_ptr,
         bpf_ringbuf_discard(wire, 0);
         return false;
     }
-    bpf_ringbuf_submit(wire, 0);
+    bpf_ringbuf_submit(wire, BPF_RB_NO_WAKEUP);
     return true;
 }
 
@@ -1498,7 +1500,7 @@ static __always_inline int transport_activity(u32 pid, struct pgwt_pid_state *st
             .duration_ns = 0,
             .query_id = query_id,
         };
-        bpf_ringbuf_submit(wire, 0);
+        bpf_ringbuf_submit(wire, BPF_RB_NO_WAKEUP);
     } else {
         /* Admission closed: nothing to publish, as with flag-off. A
          * discard (not a failure, not a ring drop), counted before release. */

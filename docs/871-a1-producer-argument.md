@@ -6,6 +6,25 @@ The default producer paths keep raw payloads, timestamp placement, accounting
 and userspace map retirement. The frozen wire and v4 storage format are unchanged.
 Attachment qualification is A2; production drain/merge admission is B.
 
+The overhead profile supplied for the 2026-11-16 screen measured the adaptive
+event-ring submit wakeup chain at about 21–22 µs per transaction on Ubuntu and
+12–13 µs on EL8, inside PostgreSQL. Under `exact_perf_mode`, ordinary E-ring
+TRACE records (markers, command boundaries and terminal transitions) and
+L-ring LIFECYCLE/TEXT records now submit with `BPF_RB_NO_WAKEUP`; both readers
+are polled. E/L BOUNDARY cuts retain flags 0 because round completion waits
+for them; CPU perf boundaries/acknowledgements and the INIT perf wake-up hint
+are unchanged. Each main-loop pass polls the transport and attempts the common
+E drain (`src/daemon.c`, `pgwt_daemon_run`), with a 10 ms maximum outer epoll
+timeout (0 after a budget yield); the inner completion wait is at most 1 ms
+(`src/percpu_transport.c`, `linux_wait`). These bound sleeping, not total
+record residence under load: the existing 50 ms pass and 10 ms drain budgets
+may defer work and mark backlog for immediate resumption. The completion fence
+still requires consumed E/L boundaries, every higher-round CPU ack and frozen
+attempt targets; a short E/L target holds until the mmap consumer position
+reaches the fixed producer-position cut (`complete_round`, `linux_positions`),
+independently of wakeups. Flag-off submits are unchanged. The re-screen on
+EL8/Ubuntu with PG13/PG18 is pending; no overhead result is claimed here.
+
 ## Wire and producer inventory
 
 Each row below emits the frozen 32-byte v1 header followed by the named payload.

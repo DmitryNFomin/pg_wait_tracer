@@ -318,6 +318,26 @@ done
         early = replace_once(early, '    if (marker_edge(pid, marker, bpf_ktime_get_ns(), &evt)) {',
                              '    if (marker_edge(pid, marker, early, &evt)) {')
         mutants = [('timestamp-before-reserve', early, None, 'timestamp after reserve')]
+        # Each DATA submit site is exercised through its actual producer.
+        # The two lifecycle EXIT branches share text but have separate cases.
+        for name, producer, pointer, occurrence, assertion in (
+                ('DATA-fork-wakeup', 'on_fork', 'wire', 0, 'DATA fork L no-wakeup'),
+                ('DATA-marker-wakeup', 'transport_marker', 'wire', 0, 'DATA marker E no-wakeup'),
+                ('DATA-command-wakeup', 'transport_activity', 'wire', 0, 'DATA command E no-wakeup'),
+                ('DATA-exit-E-wakeup', 'transport_exit', 'out', 0, 'DATA exit E no-wakeup'),
+                ('DATA-exit-L-wakeup', 'transport_exit', 'life', 0, 'DATA exit L no-wakeup'),
+                ('DATA-unattached-exit-L-wakeup', 'transport_exit', 'life', 1, 'DATA unattached exit L no-wakeup'),
+                ('DATA-text-wakeup', 'transport_text', 'wire', 0, 'DATA text L no-wakeup')):
+            body = function(source, producer)
+            submit = f'bpf_ringbuf_submit({pointer}, BPF_RB_NO_WAKEUP);'
+            positions = [match.start() for match in re.finditer(re.escape(submit), body)]
+            assert len(positions) == (2 if pointer == 'life' else 1), name
+            at = positions[occurrence]
+            changed = body[:at] + f'bpf_ringbuf_submit({pointer}, 0);' + body[at + len(submit):]
+            mutants.append((name, replace_once(source, body, changed), None, assertion))
+        mutants.append(('BOUNDARY-wakeup-removed', replace_once(source,
+            'bpf_ringbuf_submit(cut, 0);',
+            'bpf_ringbuf_submit(cut, BPF_RB_NO_WAKEUP);'), None, 'BOUNDARY E wakeup'))
         # Take the attempt number only when the reservation succeeded.
         mutants.append(('seq-only-on-success', replace_once(source,
             '    *seq = transport_attempt(PGWT_WIRE_DEST_E);\n'
@@ -386,6 +406,7 @@ done
             result = run(mutated, directory, mutated_header)
             assert result.returncode != 0 and 'FAIL ' + assertion in result.stderr, (name, result.stdout, result.stderr)
             print(f'mutant {name}: KILLED ({assertion})')
+        print(f'producer mutants: {len(mutants)}/{len(mutants)} killed at intended assertions')
 
 
 if __name__ == '__main__':
