@@ -42,6 +42,10 @@ struct pgwt_counters {
     uint64_t wp_attach_failures_total; /* attach/enable failure on live or unknown target;
                                       * includes bootstrap and validation refusals */
     uint64_t wp_attach_exit_race_total; /* attach/enable failure with original target gone */
+    /* Subsets recorded after failed hardware operations, excluding lifecycle
+     * eligibility refusals. Gone is wp_attach_exit_race_total above. */
+    uint64_t wp_attach_failures_live_total;
+    uint64_t wp_attach_failures_unknown_total;
     uint64_t prev_events_total;        /* events_total at previous timer tick */
     double   events_per_sec;           /* recent rate, refreshed each tick */
 
