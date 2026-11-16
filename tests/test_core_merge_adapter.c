@@ -310,6 +310,90 @@ static void put_le(unsigned char *p, uint64_t v, size_t n)
     for (size_t i=0;i<n;++i) { p[i]=(unsigned char)v; v>>=8; }
 }
 
+static bool failed_terminal(void)
+{
+    for (unsigned mode=0;mode<2;++mode) {
+        premises p; MUST(setup(&p,(pgwt_merge_mode)mode));
+        pgwt_merge_input check={.kind=PGWT_MERGE_CHECK,.observation={.d=20,.counters={.known=true}}};
+        ma_envelope event=control(MA_ATTACH_EVENT); event.attach_event=MA_BEGIN;
+        ma_result r=map(&p,&event);
+        MUST(one(r,check,false) && r.has_lifetime_update && r.next_lifetime.proof==MA_PENDING);
+        p.lifetimes[2]=r.next_lifetime;
+        event.attach_event=MA_COMPLETE;
+        event.facts_known=MA_ALL_FACTS; event.facts_true=MA_ALL_FACTS & ~MA_FRESH_FORK;
+        r=map(&p,&event);
+        MUST(one(r,golden_interrupted,false) && r.has_lifetime_update &&
+             r.next_lifetime.proof==MA_FAILED && r.next_lifetime.failure_reported &&
+             !r.next_lifetime.fork_forwarded);
+        p.lifetimes[2]=r.next_lifetime;
+        /* Inspect the adapter directly: the FAULT would mask this in a suspended core. */
+        event.attach_event=MA_BEGIN;
+        r=map(&p,&event);
+        MUST(one(r,check,false) && r.has_lifetime_update && r.next_lifetime.proof==MA_FAILED &&
+             r.next_lifetime.failure_reported && !r.next_lifetime.fork_forwarded);
+        p.lifetimes[2]=r.next_lifetime;
+        event.attach_event=MA_COMPLETE; event.facts_true=MA_ALL_FACTS;
+        r=map(&p,&event);
+        MUST(one(r,check,false) && r.has_lifetime_update && r.next_lifetime.proof==MA_FAILED &&
+             r.next_lifetime.failure_reported && !r.next_lifetime.fork_forwarded);
+        p.lifetimes[2]=r.next_lifetime;
+        ma_envelope fork=wire(MA_LIFECYCLE,golden_F,24);
+        pgwt_merge_input expected=golden_fork; expected.record.fork_seed_proved=false;
+        r=map(&p,&fork);
+        MUST(one(r,expected,false) && r.has_lifetime_update && r.next_lifetime.proof==MA_FAILED &&
+             r.next_lifetime.failure_reported && r.next_lifetime.fork_forwarded);
+        ma_destroy(p.adapter);
+    }
+    return true;
+}
+
+static bool identity_unbound(void)
+{
+    for (unsigned mode=0;mode<2;++mode) {
+        premises p; MUST(setup(&p,(pgwt_merge_mode)mode));
+        qualified_lifetime(&p.lifetimes[0]); p.lifetimes[0].identity_bound=false;
+        ma_envelope e=wire(MA_TRACE,golden_T,48);
+        /* A matching pid/cookie alone is not a unique historical identity binding.
+         * Preserve DATA and its cookie; leave identity enforcement to the core. */
+        pgwt_merge_input expected=golden_trace;
+        expected.record.identity_known=false;
+        expected.record.q=mode==PGWT_MERGE_Q ? 1 : 0;
+        expected.record.has_q=mode==PGWT_MERGE_Q;
+        ma_result r=map(&p,&e);
+        MUST(one(r,expected,false) && !r.has_lifetime_update);
+        qualified_lifetime(&p.lifetimes[2]); p.lifetimes[2].identity_bound=false;
+        e=wire(MA_LIFECYCLE,golden_F,24);
+        expected=golden_fork; expected.record.identity_known=false; expected.record.fork_seed_proved=false;
+        r=map(&p,&e);
+        MUST(one(r,expected,false) && !r.has_lifetime_update);
+        e=control(MA_ATTACH_EVENT); e.attach_event=MA_BEGIN;
+        r=map(&p,&e);
+        MUST(one(r,golden_interrupted,false) && !r.has_lifetime_update);
+        ma_destroy(p.adapter);
+    }
+    return true;
+}
+
+static bool escalation_markers(void)
+{
+    const uint32_t markers[]={0xfffffff4,0xfffffff5}; /* ESCALATE_BEGIN, ESCALATE_END */
+    for (unsigned mode=0;mode<2;++mode) {
+        premises p; MUST(setup(&p,(pgwt_merge_mode)mode));
+        unsigned char bytes[48];
+        for (size_t i=0;i<sizeof(markers)/sizeof(markers[0]);++i) {
+            memcpy(bytes,golden_T,48);
+            /* Match write_pid_marker_at: real pid, old==new marker, duration zero. */
+            put_le(bytes+8,10,4); put_le(bytes+12,markers[i],4);
+            put_le(bytes+16,markers[i],4); put_le(bytes+24,0,8);
+            ma_envelope e=wire(MA_TRACE,bytes,48);
+            ma_result r=map(&p,&e);
+            MUST(one(r,golden_interrupted,false) && !r.has_lifetime_update);
+        }
+        ma_destroy(p.adapter);
+    }
+    return true;
+}
+
 typedef struct {
     size_t source, size;
     uint64_t position;
@@ -881,7 +965,9 @@ static const adapter_guard adapter_guards[]={
     {"proof_other_facts",proof_other_facts},{"state_ownership",state_and_ownership},
     {"observations_holds",observations_and_holds},{"binding_decode",binding_and_decode},
     {"construction_refusals",construction_and_refusals},{"recovered_init",recovered_init_refusal},
-    {"writer_sink",sink_post_failure},{"failed_attempt",failed_attempt_no_laundering}
+    {"writer_sink",sink_post_failure},{"failed_attempt",failed_attempt_no_laundering},
+    {"failed_terminal",failed_terminal},{"identity_unbound",identity_unbound},
+    {"escalation_markers",escalation_markers}
 };
 
 static int adapter_main(int argc, char **argv)

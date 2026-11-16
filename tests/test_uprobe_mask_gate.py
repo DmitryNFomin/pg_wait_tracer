@@ -32,8 +32,11 @@ from contextlib import redirect_stdout
 import io
 import re
 import os
+import shlex
 import subprocess
 import sys
+import tempfile
+from unittest.mock import patch
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
@@ -361,11 +364,10 @@ def phase_env_assignment(node, seam):
             and isinstance(node.value, ast.Constant) and node.value.value == "1")
 
 
-def python_forces_absence(tree, seam):
+def python_forces_absence(tree, seam, condition='env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1"'):
     if seam is None:
         return False
-    switch = ast.parse('env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1"',
-                       mode="eval").body
+    switch = ast.parse(condition, mode="eval").body
     guarded = any(isinstance(node, ast.If)
                   and ast.dump(node.test) == ast.dump(switch)
                   and any(phase_env_assignment(child, seam)
@@ -402,22 +404,114 @@ def shell_forces_absence(source, seam):
         r'    export ' + re.escape(seam) + r'=1\nfi$', source, re.MULTILINE) is not None
 
 
-for file in ("test_execution_cardinality.py", "test_execution_span_live.py",
-             "test_escalation.sh", "ui_live_smoke.sh"):
-    source = io.open(os.path.join(SCRIPT_DIR, file), encoding="utf-8").read()
+def read_test_source(file):
+    with io.open(os.path.join(SCRIPT_DIR, file), encoding="utf-8") as stream:
+        return stream.read()
+
+
+def discover_phase_tests(runner_source, read_source=read_test_source):
+    """Inspect every registered live entry point, including delegated launches.
+
+    Select executable declaration reads or phase helper calls, not comments or
+    PHASE_DEPENDENT_TESTS: the latter grants exit 78 only to artifact-dependent
+    tests and deliberately excludes lifecycle and internally asserted A/B tests.
+    Requiring a direct Popen here would also lose delegated launches.
+    """
+    live = re.search(r'(?ms)^LIVE_TESTS=\(.*?^\)', runner_source)
+    if live is None:
+        raise ValueError("cannot discover phase tests: LIVE_TESTS array missing")
+    entries = []
+    body = live.group(0).split("(", 1)[1].rsplit(")", 1)[0]
+    for entry in shlex.split(body, comments=True):
+        fields = entry.split("|")
+        if len(fields) < 3:
+            raise ValueError("cannot discover phase tests: malformed entry %r" % entry)
+        if fields[2]:  # Function-only runner entries have no test file.
+            entries.append(fields[2])
+    if not entries:
+        raise ValueError("cannot discover phase tests: no live entry points parsed")
+    helpers = {"resolve_expected_phase_mask", "resolve_declared_phase_mask",
+               "exact_window_mask_ok", "phase_contract_apply",
+               "phase_contract_verdict", "phase_tab_expectation"}
+    found = {}
+    for file in sorted(set(entries)):
+        source = read_source(file)
+        if file.endswith(".py"):
+            nodes = list(ast.walk(ast.parse(source)))
+            asserts_phase = any(
+                any(is_helper_call(node, helper) for helper in helpers)
+                or (isinstance(node, ast.Constant) and node.value == tu.EXPECT_PHASE_ENV)
+                or (isinstance(node, ast.Name) and node.id == "EXPECT_PHASE_ENV"
+                    and isinstance(node.ctx, ast.Load))
+                or (isinstance(node, ast.Attribute) and node.attr == "EXPECT_PHASE_ENV")
+                for node in nodes)
+        else:
+            code = "\n".join(line for line in source.splitlines()
+                             if not line.lstrip().startswith("#"))
+            asserts_phase = (tu.EXPECT_PHASE_ENV in code or "phase-expectation" in code
+                             or any(re.search(r'\b' + helper + r'\s*\(', code)
+                                    for helper in helpers))
+        if asserts_phase:
+            found[file] = source
+    return found
+
+
+phase_tests = discover_phase_tests(runner)
+print("Discovered phase-asserting live tests: " + ", ".join(phase_tests))
+report(bool(phase_tests), "phase wiring discovery selects registered live entry points")
+# A fresh filename must enter the gate without changing a hand-maintained list.
+synthetic_runner = 'LIVE_TESTS=(\n    "new_phase|python3|new_phase.py"\n)'
+unwired_source = ast.unparse(UnwirePhaseEnv(seam_env, False).visit(
+    ast.parse(read_test_source("test_uprobe_fired.py"))))
+discovered_mutant = discover_phase_tests(synthetic_runner, lambda _: unwired_source)
+report("new_phase.py" in discovered_mutant
+       and not python_forces_absence(ast.parse(discovered_mutant["new_phase.py"]), seam_env),
+       "discovery finds a newly registered phase test and rejects removed forwarding")
+report(not discover_phase_tests(synthetic_runner, lambda _: '# PGWT_EXPECT_PHASE_PROBES\n'),
+       "a comment alone does not declare a phase-asserting test")
+report("new_phase.py" in discover_phase_tests(synthetic_runner.replace('"', "'"),
+                                              lambda _: unwired_source),
+       "discovery also inspects single-quoted live registrations")
+
+for file, source in phase_tests.items():
+    condition = 'env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1"'
+    if file == "test_counter_vector_phase_live.py":
+        tree = ast.parse(source)
+        report(any(isinstance(node, ast.ImportFrom)
+                   and node.module == "test_counter_vector_live"
+                   and any(alias.name == "run_arm" and alias.asname is None
+                           for alias in node.names) for node in ast.walk(tree))
+               and any(is_helper_call(node, "run_arm")
+                       and any(kw.arg == "expected_phase" and isinstance(kw.value, ast.Name)
+                               and kw.value.id == "expected_phase" for kw in node.keywords)
+                       for node in ast.walk(tree)),
+               "%s delegates to the shared phase arm" % file)
+        # This entry point delegates daemon startup and environment sanitising.
+        source += "\n" + io.open(os.path.join(SCRIPT_DIR, "test_counter_vector_live.py"),
+                                 encoding="utf-8").read()
+        forwarding = ast.parse('''
+if expected_phase is not None and "PGWT_TEST_FORCE_NO_PHASE_PROBES" in os.environ:
+    env["PGWT_TEST_FORCE_NO_PHASE_PROBES"] = os.environ["PGWT_TEST_FORCE_NO_PHASE_PROBES"]
+''').body[0]
+        report(any(isinstance(node, ast.If) and ast.dump(node) == ast.dump(forwarding)
+                   for node in ast.walk(ast.parse(source))),
+               "%s forwards the rehearsal switch only for its phase arm" % file)
+    if file == "test_phase_absent_live.py":
+        # Its forced/control legs intentionally own separate declarations.
+        # The main -> capture forcing argument is exercised below as well.
+        condition = "forced"
     report("--skip-usdt" not in source,
            "%s no longer passes the policy-level proxy" % file)
     if file.endswith(".py"):
-        report(python_forces_absence(ast.parse(source), seam_env),
+        report(python_forces_absence(ast.parse(source), seam_env, condition),
                "%s explicitly sets daemon's %s when switch is 1" % (file, seam_env))
         for rename in (False, True):
             mutated = UnwirePhaseEnv(seam_env, rename).visit(ast.parse(source))
-            report(not python_forces_absence(mutated, seam_env),
+            report(not python_forces_absence(mutated, seam_env, condition),
                    "%s rejects env assignment %s" %
                    (file, "renamed" if rename else "removed"))
-        wrong_switch = source.replace('env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1"',
-                                      'env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "0"')
-        report(not python_forces_absence(ast.parse(wrong_switch), seam_env),
+        wrong_switch = source.replace("if " + condition + ":", "if not (" + condition + "):")
+        report(not python_forces_absence(ast.parse(wrong_switch), seam_env, condition),
                "%s rejects inverted forcing switch" % file)
     else:
         report(shell_forces_absence(source, seam_env),
@@ -432,6 +526,30 @@ for file in ("test_execution_cardinality.py", "test_execution_span_live.py",
         report(not shell_forces_absence(source.replace(':-}" == "1"', ':-}" == "0"'),
                                        seam_env),
                "%s rejects inverted forcing switch" % file)
+
+# Exercise the actual lifecycle launcher without starting a Linux program.
+# Both the normal daemon and rollback daemon must receive the same rehearsal
+# seam; unset/0 preserve the inherited environment on Ubuntu and EL8.
+print("\n-- lifecycle rehearsal environment (mock process) --")
+for forced in (None, "0", "1"):
+    for inherited in (None, "0", "1"):
+        for fail_at in (None, 1):
+            env = {tu.EXPECT_PHASE_ENV: "0" if forced == "1" else "1"}
+            if forced is not None:
+                env["PGWT_TEST_FORCE_NO_PHASE_PROBES"] = forced
+            if inherited is not None:
+                env[seam_env] = inherited
+            with tempfile.TemporaryDirectory(prefix="pgwt-lifecycle-mock-") as directory:
+                with (patch.dict(os.environ, env, clear=True),
+                      patch.object(uf.tempfile, "mkdtemp", return_value=directory),
+                      patch.object(uf.subprocess, "Popen") as popen):
+                    uf.start_tracer(42, escalation_fail_at=fail_at)
+                actual = popen.call_args.kwargs["env"]
+                report(actual.get(seam_env) == ("1" if forced == "1" else inherited)
+                       and actual.get("PGWT_TEST_EXACT_PROBE_ESCALATION_FAIL_AT")
+                       == (None if fail_at is None else str(fail_at)),
+                       "lifecycle forced=%r inherited=%r rollback=%r forwards expected env" %
+                       (forced, inherited, fail_at))
 
 # The markers-absent rehearsal is only reachable through `make box-check` if
 # the launcher forwards the switch past sudo's env_reset. Without this the
@@ -496,6 +614,39 @@ if absent is not None:
     forced_status.update({f: "attach_failed" for f in absent.OUTCOME_FIELDS})
     forced_status.update({f: errno.ENOTSUP for f in absent.ERRNO_FIELDS})
     forced_status.update({f: 1 for f in absent.FIRE_FIELDS})
+
+    # The A/B test owns its negative assertion and keeps running both legs;
+    # testutil's exit-78 convention is reserved for artifact-dependent tests.
+    # Drive its actual entry point to catch a lost switch -> capture argument.
+    for declared, forced, want in (("0", None, [True, False]),
+                                   ("0", "0", [True, False]),
+                                   ("0", "1", [True, True]),
+                                   ("1", None, [True, False]),
+                                   ("1", "1", [True, False])):
+        calls = []
+
+        def mock_capture(pm_pid, trace_dir, force_absence):
+            calls.append(force_absence)
+            mask = 3 if force_absence or declared == "0" else 15
+            return [mask], forced_status, {"executions": 0 if mask == 3 else 1}
+
+        env = {tu.EXPECT_PHASE_ENV: declared}
+        if forced is not None:
+            env["PGWT_TEST_FORCE_NO_PHASE_PROBES"] = forced
+        absent.tests_run = absent.tests_failed = 0
+        with tempfile.TemporaryDirectory(prefix="pgwt-ab-routing-") as directory:
+            with (patch.dict(os.environ, env, clear=True),
+                  patch.object(sys, "argv", ["test_phase_absent_live.py", "--pid", "42"]),
+                  patch.object(sys, "platform", "linux"),
+                  patch.object(os, "geteuid", return_value=0),
+                  patch.object(os.path, "isfile", return_value=True),
+                  patch.object(absent.tempfile, "mkdtemp", return_value=directory),
+                  patch.object(absent, "capture", side_effect=mock_capture),
+                  redirect_stdout(io.StringIO())):
+                result = absent.main()
+        report(result == 0 and calls == want,
+               "A/B declared=%s forced=%r routes both capture legs: %s" %
+               (declared, forced, calls))
 
     def live_assertions(forced, masks, artifacts, status=None):
         output = io.StringIO()

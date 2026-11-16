@@ -47,6 +47,9 @@ run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
 need node; need go; need python3
 
+step "watchpoint attach exit races (portable backend C harness)"
+run python3 -B tests/test_backend_attach_race.py --mutants
+
 # Portable C core: this script builds/runs the contract C test in a temporary
 # directory. The differential compares against the independent reference;
 # every numerical mutant must then fail its intended distinguishing case.
@@ -97,9 +100,35 @@ else
 fi
 step "core merge frozen-fixture mutants (Refs #871)"
 run env CFLAGS="$core_cflags" bash tests/core_merge_mutants.sh
+run env CFLAGS="$core_cflags" python3 -B tests/test_core_merge_index.py
+run env CFLAGS="$core_cflags" python3 -B tests/core_merge_index_mutants.py
 
 step "C11 synthetic merge adapter: wire goldens, contract replay and rule mutants (Refs #871)"
 run env CFLAGS="$core_cflags" bash tests/core_merge_adapter_mutants.sh
+
+step "U1b transport wire golden bytes and registered A1/B seams (host C)"
+if transport_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-transport-check.XXXXXX"); then
+    for suite in transport_wire transport_producers percpu_transport; do
+        transport_sources=("tests/test_${suite}.c")
+        if [[ $suite == percpu_transport ]]; then
+            transport_sources+=(src/percpu_transport.c src/merge_capture.c
+                               src/core/merge_adapter.c src/core/merge.c)
+        fi
+        if "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+            -DPGWT_TRANSPORT_HOST_TEST \
+            -fno-omit-frame-pointer "${transport_sources[@]}" \
+            -o "$transport_check_dir/$suite"; then
+            run "$transport_check_dir/$suite"
+        else
+            echo "FAIL: transport $suite compilation"
+            fail=1
+        fi
+    done
+    rm -rf "$transport_check_dir"
+else
+    echo "FAIL: transport temporary directory"
+    fail=1
+fi
 
 # Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv
 # pin mismatch is reported clearly instead of the UI suite silently skipping
