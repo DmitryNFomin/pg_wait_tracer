@@ -168,6 +168,36 @@ def parser_cases():
     print("summary parser: threads summed, events ignored, fail-closed on missing/lost/garbled PASS")
 
 
+def recorded_vm_script_cases():
+    """Ubuntu 24.04 / kernel 6.8 / perf 6.8.12, copied verbatim from the box."""
+    text = (FIXTURES / "pg13_vm" / "ubuntu-6.8-perf-6.8.12.script.txt").read_text()
+    expected = dict(pid=1403249, liovcnt=0, riovcnt=0, tid=1403249,
+                    timestamp_ns=4_399_374_662_139_000, ret=0)
+    assert parse_vm_calls(text) == [expected]
+    assert parse_vm_calls("\n".join("  " + line for line in text.splitlines())) == [expected]
+    # Synthetic returns retain the recorded bare-value format, including the
+    # unsigned representation of a signed 64-bit errno.
+    for payload, value in (("0xfffffffffffffff2", -14), ("0xffffffffffffffff", -1),
+                           ("0x8000000000000000", -(1 << 63)),
+                           ("0x7fffffffffffffff", (1 << 63) - 1), ("48", 48), ("-14", -14)):
+        assert parse_vm_calls(text.replace(": 0x0\n", f": {payload}\n")) == [dict(expected, ret=value)]
+    decimal = text.replace("pid: 0x00156971", "pid: 1403249").replace("cnt: 0x00000000", "cnt: 0")
+    assert parse_vm_calls(decimal) == [expected]
+    invalid = [text.replace(": 0x0\n", f": {payload}\n") for payload in
+               ("", "unknown", "0x", "0x0garbage", "0x0 trailing", "ret: 0", "ret=0",
+                "0x10000000000000000", "9223372036854775808", "-9223372036854775809")]
+    invalid += [text.replace("pid: 0x00156971", f"pid: {payload}")
+                for payload in ("0x", "0x00156971garbage", "1403249.5", "-1")]
+    for bad in invalid:
+        try:
+            parse_vm_calls(bad)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"undecodable raw readv accepted: {bad}")
+    print(f"recorded perf script: 2 verbatim lines; zero, signed hex/decimal, whitespace PASS; {len(invalid)} malformed cases rejected")
+
+
 def vm_parser_cases():
     """Verbatim historical fragments and hand-built raw tracepoint pairs."""
     for image, count, incomplete, postmaster, waiter in (
@@ -210,9 +240,10 @@ def vm_parser_cases():
             if index == 0 or (previous_wait and mark_after_wait):
                 text += f"77 1234567.{index * 3:09d}: {tick_event}: (0x1234)\n"
             text += (f"{tid} 1234567.{index * 3 + 1:09d}: syscalls:sys_enter_process_vm_readv: "
-                     f"__syscall_nr: 310, pid: 0x{pid:x}, liovcnt: 0x{iovs:x}, riovcnt: 0x{remote:x}\n"
-                     f"{tid} 1234567.{index * 3 + 2:09d}: syscalls:sys_exit_process_vm_readv: "
-                     f"__syscall_nr: 310, ret: {result}\n")
+                     f"pid: 0x{pid:08x}, lvec: 0x00000000, liovcnt: 0x{iovs:08x}, "
+                     f"rvec: 0x00000000, riovcnt: 0x{remote:08x}, flags: 0x00000000\n"
+                     f"{tid} 1234567.{index * 3 + 2:09d}:  syscalls:sys_exit_process_vm_readv: "
+                     f"0x{result & ((1 << 64) - 1):x}\n")
             previous_wait = pid == 99
         text += f"77 1234567.{len(rows) * 3:09d}: {tick_event}: (0x1234)\n"
         return text
@@ -228,7 +259,7 @@ def vm_parser_cases():
     records = parse_vm_calls(good)
     assert records[0]["timestamp_ns"] + 3 == records[1]["timestamp_ns"]
     assert parse_vm_calls("\n".join(reversed(good.splitlines()))) == records
-    boundary = ("77 1234566.999999999: syscalls:sys_exit_process_vm_readv: ret: 12\n" + good +
+    boundary = ("77 1234566.999999999:  syscalls:sys_exit_process_vm_readv: 0xc\n" + good +
                 "77 1234567.999999999: syscalls:sys_enter_process_vm_readv: pid: 42, liovcnt: 1, riovcnt: 1\n")
     bounded = assess_pg13_vm_calls(boundary, 42, wait_pids={99}, tick_event=tick_event)
     assert bounded["boundary_entries"] == bounded["boundary_exits"] == 1
@@ -237,8 +268,8 @@ def vm_parser_cases():
     # is not a duplicate, and a signed hexadecimal errno remains negative.
     interleaved = ("7 1.000000001: syscalls:sys_enter_process_vm_readv: pid: 42, liovcnt: 1, riovcnt: 1\n"
                    "8 1.000000001: syscalls:sys_enter_process_vm_readv: pid: 43, liovcnt: 2, riovcnt: 2\n"
-                   "8 1.000000002: syscalls:sys_exit_process_vm_readv: ret: 16\n"
-                   "7 1.000000003: syscalls:sys_exit_process_vm_readv: ret: 0xfffffffffffffff2\n")
+                   "8 1.000000002:  syscalls:sys_exit_process_vm_readv: 0x10\n"
+                   "7 1.000000003:  syscalls:sys_exit_process_vm_readv: 0xfffffffffffffff2\n")
     assert [r["ret"] for r in parse_vm_calls(interleaved)] == [-14, 16]
     invalid = [
         (raw([discover, discover, discover, status, wait, status, wait]), "calls/tick=3"),
@@ -254,7 +285,7 @@ def vm_parser_cases():
          "missing wait-word"),
         (good + "LOST 1 events!", "lost events"),
         (good + "PERF_RECORD_LOST id=7 lost=2", "lost events"),
-        (good.replace("77 1234567.000000002: syscalls:sys_exit_process_vm_readv: __syscall_nr: 310, ret: 48\n", ""),
+        (good.replace("77 1234567.000000002:  syscalls:sys_exit_process_vm_readv: 0x30\n", ""),
          "overlapping raw"),
     ]
     for text, reason in invalid:
@@ -278,7 +309,7 @@ def vm_parser_cases():
             raise AssertionError(f"tick census/refusal accepted: {kwargs}")
     for text, reason in ((interleaved.splitlines()[2], "exit without entry"),
                          (interleaved.splitlines()[0] + "\n" + interleaved.splitlines()[0], "overlapping raw"),
-                         (good.replace("riovcnt: 0x4", "undecoded: 0x4"), "arguments not decoded")):
+                         (good.replace("riovcnt: 0x00000004", "undecoded: 0x00000004"), "arguments not decoded")):
         try:
             parse_vm_calls(text)
         except AssertionError as error:
@@ -301,6 +332,7 @@ def main():
     parser_cases()
     bound_cases()
     recorded_cases()
+    recorded_vm_script_cases()
     vm_parser_cases()
     print("sampler batch summary: PASS")
 

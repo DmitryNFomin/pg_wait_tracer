@@ -277,6 +277,12 @@ def require_pg13_negative_control(result):
 VM_EVENTS = "syscalls:sys_enter_process_vm_readv,syscalls:sys_exit_process_vm_readv"
 VM_RAW = re.compile(r"^\s*(\d+)\s+(\d+\.\d+):\s+syscalls:sys_(enter|exit)_process_vm_readv:\s*(.*)$")
 VM_RENDERED = re.compile(r"^\s*(\d+\.\d+)\s+\([^)]*\):\s*(\d+)\s+(.*)$")
+# Expected perf probe marker under `perf script --ns -F tid,time,event,trace`:
+#   <decimal tid> <seconds>.<1-9 fractional digits>: <exact group:event>: <opaque payload>
+# Example (synthetic; still needs box confirmation):
+#   77 1234567.000000000: pgwt866_test:tick: (0x1234)
+# Whitespace before tid/event is allowed; the probe payload is not interpreted.
+VM_TICK = r"^\s*(\d+)\s+(\d+\.\d+):\s+{event}:.*$"
 
 
 def require_lossless(*streams):
@@ -290,7 +296,7 @@ def require_lossless(*streams):
 def vm_arguments(body):
     values = {}
     for name in ("pid", "liovcnt", "riovcnt"):
-        match = re.search(r"\b" + name + r"\s*[:=]\s*(0x[0-9a-fA-F]+|[0-9]+)\b", body)
+        match = re.search(r"\b" + name + r"\s*[:=]\s*(0x[0-9a-fA-F]+|[0-9]+)(?=\s*(?:,|\(|\)|$))", body)
         assert match, f"readv arguments not decoded: {body}"
         values[name] = int(match[1], 0) if match[1].startswith("0x") else int(match[1])
     return values
@@ -309,7 +315,7 @@ def parse_vm_trace(text, extra_streams=(), tick_event=None):
     """
     require_lossless(text, *extra_streams)
     records, raw, rendered, ticks, unmatched_exits = [], [], {}, [], []
-    marker = re.compile(r"^\s*(\d+)\s+(\d+\.\d+):\s+" + re.escape(tick_event) + r":.*$") if tick_event else None
+    marker = re.compile(VM_TICK.format(event=re.escape(tick_event))) if tick_event else None
     for line in text.splitlines():
         tick = marker.match(line) if marker else None
         if tick:
@@ -368,11 +374,18 @@ def parse_vm_trace(text, extra_streams=(), tick_event=None):
                     assert tick_event, f"readv exit without entry: tid={tid} timestamp={timestamp}"
                     unmatched_exits.append((tid, timestamp))
                     continue
-                result = re.search(r"\bret\s*[:=]\s*(-?0x[0-9a-fA-F]+|-?\d+)", body)
+                # perf script prints a bare value, not a `ret:` field. Match
+                # the entire payload so an undecoded suffix cannot pass.
+                result = re.fullmatch(r"\s*(0x[0-9a-fA-F]+|-?[0-9]+)\s*", body)
                 assert result, f"readv exit result not decoded: {body}"
-                value = int(result[1], 0) if "0x" in result[1] else int(result[1])
-                if value >= 1 << 63:
-                    value -= 1 << 64
+                if result[1].startswith("0x"):
+                    value = int(result[1], 16)
+                    assert value < 1 << 64, f"readv exit result outside 64 bits: {body}"
+                    if value >= 1 << 63:
+                        value -= 1 << 64
+                else:
+                    value = int(result[1])
+                    assert -(1 << 63) <= value < 1 << 63, f"readv exit result outside 64 bits: {body}"
                 record = pending.pop(tid)
                 record["ret"] = value
                 records.append(record)
