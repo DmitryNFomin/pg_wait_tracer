@@ -51,7 +51,7 @@ import time
 
 from sampler_batch_perf import (CALLS, SUPPORTED_MAJORS, assess_counts, file_io_reds,
                                 parse_summary, assess_pg13_timing, require_pg13_negative_control,
-                                assess_pg13_vm_calls, pg13_vm_diagnostics, VM_EVENTS)
+                                assess_pg13_vm_calls, pg13_vm_diagnostics, parse_vm_trace, VM_EVENTS)
 from testutil import find_postmaster
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -346,6 +346,32 @@ def require_pg13_anchor_status(status, *, negative=False):
             "observed anchor was not the successful controlled validation anchor"
 
 
+def start_pg13_perf(daemon_pid, tick_event, trace, stem="perf"):
+    """Record to a regular file: the gate images do not flush a live pipe."""
+    with (trace / (stem + ".stderr")).open("w") as perr:
+        return spawn(["perf", "record", "-q", "-m", str(PG13_PERF_PAGES),
+                      "-p", str(daemon_pid), "-e", VM_EVENTS + "," + tick_event,
+                      "-o", str(trace / (stem + ".data"))],
+                     stdout=subprocess.DEVNULL, stderr=perr)
+
+
+def decode_pg13_perf(perf, tick_event, trace, stem="perf"):
+    """Stop/wait before decoding, and require lossless tick and readv evidence."""
+    stop(perf, signal.SIGINT)
+    record_errors = (trace / (stem + ".stderr")).read_text()
+    assert perf.returncode in (0, -signal.SIGINT), record_errors
+    with (trace / (stem + ".trace")).open("w") as output, \
+         (trace / (stem + ".script.stderr")).open("w") as errors:
+        subprocess.run(["perf", "script", "-i", str(trace / (stem + ".data")),
+                        "--ns", "--show-lost-events", "-F", "tid,time,event,trace"],
+                       check=True, stdout=output, stderr=errors, timeout=30)
+    text = (trace / (stem + ".trace")).read_text()
+    streams = (record_errors, (trace / (stem + ".script.stderr")).read_text())
+    parsed = parse_vm_trace(text, streams, tick_event)
+    assert len(parsed["ticks"]) >= 2, "PG13 perf produced no closed tick interval"
+    return text, streams
+
+
 def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
     """Far-row churn, with independent SQL identities and persisted timing.
 
@@ -358,12 +384,10 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
     trace = directory / label
     trace.mkdir()
     initial, later, churn = IdleConnections(), IdleConnections(), IdleConnections()
-    daemon = perf = decoder = None
+    daemon = perf = None
     tick_event = None
     cohort = []
-    with (trace / "daemon.stderr").open("w") as err, (trace / "perf.stderr").open("w") as perr, \
-         (trace / "perf.script.stderr").open("w") as script_err, \
-         (trace / "perf.trace").open("w") as perf_out:
+    with (trace / "daemon.stderr").open("w") as err, (trace / "perf.probe.stderr").open("w") as perr:
         try:
             initial.open(PG13_INITIAL, "pgwt866_anchor_side")
             initial_rows = {handle: session_evidence(initial, handle) for handle in initial.handles}
@@ -399,8 +423,6 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
                 initial.close_handle(handle)
             wait_until(daemon, lambda: all(not Path(f"/proc/{pid}").exists() for pid in retired_pids),
                        15, "near-anchor setup sessions did not retire")
-            spanning_before = metrics(trace)
-            perf_path = trace / "perf.trace"
             # An independently observed set of possible wait readers, not a
             # PID inferred from whichever syscall we want to exempt.
             wait_pids = {int(row[0]) for row in initial.query(initial.handles[0],
@@ -413,18 +435,15 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
                             "--add", event + "=pgwt_sampler_poll"],
                            check=True, stdout=perr, stderr=subprocess.STDOUT)
             tick_event = event  # delete only after a successful registration
-            # Decode the pipe live: actual syscall lines prove attachment.
-            # Explicit entry/exit tracepoints retain tid and event timestamp;
-            # perf trace's pretty-printer can overwrite a pending entry on EL8.
-            perf = spawn(["perf", "record", "-q", "-m", str(PG13_PERF_PAGES),
-                          "-p", str(daemon.pid), "-e", VM_EVENTS + "," + tick_event, "-o", "-"],
-                         stdout=subprocess.PIPE, stderr=perr)
-            decoder = spawn(["perf", "script", "-i", "-", "--ns", "--show-lost-events",
-                             "-F", "tid,time,event,trace"],
-                            stdin=perf.stdout, stdout=perf_out, stderr=script_err)
-            perf.stdout.close()
-            wait_until(perf, lambda: tick_event + ":" in perf_path.read_text(),
-                       15, "PG13 perf produced no tick marker")
+            # Prove attachment in a separate fixed probe window before opening
+            # the workload. Neither perf image flushes the former live pipe.
+            perf = start_pg13_perf(daemon.pid, tick_event, trace, "perf.attach")
+            time.sleep(1)  # attachment probe, independent of workload assertions
+            decode_pg13_perf(perf, tick_event, trace, "perf.attach")
+            spanning_before = metrics(trace)
+            perf = start_pg13_perf(daemon.pid, tick_event, trace)
+            time.sleep(1)  # recorder warm-up before the measured tick census
+            assert perf.poll() is None, "PG13 perf stopped before measurement"
             before = metrics(trace)
             later.open(PG13_LATER, "pgwt866_far_side")
             later_rows = [session_evidence(later, h) for h in later.handles]
@@ -473,14 +492,8 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
             quiet_ticks = quiet_after["sampler_ticks_total"] - quiet_before["sampler_ticks_total"]
             assert quiet_ticks > 0, "sampler did not advance in the quiet window"
             status = metrics(trace, "status")
-            stop(perf, signal.SIGINT)
-            assert perf.returncode in (0, -signal.SIGINT), (trace / "perf.stderr").read_text()
-            decoder.wait(timeout=15)
-            assert decoder.returncode == 0, (trace / "perf.script.stderr").read_text()
+            text, perf_errors = decode_pg13_perf(perf, tick_event, trace)
             spanning_after = metrics(trace)
-            text = perf_path.read_text()
-            perf_errors = ((trace / "perf.stderr").read_text(),
-                           (trace / "perf.script.stderr").read_text())
             # The pre-fix control retains lossless parsing, but no syscall gate
             # can substitute for its required first-attribution timing RED.
             syscall = pg13_vm_diagnostics(text, perf_errors) if negative else None
@@ -524,19 +537,16 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
                 stop(perf, signal.SIGINT)
             finally:
                 try:
-                    stop(decoder)
+                    stop(daemon)
                 finally:
                     try:
-                        stop(daemon)
+                        churn.close()
+                        later.close()
+                        initial.close()
                     finally:
-                        try:
-                            churn.close()
-                            later.close()
-                            initial.close()
-                        finally:
-                            if tick_event:
-                                subprocess.run(["perf", "probe", "--del", tick_event], check=True,
-                                               stdout=perr, stderr=subprocess.STDOUT)
+                        if tick_event:
+                            subprocess.run(["perf", "probe", "--del", tick_event], check=True,
+                                           stdout=perr, stderr=subprocess.STDOUT)
 
 
 def run_escalation_arm(binary, pm_pid, directory):
@@ -784,8 +794,9 @@ def main():
               "require_negative_control": args.require_negative_control}, sort_keys=True))
         return
     assert sys.platform == "linux" and os.geteuid() == 0, "Linux/root live test only"
-    source_pid = args.pid or find_postmaster()
-    assert source_pid, "no runner postmaster from which to select the PG binary"
+    source_pid = args.pid or (find_postmaster(pg_version=13) if args.pg13_far_rows else find_postmaster())
+    assert source_pid, ("--pg13-far-rows: no PG13 postmaster found; start a PG13 cluster or pass --pid"
+                        if args.pg13_far_rows else "no runner postmaster from which to select the PG binary")
     version = subprocess.check_output([os.readlink(f"/proc/{source_pid}/exe"), "--version"], text=True)
     major = int(re.search(r"PostgreSQL\)\s+(\d+)", version)[1])
     if major not in SUPPORTED_MAJORS:

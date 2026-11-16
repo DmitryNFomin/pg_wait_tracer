@@ -15,12 +15,16 @@ the whole summary) and <same>.json (the live test's own summary.json, which
 carries the ticks/failures/idle inputs the assessment was run with).
 """
 import json
+from collections import Counter
 from pathlib import Path
 import sys
+import tempfile
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sampler_batch_perf import (FILE_IO_PER_TICK_BOUND, assess_counts, file_io_reds,  # noqa: E402
-                                parse_summary, parse_vm_calls, assess_pg13_vm_calls, pg13_vm_diagnostics)
+                                parse_summary, parse_vm_calls, parse_vm_trace,
+                                assess_pg13_vm_calls, pg13_vm_diagnostics)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sampler_batch"
 CLEAN = {"open": 0, "openat": 6 * 210, "pread64": 2 * 210, "close": 7 * 210,
@@ -198,6 +202,140 @@ def recorded_vm_script_cases():
     print(f"recorded perf script: 2 verbatim lines; zero, signed hex/decimal, whitespace PASS; {len(invalid)} malformed cases rejected")
 
 
+def recorded_file_vm_cases():
+    """An unedited contiguous EL8 slice, including 50 complete tick intervals."""
+    text = (FIXTURES / "pg13_vm" / "el8-4.18-file.script.txt").read_text()
+    event = "pgwt866_6907_7473:tick"
+    parsed = parse_vm_trace(text, tick_event=event)
+    ticks, calls = parsed["ticks"], parsed["calls"]
+    assert len(ticks) == 51 and len(calls) == 150 and not parsed["unmatched_exits"]
+    assert ticks[0] == (7473, 172_851_570_484)
+    assert ticks[-1] == (7473, 173_351_853_766)
+    assert all(row["ret"] is not None and row["tid"] == 7473 for row in calls)
+    assert Counter(row["tick_ns"] for row in calls) == Counter({ts: 3 for _, ts in ticks[:-1]})
+    discovery = Counter({ts: 0 for _, ts in ticks[:-1]})
+    shapes = Counter()
+    for row in calls:
+        assert row["liovcnt"] == row["riovcnt"]
+        shapes[(row["pid"], row["liovcnt"], row["ret"])] += 1
+        if row["pid"] == 6925 and row["ret"] <= 12 * row["liovcnt"]:
+            discovery[row["tick_ns"]] += 1
+    assert shapes == {(6925, 1024, 328704): 50, (6925, 928, 297888): 50,
+                      (6928, 492, 1968): 50}
+    for _, timestamp in ticks[:-1]:
+        assert Counter((row["pid"], row["liovcnt"], row["ret"])
+                       for row in calls if row["tick_ns"] == timestamp) == \
+               {(6925, 1024, 328704): 1, (6925, 928, 297888): 1, (6928, 492, 1968): 1}
+    assert list(discovery.values()) == [0] * 50
+    # The failed attachment run never reached churn. It proves the parser and
+    # steady-state wait shape, and MUST NOT satisfy the discovery qualification.
+    try:
+        assess_pg13_vm_calls(text, 6925, wait_pids={6928}, tick_event=event)
+    except AssertionError as error:
+        assert str(error) == "need pending discovery, status and wait-word calls", str(error)
+    else:
+        raise AssertionError("steady recording qualified without pending discovery")
+    # Ubuntu raw20 contains only tick lines. Feed the disjoint real EL8 readv
+    # lines too because parse_vm_trace requires syscall evidence; this checks
+    # Ubuntu marker decoding, not a fabricated Ubuntu syscall qualification.
+    ubuntu = (FIXTURES / "pg13_vm" / "ubuntu-6.8-ticks.script.txt").read_text()
+    parsed = parse_vm_trace(ubuntu + text, tick_event="pgwt866_dbg:tick")
+    assert len(parsed["ticks"]) == 20 and len(parsed["calls"]) == 150
+    assert parsed["ticks"][0] == (11544, 276_763_187_771)
+    assert parsed["ticks"][-1] == (11544, 276_955_095_868)
+    assert all(tid == 11544 for tid, _ in parsed["ticks"])
+    print("recorded_file_vm_cases: EL8 51 ticks / 150 readv pairs / zero discovery per tick / "
+          "50 wait-shaped calls; Ubuntu 20 verbatim tick lines PASS")
+
+
+def file_capture_cases():
+    """The recorder exposes nothing until stopped; decoding must follow wait."""
+    import test_sampler_batch_live as live
+    text = (FIXTURES / "pg13_vm" / "el8-4.18-file.script.txt").read_text()
+    event = "pgwt866_6907_7473:tick"
+    for record_error, script_error, decoded, reason in (
+            ("", "", text, None),
+            ("LOST 1 events!", "", text, "lost events"),
+            ("", "LOST 1 events!", text, "lost events"),
+            ("", "", text + "PERF_RECORD_LOST id=7 lost=2", "lost events"),
+            ("", "", text.replace(event, "other:tick"), "no closed tick interval"),
+            ("", "", text.splitlines()[0], "no process_vm_readv")):
+        with tempfile.TemporaryDirectory(prefix="pgwt866-file-test-") as tmp:
+            trace = Path(tmp)
+            order = []
+            proc = mock.Mock(returncode=None)
+            proc.poll.side_effect = lambda: proc.returncode
+            proc.send_signal.side_effect = lambda sig: order.append(("signal", sig))
+            def wait(timeout):
+                assert order == [("signal", live.signal.SIGINT)]
+                order.append("wait")
+                (trace / "perf.attach.data").write_bytes(b"recorded after stop")
+                proc.returncode = 0
+                return 0
+            proc.wait.side_effect = wait
+            def spawn(command, **kwargs):
+                assert command[:2] == ["perf", "record"]
+                assert command[command.index("-o") + 1] == str(trace / "perf.attach.data")
+                assert command[command.index("-e") + 1] == live.VM_EVENTS + "," + event
+                assert command[command.index("-p") + 1] == "7473"
+                assert kwargs["stdout"] == live.subprocess.DEVNULL and "stdin" not in kwargs
+                kwargs["stderr"].write(record_error)
+                return proc
+            def decode(command, **kwargs):
+                assert order == [("signal", live.signal.SIGINT), "wait"]
+                assert command == ["perf", "script", "-i", str(trace / "perf.attach.data"),
+                                   "--ns", "--show-lost-events", "-F", "tid,time,event,trace"]
+                assert (trace / "perf.attach.data").read_bytes() == b"recorded after stop"
+                assert kwargs["check"] is True
+                order.append("decode")
+                kwargs["stdout"].write(decoded)
+                kwargs["stderr"].write(script_error)
+                return live.subprocess.CompletedProcess(command, 0)
+            with mock.patch.object(live, "spawn", side_effect=spawn), \
+                 mock.patch.object(live.subprocess, "run", side_effect=decode):
+                perf = live.start_pg13_perf(7473, event, trace, "perf.attach")
+                assert not (trace / "perf.attach.data").exists()
+                try:
+                    result, streams = live.decode_pg13_perf(perf, event, trace, "perf.attach")
+                except AssertionError as error:
+                    assert reason and reason in str(error), (reason, str(error))
+                else:
+                    assert reason is None and result == text and streams == ("", "")
+                assert order[-1] == "decode"
+    print("file_capture_cases: regular file, SIGINT/wait before decode, attachment/loss guards PASS")
+
+
+def pg13_selection_cases():
+    """Exercise main's selection boundary without starting a live process."""
+    import test_sampler_batch_live as live
+    class Selected(Exception):
+        pass
+    for argv, expected_call, found in ((["--pg13-far-rows"], {"pg_version": 13}, 13),
+                                       (["--pg13-far-rows"], {"pg_version": 13}, None),
+                                       ([], {}, 18), (["--pg13-far-rows", "--pid", "77"], None, 77)):
+        def readlink(path):
+            assert path == f"/proc/{found}/exe"
+            raise Selected
+        with mock.patch.object(live.sys, "argv", ["test_sampler_batch_live.py", *argv]), \
+             mock.patch.object(live.sys, "platform", "linux"), \
+             mock.patch.object(live.os, "geteuid", return_value=0), \
+             mock.patch.object(live, "find_postmaster", return_value=found) as find, \
+             mock.patch.object(live.os, "readlink", side_effect=readlink):
+            try:
+                live.main()
+            except Selected:
+                assert found
+            except AssertionError as error:
+                assert found is None and "no PG13 postmaster found" in str(error), str(error)
+            else:
+                raise AssertionError("selection boundary not exercised")
+            if expected_call is None:
+                find.assert_not_called()
+            else:
+                find.assert_called_once_with(**expected_call)
+    print("pg13_selection_cases: PG13 filter, missing-PG13 diagnostic, explicit pid and default selection PASS")
+
+
 def vm_parser_cases():
     """Verbatim historical fragments and hand-built raw tracepoint pairs."""
     for image, count, incomplete, postmaster, waiter in (
@@ -333,6 +471,9 @@ def main():
     bound_cases()
     recorded_cases()
     recorded_vm_script_cases()
+    recorded_file_vm_cases()
+    file_capture_cases()
+    pg13_selection_cases()
     vm_parser_cases()
     print("sampler batch summary: PASS")
 
