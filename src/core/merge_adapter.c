@@ -9,7 +9,7 @@ struct ma {
     pgwt_merge_source *sources;
 };
 
-ma *ma_create(const ma_config *c, pgwt_merge_reason *error)
+static ma *create(const ma_config *c, bool production, pgwt_merge_reason *error)
 {
     pgwt_merge_reason reason = PGWT_MERGE_MALFORMED_ENVELOPE;
     if (!c || !c->sources || c->source_count < 2 ||
@@ -17,7 +17,7 @@ ma *ma_create(const ma_config *c, pgwt_merge_reason *error)
         c->source_count > SIZE_MAX / sizeof(ma_source_decl) ||
         c->source_count > SIZE_MAX / sizeof(pgwt_merge_source)) goto fail;
     reason = PGWT_MERGE_UNKNOWN_EVIDENCE;
-    if (!c->synthetic_premises) goto fail;
+    if (c->synthetic_premises == production) goto fail;
     for (size_t s = 0; s < c->source_count; ++s) {
         ma_mechanism expected = s < c->source_count - 2 ?
             MA_WATCHPOINT_PERF : MA_ORDERED_RING;
@@ -44,6 +44,16 @@ ma *ma_create(const ma_config *c, pgwt_merge_reason *error)
 fail:
     if (error) *error = reason;
     return NULL;
+}
+
+ma *ma_create(const ma_config *c, pgwt_merge_reason *error)
+{
+    return create(c, false, error);
+}
+
+ma *ma_create_production(const ma_config *c, pgwt_merge_reason *error)
+{
+    return create(c, true, error);
 }
 
 void ma_destroy(ma *a)
@@ -84,11 +94,46 @@ static ma_result faulted(ma_result r, pgwt_merge_reason reason)
     return r;
 }
 
+static uint64_t hash(uint64_t v)
+{
+    v = (v ^ (v >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    v = (v ^ (v >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return v ^ (v >> 31);
+}
+size_t ma_lifetime_bucket(const ma_table *t, uint64_t pid, uint64_t g, size_t *cost)
+{
+    if (cost) *cost = 0;
+    if (!t->lifetime_index || !t->index_slots) return SIZE_MAX;
+    size_t slot = (size_t)(hash(g ^ hash(pid)) % t->index_slots);
+    for (;;) {
+        if (cost) ++*cost;
+        size_t entry = t->lifetime_index[slot];
+        if (!entry || (t->lifetimes[entry - 1].pid == pid && t->lifetimes[entry - 1].g == g))
+            return slot;
+        slot = (slot + 1) % t->index_slots;
+    }
+}
+size_t ma_binding_bucket(const ma_table *t, uint64_t query, size_t *cost)
+{
+    if (cost) *cost = 0;
+    if (!t->binding_index || !t->index_slots) return SIZE_MAX;
+    size_t slot = (size_t)(hash(query) % t->index_slots);
+    for (;;) {
+        if (cost) ++*cost;
+        size_t entry = t->binding_index[slot];
+        if (!entry || t->bindings[entry - 1].query_id == query) return slot;
+        slot = (slot + 1) % t->index_slots;
+    }
+}
 static const ma_lifetime *lifetime(const ma_table *t, uint64_t pid, uint64_t g)
 {
     const ma_lifetime *found = NULL;
     if (!g) return NULL;
-    for (size_t i = 0; i < t->lifetime_count; ++i) {
+    size_t slot = ma_lifetime_bucket(t, pid, g, NULL);
+    if (slot != SIZE_MAX) {
+        size_t entry = t->lifetime_index[slot];
+        if (entry) found = &t->lifetimes[entry - 1];
+    } else for (size_t i = 0; i < t->lifetime_count; ++i) {
         const ma_lifetime *l = &t->lifetimes[i];
         if (l->pid != pid || l->g != g) continue;
         if (found) return NULL;          /* no unique historical binding */
@@ -114,7 +159,11 @@ static pgwt_merge_reason binding(const ma_table *t, uint64_t query,
     *ok = true;
     if (!query) return PGWT_MERGE_UNKNOWN_EVIDENCE;
     const ma_binding *b = NULL;
-    for (size_t i = 0; i < t->binding_count; ++i) {
+    size_t slot = ma_binding_bucket(t, query, NULL);
+    if (slot != SIZE_MAX) {
+        size_t entry = t->binding_index[slot];
+        if (entry) b = &t->bindings[entry - 1];
+    } else for (size_t i = 0; i < t->binding_count; ++i) {
         if (t->bindings[i].query_id != query) continue;
         if (b) { *ok = false; return PGWT_MERGE_DEPENDENCY_LOST; }
         b = &t->bindings[i];

@@ -32,6 +32,16 @@ noise. See [Cross-validation: sampling vs
 exact](#cross-validation-sampling-vs-exact) for the before/after per rate, the
 derivation of that bound, and for what remains.
 
+`--mode full --exact-perf` selects the experimental per-CPU transport (off by
+default). Its measured ceiling on EL8 4.18, PG18, 4 vCPU is a clean capture at
+8,000 select-only tps; above that the capture VOIDs
+([#932](https://github.com/DmitryNFomin/pg_wait_tracer/issues/932)). A short-lived
+backend whose INIT is lost also VOIDs the capture
+([#933](https://github.com/DmitryNFomin/pg_wait_tracer/issues/933)). These are limits
+of the experimental mode. The transport measurements assume the attachment
+test premise; attachment proof and qualification remain pending. See the
+[producer argument and measurement limits](docs/871-a1-producer-argument.md#what-is-still-unproven-and-what-was-found).
+
 Key capabilities:
 
 - **Tiered capture** (`--mode tiered`, default): always-on userspace sampler

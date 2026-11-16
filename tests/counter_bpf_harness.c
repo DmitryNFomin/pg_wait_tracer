@@ -2,6 +2,7 @@
  * verifier substitute. The Python driver inserts unchanged function bodies. */
 #include "pg_wait_tracer.h"
 #include <stdbool.h>
+#include "bpf/transport_producer.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,6 +32,8 @@ static bool lose_relookup, reserve_fail;
 static int update_error, read_error_at, read_calls, text_result;
 static int submits, discards;
 static u32 test_counter_failure;
+static const u32 exact_perf_mode = 0;
+static int lifetime_allocator;
 static u64 my_wait_ptr_addr, debug_query_string_addr;
 static u32 target_postmaster_pid = 1, pgproc_wait_offset, lightweight_mode, skip_query_id;
 static bool test_skip_init_store, test_drop_init_hint;
@@ -90,6 +93,21 @@ static u64 bpf_ktime_get_ns(void) { return 1000; }
 static struct pgwt_exact_config *exact_config(void) { return &config; }
 static bool exact_admission_open(void) { return true; }
 static void count_uprobe_fire(u32 slot) { (void)slot; }
+
+/* These are unreachable in this mode-zero migration harness. The A1 host
+ * harness executes the actual flagged helpers and producer bodies. */
+static void transport_header(struct pgwt_wire_hdr *h, u8 k, u16 n, u64 s, u64 c)
+{ (void)h; (void)k; (void)n; (void)s; (void)c; abort(); }
+static void transport_lifecycle_failure(u32 site) { (void)site; abort(); }
+static struct pgwt_wire_lifecycle *transport_reserve_lifecycle(u64 *seq)
+{ (void)seq; abort(); }
+static bool transport_text(u32 pid, u64 query_id, u64 text, u32 site, u32 slot)
+{ (void)pid; (void)query_id; (void)text; (void)site; (void)slot; abort(); }
+/* The INIT wake-up hint exists only under the mode: unreachable here too. */
+#define BPF_F_CURRENT_CPU 0xffffffffULL
+static int init_wake;
+static long bpf_perf_event_output(void *ctx, void *map, u64 flags, void *data, u64 size)
+{ (void)ctx; (void)map; (void)flags; (void)data; (void)size; abort(); }
 
 /* PRODUCTION_FUNCTIONS */
 

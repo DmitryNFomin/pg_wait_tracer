@@ -3,7 +3,7 @@
 
 #include "pgwt_merge.h"
 
-/* U1a: synthetic premises only. No daemon, transport or production proof path.
+/* Explicit synthetic and production construction paths share the pure reducer.
  * Source indices are CPU numeric order, then E,L. Payloads use explicit LE v1. */
 typedef enum { MA_NOT_ATTEMPTED, MA_PENDING, MA_PROVED, MA_FAILED } ma_proof;
 typedef enum { MA_TRACE, MA_LIFECYCLE, MA_TEXT, MA_BOUNDARY, MA_LOSS,
@@ -53,7 +53,17 @@ typedef struct {
     const ma_lifetime *lifetimes; size_t lifetime_count;
     const ma_binding *bindings; size_t binding_count;
     const ma_envelope *const *held; size_t source_count;
+    /* Optional append-only indexes. Buckets contain array index + 1 (0 is
+     * empty). At most half full; no deletion, retirement or slot reuse.
+     * The unindexed pure-fixture path retains duplicate/alias validation. */
+    size_t *lifetime_index, *binding_index;
+    size_t index_slots;
 } ma_table;
+/* Probe returns a bucket in an indexed table, SIZE_MAX without an index.
+ * Optional cost counts visited buckets, including an empty insertion bucket.
+ * Insert only after checking the key; identities and bindings never change. */
+size_t ma_lifetime_bucket(const ma_table *, uint64_t pid, uint64_t g, size_t *cost);
+size_t ma_binding_bucket(const ma_table *, uint64_t query_id, size_t *cost);
 typedef struct {
     ma_mechanism mechanism;
     bool qualification_complete;
@@ -73,6 +83,10 @@ typedef struct {
 } ma_result;
 
 ma *ma_create(const ma_config *, pgwt_merge_reason *error);
+/* Production declarations must come from the transport protocol, including
+ * its completed failure fence. synthetic_premises MUST be false. This API
+ * does not establish kernel or attachment proof: callers supply those facts. */
+ma *ma_create_production(const ma_config *, pgwt_merge_reason *error);
 void ma_destroy(ma *);
 const pgwt_merge_source *ma_sources(const ma *, size_t *count);
 bool ma_core_config(const ma *, const pgwt_merge_config *base,

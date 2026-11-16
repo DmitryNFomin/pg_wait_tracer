@@ -124,10 +124,10 @@ static bool consume_event_ring(struct pgwt_daemon *d, const char *op,
         bounded && !d->test_no_event_drain_budget
         ? PGWT_EVENT_DRAIN_CALLBACK_BUDGET : 0;
     int rc = pgwt_consume_event_ring(d, bounded);
-    bool yielded = d->event_drain_callback_limit != 0
-                && d->event_drain_callbacks_current
-                   >= d->event_drain_callback_limit
-                && rc < 0;
+    bool yielded = d->exact_perf ? rc == -EAGAIN :
+                   d->event_drain_callback_limit != 0
+                   && d->event_drain_callbacks_current >= d->event_drain_callback_limit
+                   && rc < 0;
     d->event_drain_callback_limit = 0;
     if (yielded && d->debug_dump_state)
         d->debug_event_drain_yields++;
@@ -422,24 +422,25 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
     uint64_t started_ns = pgwt_debug_block_begin(d);
     ssize_t r = read(d->timer_fd, &expirations, sizeof(expirations));
     pgwt_debug_block_end(d, "timerfd_read", 0, started_ns);
-    if (d->exact_perf) {
-        /* B's pgwt_merge_capture_tick owns the maintenance skipped by this
-         * early return: PostgreSQL liveness via kill(postmaster_pid, 0),
-         * pgwt_sweep_bootstrap_backends, pgwt_recover_unattached_backends,
-         * pgwt_sweep_stale_state and pgwt_escalation_check_budget. Preserve
-         * the daemon_mode/lightweight/test guards used below. */
-        if (pgwt_merge_capture_tick(d) < 0) {
-            fprintf(stderr, "FATAL: exact per-CPU capture tick failed\n");
-            d->running = false;
-        }
-        return;
-    }
     if (d->debug_dump_state && r == (ssize_t)sizeof(expirations)) {
         d->debug_timer_expirations += expirations;
         if (expirations > d->debug_max_timer_expirations)
             d->debug_max_timer_expirations = expirations;
     }
 
+    if (d->exact_perf) {
+        if (pgwt_merge_capture_tick(d) < 0) {
+            fprintf(stderr, "FATAL: exact per-CPU capture tick failed\n");
+            d->running = false;
+        }
+    } else {
+        pgwt_tick_duties(d);
+    }
+}
+
+void pgwt_tick_duties(struct pgwt_daemon *d)
+{
+    uint64_t started_ns;
     /* Health check: is PostgreSQL still alive? */
     if (d->daemon_mode) {
         started_ns = pgwt_debug_block_begin(d);
@@ -520,10 +521,32 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
         pgwt_debug_block_end(d, "accum_map_read", 0, started_ns);
     }
 
-    /* #416: the LAST thing before the display is built, so the smallest
-     * possible window separates "every emitted record is in event_accum"
-     * from the state_map read that supplies the still-open stretches. */
-    drain_event_ring_for_tick(d);
+    /* #416: the LAST thing before the display is built. The default ring
+     * drains into event_accum; exact-perf can still hold records for proof
+     * or a frontier. Report that backlog without changing release order. */
+    if (d->exact_perf) {
+        if (pgwt_percpu_transport_poll(d) < 0) {
+            fprintf(stderr, "FATAL: exact per-CPU capture tick drain failed\n");
+            d->running = false;
+            return;
+        }
+        d->counters.tick_drain_pending_records = pgwt_merge_capture_pending_records(d);
+        if (d->counters.tick_drain_pending_records) {
+            ++d->counters.tick_drain_truncated_total;
+            d->counters.tick_drain_last_bound = PGWT_TICK_DRAIN_BOUND_MERGE;
+            if (!d->tick_drain_truncated_logged) {
+                d->tick_drain_truncated_logged = true;
+                fprintf(stderr, "WARN: exact-perf per-tick drain left %llu queued/held "
+                    "envelopes at the accumulator copy; this live view contains only "
+                    "released DATA plus state-map open intervals; "
+                    "tick_drain_pending_records reports the latest backlog, "
+                    "tick_drain_truncated_total counts these ticks\n",
+                    (unsigned long long)d->counters.tick_drain_pending_records);
+            }
+        }
+    } else {
+        drain_event_ring_for_tick(d);
+    }
 
     /* Copy cumulative event_accum to display accum,
      * then add open intervals from state_map.
@@ -1836,7 +1859,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
     int rb_fd = d->exact_perf ? pgwt_percpu_transport_epoll_fd(d)
                               : ring_buffer__epoll_fd(d->rb);
     int event_rb_fd = d->event_rb ? ring_buffer__epoll_fd(d->event_rb) : -1;
-    bool event_ring_backlog = false;
+    d->service_backlog = false;
 
     uint64_t deadline = 0;
     if (d->duration > 0) {
@@ -1858,7 +1881,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         /* A budget yield means records remain. Re-enter epoll without sleeping
          * so ready timer/signal/control fds run before the next event batch;
          * if none are ready, immediately continue draining the backlog. */
-        int timeout_ms = event_ring_backlog ? 0 : poll_ms;
+        int timeout_ms = d->service_backlog ? 0 : poll_ms;
         if (deadline > 0) {
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1888,6 +1911,8 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
             break;
         }
 
+        d->service_backlog = false;
+        pgwt_percpu_transport_begin_pass(d, deadline * UINT64_C(1000000000));
         if (d->exact_perf && (pgwt_percpu_transport_poll(d) < 0 ||
                               pgwt_merge_capture_poll(d) < 0)) {
             fprintf(stderr, "FATAL: exact per-CPU transport poll failed\n");
@@ -1895,6 +1920,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         }
         pgwt_sweep_bootstrap_backends(d);
         for (int i = 0; i < n; i++) {
+            if (d->exact_perf && !d->running) break;
             if (events[i].data.fd == d->timer_fd) {
                 started_ns = pgwt_debug_block_begin(d);
                 pgwt_handle_timer(d);
@@ -1928,9 +1954,9 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         }
 
         /* Drain event ringbuf on every iteration (poll-based with NO_WAKEUP) */
-        if (d->event_rb || d->exact_perf) {
-            event_ring_backlog = consume_event_ring(
-                d, "event_ring_drain", true);
+        if ((d->event_rb || d->exact_perf) && (!d->exact_perf || d->running)) {
+            if (consume_event_ring(d, "event_ring_drain", true))
+                d->service_backlog = true;
         }
 
         if (d->debug_dump_state) {
@@ -1944,11 +1970,11 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
     }
 
     /* Drain remaining events before cleanup */
-    if (d->event_rb || d->exact_perf) {
+    if (!d->exact_perf && d->event_rb) {
         consume_event_ring(d, "event_ring_final_drain", false);
     }
     uint64_t started_ns = pgwt_debug_block_begin(d);
-    pgwt_consume_lifecycle_ring(d);
+    if (!d->exact_perf) pgwt_consume_lifecycle_ring(d);
     pgwt_debug_block_end(d, "lifecycle_ring_final_drain", 0, started_ns);
     if (d->exact_perf && pgwt_merge_capture_finish(d) < 0)
         return -1;
@@ -2014,7 +2040,7 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             "cpu_ns_total=%llu offcpu_ns_total=%llu "
             "cpu_clamped_ns_total=%llu wait_gap_cpu_ns_total=%llu "
             "tick_drain_records_total=%llu tick_drain_max_records=%llu "
-            "tick_drain_truncated_total=%llu\n",
+            "tick_drain_truncated_total=%llu tick_drain_pending_records=%llu\n",
             d->cpu_accounting ? 1 : 0, backends_tracked,
             (unsigned long long)d->debug_loop_iterations,
             (unsigned long long)d->debug_timer_entries,
@@ -2043,7 +2069,8 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             (unsigned long long)d->counters.wait_gap_cpu_ns_total,
             (unsigned long long)d->counters.tick_drain_records_total,
             (unsigned long long)d->counters.tick_drain_max_records,
-            (unsigned long long)d->counters.tick_drain_truncated_total);
+            (unsigned long long)d->counters.tick_drain_truncated_total,
+            (unsigned long long)d->counters.tick_drain_pending_records);
 
     uint32_t key = 0, next;
     struct pgwt_pid_state st;

@@ -136,7 +136,9 @@ struct pgwt_counters {
      * drain's pass cap was ever reached — the latter means a tick WAS short. */
     uint64_t tick_drain_records_total;   /* records recovered by tick drains */
     uint64_t tick_drain_max_records;     /* deepest single-tick backlog seen */
-    uint64_t tick_drain_truncated_total; /* ticks whose drain hit a bound */
+    uint64_t tick_drain_truncated_total; /* ticks bounded or still merge-held */
+    uint64_t tick_drain_pending_records; /* latest copy: queued/held envelopes;
+                                         * exact-perf only, not kernel backlog */
     /* Which bound the LAST truncated tick drain hit. Exists so the loud
      * WARN's reported bound is ASSERTABLE (tests/test_tick_drain.c B7)
      * rather than merely plausible: the message and this field are set from
@@ -145,6 +147,7 @@ struct pgwt_counters {
         PGWT_TICK_DRAIN_BOUND_NONE = 0,
         PGWT_TICK_DRAIN_BOUND_RECORDS,
         PGWT_TICK_DRAIN_BOUND_TIME,
+        PGWT_TICK_DRAIN_BOUND_MERGE,
     } tick_drain_last_bound;
 
     /* T8 measured-CPU observability (docs/ROADMAP_AND_STATUS.md).
@@ -481,6 +484,8 @@ struct pgwt_daemon {
      * fully processed records. Zero means an intentional unbounded drain
      * (shutdown/finalization). Single-threaded: only the event callback reads
      * these while consume is active. */
+    /* Any service yield keeps the next main-loop wait from sleeping. */
+    bool        service_backlog;
     uint32_t    event_drain_callback_limit;
     uint32_t    event_drain_callbacks_current;
 
@@ -555,6 +560,9 @@ int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin);
  * (#416): the defect was the ORDER of the steps inside it, so a test that
  * called a narrower seam could not have seen it. */
 void pgwt_handle_timer(struct pgwt_daemon *d);
+/* Shared timer duties, preserving the default order around its display drain.
+ * The timerfd and expiration diagnostics have already been handled. */
+void pgwt_tick_duties(struct pgwt_daemon *d);
 int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d);
 /* Process one decoded L payload (FORK/INIT/EXIT or QUERY_TEXT), after wire
  * validation. Shared by the default ring callback and B; never dispatches
