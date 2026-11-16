@@ -514,7 +514,7 @@ def main():
         function(cmdline, "pgwt_backend_target_live"),
         *(function(backend, name) for name in (
             "open_watchpoint_target", "record_watchpoint_failure",
-            "pgwt_attach_backend_watchpoint", "enrollment_was_refused",
+            "pgwt_attach_backend_watchpoint", "enrollment_failure_counted", "enrollment_was_refused",
             "remember_enrollment_refusal", "lifecycle_target", "pgwt_handle_fork")),
     ])
     control = (ROOT / "src/control.c").read_text()
@@ -547,8 +547,8 @@ def main():
             ("missing_allocation_failure_count", "d->counters.wp_attach_failures_total++;\n        remember_enrollment_refusal(d, child_pid);",
              "d->counters.wp_attach_failures_total += 0;\n        remember_enrollment_refusal(d, child_pid);",
              "allocation refusal gates even without state or EXIT"),
-            ("missing_reused_pid_count", "d->counters.wp_attach_failures_total++;\n            fprintf(stderr, \"ERROR: live FORK",
-             "d->counters.wp_attach_failures_total += 0;\n            fprintf(stderr, \"ERROR: live FORK",
+            ("missing_reused_pid_count", "d->counters.wp_attach_failures_total++;\n            existing->wp_attach_failed = true;",
+             "d->counters.wp_attach_failures_total += 0;\n            existing->wp_attach_failed = true;",
              "live reused PID conflicting with startup race is counted"),
             ("missing_shared_attached_proof", "be->init_attached = true;", ";",
              "shared helper retains completed attachment"),

@@ -324,17 +324,23 @@ and `wp_attach_failures_unknown_total`. Gone targets with a non-ESRCH errno
 remain real failures in the gone subset.
 
 In watchpoint capture, `lifecycle_exit_before_attach_total` counts retirements
-without a completed real attachment or retained INIT evidence, excluding
-already counted real attach failures. Its three once-per-retirement classes are:
+without a completed real attachment or retained INIT evidence. It excludes
+watchpoint failures already counted in `wp_attach_failures_total`, counted
+enrollment refusals (including those without a registry entry), and counted
+live FORK conflicts with a retained exit-race entry. Each backend has one
+failure or retirement class. Its three once-per-retirement classes are:
 
 - `lifecycle_exit_before_attach_with_opportunity_total`: missed attachment,
-  opportunity observed (gated): a registry entry exists.
+  opportunity observed (gated): a registry entry exists, bootstrap was armed,
+  and the post-arm check ran.
 - `lifecycle_exit_before_attach_unknown_total`: opportunity unknown (gated):
-  no registry entry and no positive first-handling exclusion.
+  the required entry/armed/post-arm evidence is incomplete and there is no
+  positive first-handling exclusion. Bootstrap-open, startup-scan and direct
+  attach exit races without that evidence belong here.
 - `lifecycle_exit_before_attach_no_opportunity_total`: exited before the tracer
   could attach (reported): no registry entry because first handling positively
-  found the target gone. An earlier enrollment refusal retains unknown
-  opportunity; bounded refusal bookkeeping overflow also stays unknown.
+  found the target gone. Bounded refusal bookkeeping overflow denies this
+  exclusion; a PID without retained evidence of a counted failure stays unknown.
 
 Each counted PID emits `EXIT-BEFORE-ATTACH` with the class, entry/armed status,
 post-arm pointer, shared-address result and errnos, plus global no-state and

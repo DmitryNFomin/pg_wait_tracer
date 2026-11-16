@@ -911,12 +911,16 @@ int pgwt_confirm_wait_offset(struct pgwt_daemon *d)
     return 0;
 }
 
-static bool enrollment_was_refused(const struct pgwt_daemon *d, pid_t pid)
+static bool enrollment_failure_counted(const struct pgwt_daemon *d, pid_t pid)
 {
-    if (d->lifecycle_refused_overflow) return true;
     for (int i = 0; i < d->lifecycle_refused_count; ++i)
         if (d->lifecycle_refused_pids[i] == pid) return true;
     return false;
+}
+
+static bool enrollment_was_refused(const struct pgwt_daemon *d, pid_t pid)
+{
+    return d->lifecycle_refused_overflow || enrollment_failure_counted(d, pid);
 }
 
 static void remember_enrollment_refusal(struct pgwt_daemon *d, pid_t pid)
@@ -982,6 +986,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     if (existing) {
         if (existing->wp_attach_exit_race) {
             d->counters.wp_attach_failures_total++;
+            existing->wp_attach_failed = true;
             fprintf(stderr, "ERROR: live FORK PID %d conflicts with retained attach exit race; enrollment refused and counted\n", child_pid);
             return -1;
         }
@@ -1295,13 +1300,17 @@ int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
     bool before_attach;
     if (pgwt_exit_init_lost(be, pid, d, read_init_state, &init_ts, &before_attach))
         record_init_loss(d, pid, init_ts, exit_ts);
-    else if (before_attach && pgwt_mode_uses_watchpoints(d)) {
+    else if (before_attach && pgwt_mode_uses_watchpoints(d) &&
+             !enrollment_failure_counted(d, pid)) {
+        /* Exact refusal evidence already has a failure class. Overflow only
+         * denies the no-opportunity exclusion; it cannot prove a counted
+         * failure for this PID. */
         d->counters.lifecycle_exit_before_attach_total++;
         const char *opportunity;
-        if (be) {
+        if (be && be->bootstrap_armed && be->post_arm_checked) {
             d->counters.lifecycle_exit_before_attach_with_opportunity_total++;
             opportunity = "with";
-        } else if (d->lifecycle_first_gone_pid == pid) {
+        } else if (!be && d->lifecycle_first_gone_pid == pid) {
             d->counters.lifecycle_exit_before_attach_no_opportunity_total++;
             opportunity = "no";
         } else {
