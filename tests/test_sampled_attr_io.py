@@ -227,14 +227,19 @@ def main():
             "open_watchpoint_target", "record_watchpoint_failure", "alloc_backend",
             "pgwt_sampler_enroll_backend", "pgwt_scan_existing_backends",
             "pgwt_handle_fork", "pgwt_handle_init"))
-    policy = "\n".join(function(sampler, name) for name in
-                       ("resolve_sampled_attr", "finish_sampled_attr", "note_idle_attr_sample"))
+    discovery = (ROOT / "src/discovery.c").read_text()
+    policy = function(discovery, "pgwt_pg13_status_offsets") + "\n" + "\n".join(function(sampler, name) for name in
+                       ("resolve_sampled_attr", "resolve_pg13_sampled_attr", "refresh_pg13_generation",
+                        "finish_sampled_attr", "note_idle_attr_sample"))
     # Compile the real registry paths and the actual target-building loop.
     # Hardware, directory enumeration, maps and stat are injected by the C harness.
     for name in ("pgwt_scan_existing_backends", "pgwt_handle_init", "pgwt_handle_fork"):
         assert "pgwt_sampler_enroll_backend(be, now_ns());" in function(backend, name), name
     poll = function(sampler, "pgwt_sampler_poll")
     assert "resolve_sampled_attr(d, be, tick_ts, &maps_cache);" in poll
+    assert "if (target_tick_enabled && d->backend_status_layout.major != 13)" in poll
+    assert "if (refresh_pg13_generation(d) != 0)" in poll
+    assert "pgwt_pgbs_validate_runtime(&d->backend_status_layout, d->postmaster_pid," in poll
     assert "finish_sampled_attr(be, attr_rows[n].rc, attr_rows[n].error, tick_ts);" in poll
     assert "note_idle_attr_sample(d, &targets[i], tick_enabled[i] && attr_valid[i]," in poll
     assert "getenv" not in function(sampler, "note_idle_attr_sample")
@@ -243,6 +248,7 @@ def main():
     registry = """
 static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
 {
+    (void)refresh_pg13_generation(d);
     const bool tick_source_enabled = pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout);
     struct pgwt_sample_target sample_targets[MAX_BACKENDS];
     struct pgwt_pgbs_batch_target attr_rows[MAX_BACKENDS];
@@ -329,6 +335,75 @@ static int record_registry_tick(struct pgwt_daemon *d, uint64_t tick_ts)
         result = run([str(build("baseline", source))])
         assert result.returncode == 0, result.stdout + result.stderr
         print(result.stdout, end="")
+        pg13_mutations = [
+            ("pg13_pgprocno_as_backend_id", "int32_t id = hints[j].backend_id;",
+             "int32_t id = hints[j].pgprocno;",
+             "PG13 all eligible rows are attributed on their first tick"),
+            ("pg13_drop_anchor_offset", "uint64_t delta = id > 0 ? (uint64_t)(id - 1) * layout->struct_size : 0;",
+             "uint64_t delta = id > 0 ? (uint64_t)id * layout->struct_size : 0;",
+             "PG13 anchor ID establishes array base independent of anchor position"),
+            ("pg13_drop_row_minus_one", "uint64_t delta = (uint64_t)(id - 1) * layout->struct_size;",
+             "uint64_t delta = (uint64_t)id * layout->struct_size;",
+             "PG13 all eligible rows are attributed on their first tick"),
+            ("pg13_scan_as_main_route", "    if (pending) {\n        got = pending ?",
+             "    if (false && pending) {\n        got = pending ?",
+             "PG13 signed far distances resolve on the first eligible tick"),
+            ("pg13_one_discovery_call_per_target",
+             "ssize_t got = count ? batch_readv(postmaster_pid, local, remote, count) : 0;",
+             "ssize_t got = 0;\n    for (size_t j = 0; j < count; j++) {\n"
+             "        ssize_t part = batch_readv(postmaster_pid, local + j, remote + j, 1);\n"
+             "        if (part < 0) break;\n        got += part;\n    }",
+             "PG13 pending discovery uses at most two bounded postmaster calls"),
+            ("pg13_skip_shared_range",
+             "uint64_t base = layout->status_array_base + delta;\n"
+             "        if (!reader_shared_range(r, base, layout->struct_size)) continue;",
+             "uint64_t base = layout->status_array_base + delta;",
+             "PG13 computed row requires both shared range proofs"),
+            ("pg13_skip_pgproc_pid", "if (hints[j].pid != r->pid || id <= 0) continue;",
+             "if (id <= 0) continue;",
+             "PG13 PGPROC pid mismatch is never a computed hint"),
+            ("pg13_skip_row_pid", "snapshot->procpid == (uint32_t)expected_pid &&",
+             "snapshot->procpid != 0 &&",
+             "PG13 computed hints still require the row PID"),
+            ("pg13_skip_start_time", "if (!pgwt_pgbs_pid_is_original(r->pid, r->start_time)) {",
+             "if (false && !pgwt_pgbs_pid_is_original(r->pid, r->start_time)) {",
+             "PG13 computed acceptance checks the enrolled start time"),
+            ("pg13_accept_odd_counters", "return before == after && (after & 1u) == 0;",
+             "return before == after;", "PG13 odd counters are refused"),
+            ("pg13_accept_unequal_counters", "return before == after && (after & 1u) == 0;",
+             "(void)before; return (after & 1u) == 0;", "PG13 unequal counters are refused"),
+            ("pg13_keep_layout_across_generation",
+             "layout->status_array_base = layout->status_anchor = layout->shm_generation = 0;",
+             "/* retain the old array-base proof */",
+             "PG13 same-postmaster generation change invalidates layout and base"),
+            ("pg13_keep_reader_across_generation",
+             "if (r->shm_generation != layout->shm_generation ||\n"
+             "            r->shared_reader_pid != postmaster_pid) {",
+             "if (r->shared_reader_pid != postmaster_pid) {",
+             "PG13 generation change discards accepted rows and mapping proofs"),
+        ]
+        for label, before, after, assertion in pg13_mutations:
+            assert source.count(before) == 1, (label, "mutation anchor changed")
+            result = run([str(build(label, source.replace(before, after))), "pg13"])
+            assert result.returncode == 1 and f"FAIL: {assertion}" in result.stderr, (
+                label, result.returncode, result.stdout, result.stderr)
+            print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
+        pg13_policy_mutations = [
+            ("pg13_keep_sampler_caches", "pgwt_pgbs_reader_reset(&be->sampled_reader);",
+             "/* keep the old sampler enrollment */",
+             "PG13 sampler generation change retires row and wait-context caches"),
+            ("pg13_keep_retry_deadline", "uint64_t wait = backends[i]->wp_addr;",
+             "if (backends[i]->pgbs_resolve_retry_ns) { rows[i].reader = NULL; continue; }\n"
+             "        uint64_t wait = backends[i]->wp_addr;",
+             "PG13 sampler batches all pending discovery without a retry deadline"),
+        ]
+        for label, before, after, assertion in pg13_policy_mutations:
+            assert policy.count(before) == 1, (label, "mutation anchor changed")
+            result = run([str(build(label, source, resolution=policy.replace(before, after))),
+                          "pg13-registry"])
+            assert result.returncode == 1 and f"FAIL: {assertion}" in result.stderr, (
+                label, result.returncode, result.stdout, result.stderr)
+            print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
         mutant_cases = {"no_iov_max_chunking": "budget", "drop_cached_address_return": "resolve",
                         "drop_pid_zero_guard": "identity", "drop_existing_entry_identity_check": "identity",
                         "restore_exit_during_exact_duplicate": "identity", "drop_lazy_enrollment": "registry",
@@ -458,6 +533,8 @@ static int record_registry_tick(struct pgwt_daemon *d, uint64_t tick_ts)
             assert result.returncode == 1 and f"FAIL: {assertion}" in result.stderr, (label, result)
             print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
 
+        total = len(pg13_mutations) + len(pg13_policy_mutations) + len(mutations) + len(other_mutations)
+        print(f"sampled_attr_io mutants: {total}/{total} built, reached and rejected by named assertions")
 
 
 if __name__ == "__main__":

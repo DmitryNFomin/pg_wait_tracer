@@ -997,8 +997,8 @@ static int sampler_live_cmd_gate(void *ctx, int idx,
     return 1;
 }
 
-/* The sampler owns enrollment: no registry entry can reach an attribution read
- * without this idempotent safeguard, regardless of how/when it was registered.
+/* PG14+ keeps the existing per-backend pointer resolution policy. Identity
+ * enrollment happens independently before either version's resolver.
  * Attempts are >=100 ms apart for the first second, then 100/200/.../3200 ms.
  * No catch-up after a stalled tick. Candidate reads do not accept identity;
  * the shared batch below is the sole row validator. After enrollment/maps
@@ -1028,6 +1028,39 @@ static void resolve_sampled_attr(struct pgwt_daemon *d, struct pgwt_backend *be,
             d->my_be_entry_addr, &d->backend_status_layout, maps_cache);
 }
 
+/* Mapping identity is checked even with no pending rows: crash recovery can
+ * rebuild shared memory under the same postmaster PID and at the same VA. */
+static int refresh_pg13_generation(struct pgwt_daemon *d)
+{
+    if (pgwt_pgbs_pg13_generation(d->postmaster_pid, &d->backend_status_layout) == 0)
+        return 0;
+    for (int i = 0; i < d->backends.count; i++) {
+        struct pgwt_backend *be = &d->backends.entries[i];
+        pgwt_pgbs_reader_reset(&be->sampled_reader);
+        be->pgbs_addr = 0;
+        be->pgbs_resolve_retry_ns = be->pgbs_resolve_fast_until_ns = 0;
+        be->pgbs_resolve_attempts = 0;
+        be->sampled_cache_stale = true;
+    }
+    return -1;
+}
+
+static void resolve_pg13_sampled_attr(struct pgwt_daemon *d,
+    struct pgwt_pgbs_batch_target *rows, struct pgwt_backend **backends,
+    size_t n, struct pgwt_pgbs_maps_cache *maps_cache)
+{
+    for (size_t i = 0; i < n; i++) {
+        uint64_t wait = backends[i]->wp_addr;
+        rows[i].pgproc_addr = d->use_myproc && d->wait_offset_validated &&
+            d->pgproc_wait_offset > 0 && wait >= (uint64_t)d->pgproc_wait_offset
+            ? wait - (uint64_t)d->pgproc_wait_offset : 0;
+    }
+    pgwt_pgbs_resolve_pg13_batch(d->postmaster_pid, &d->backend_status_layout,
+        rows, n, maps_cache, &d->counters.sampled_attr_pg13_scan_fallbacks_total);
+    for (size_t i = 0; i < n; i++)
+        backends[i]->pgbs_addr = backends[i]->sampled_reader.status_addr;
+}
+
 static void finish_sampled_attr(struct pgwt_backend *be, int rc, int error,
                                 uint64_t tick_ts)
 {
@@ -1048,9 +1081,8 @@ static void finish_sampled_attr(struct pgwt_backend *be, int rc, int error,
         be->pgbs_resolve_attempts = 0;
         be->pgbs_resolve_retry_ns = 0;
     } else if (be->sampled_reader.candidate) {
-        /* A PG13 hint can accidentally match a pid outside the array. Only
-         * the batch can promote it; any initial rejection must continue the
-         * candidate search on the already scheduled cadence. */
+        /* Only the batch can promote a hint. PG13 recomputes rejected hints
+         * next tick; PG14+ retains its scheduled resolution cadence. */
         be->sampled_reader.status_addr = 0;
         be->sampled_reader.activity_addr = 0;
         be->sampled_reader.shared = false;
@@ -1102,6 +1134,13 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
      * as the first weight in a block or a timestamp difference. */
     uint64_t period_ns = pgwt_sampler_tick_period(s, tick_ts);
 
+    if (refresh_pg13_generation(d) != 0) {
+        char binary[PATH_MAX];
+        if (pgwt_find_pg_binary(d->postmaster_pid, binary, sizeof(binary)) == 0)
+            pgwt_pgbs_validate_runtime(&d->backend_status_layout, d->postmaster_pid,
+                d->my_be_entry_addr, binary, &d->pgbs_validation_exclusions);
+        pgwt_pgbs_log(&d->backend_status_layout);
+    }
     const bool tick_source_enabled =
         pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout);
     uint32_t attr_edge_mask = d->exact_probes.core.attached_mask &
@@ -1236,11 +1275,13 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         tick_enabled[n] = target_tick_enabled;
         attr_rows[n].reader = target_tick_enabled ? &be->sampled_reader : NULL;
         attr_rows[n].pid = be->pid;
-        if (target_tick_enabled)
+        if (target_tick_enabled && d->backend_status_layout.major != 13)
             resolve_sampled_attr(d, be, tick_ts, &maps_cache);
         be->pgbs_addr = be->sampled_reader.status_addr;
         n++;
     }
+    if (tick_source_enabled && d->backend_status_layout.major == 13)
+        resolve_pg13_sampled_attr(d, attr_rows, backend_rows, (size_t)n, &maps_cache);
     pgwt_pgbs_maps_cache_reset(&maps_cache);
     int target_count = n;
     if (tick_source_enabled)

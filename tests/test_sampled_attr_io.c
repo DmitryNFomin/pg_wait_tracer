@@ -52,18 +52,31 @@ static FILE *proc_file;
 static int private_target, private_reader, incarnation = 1;
 static int tear_row = -1, transient_tear, short_row = -1, fault_row = -1;
 static int reader_gone, mutate_on_span, max_iovs, after_copy[1024], visits[1024];
-/* One arena with a fixed order: the PG13 candidate scan probes rows on BOTH
- * sides of the status anchor and counts every address inside any shared map as
- * a hint (the first 512 per attempt). If the activity buffers were separate
- * statics, a linker could place them just below the status rows (Linux does),
- * spend part of the 512-hint budget on those bytes and leave the last rows
- * unresolved on the first tick. Keep everything mapped above the rows. */
+/* Realistic shared surroundings: scanning cannot infer the array bounds from
+ * /proc/maps. PGPROC slot order deliberately differs from backendId order. */
 #define STORAGE_BYTES (1024 * 440)
 static struct {
+    uint8_t below[600 * 440];
     uint8_t storage[STORAGE_BYTES];
+    uint8_t above[600 * 440];
     uint64_t entries[1024];
     char activity[1024][64];
+    uint8_t pgproc[1024][856];
 } arena;
+static unsigned proc_slot(size_t i) { return (unsigned)(i * 641 + 317) % 1024; }
+static uint64_t proc_at(size_t i) { return (uintptr_t)arena.pgproc[proc_slot(i)]; }
+#ifdef PGWT_LIFECYCLE_SOURCE
+static uint64_t test_wait(int major, size_t i)
+{ return major == 13 ? proc_at(i) + 684 : i == 0 ? 1234 : 2345; }
+static void proc_identity(size_t i, uint32_t pid, uint32_t id)
+{
+    memcpy((void *)(uintptr_t)(proc_at(i) + 52), &pid, 4);
+    memcpy((void *)(uintptr_t)(proc_at(i) + 60), &id, 4);
+}
+#endif
+static unsigned mapping_incarnation = 1;
+static int exclude_rows;
+static int32_t anchor_backend_id;
 static uint8_t *const storage = arena.storage;
 static uint64_t *const entries = arena.entries;
 static char (*const activity)[64] = arena.activity;
@@ -100,9 +113,13 @@ static FILE *io_fopen(const char *path, const char *mode)
         const char *perms = (pid == 42 ? private_reader : private_target) ? "rw-p" : "rw-s";
         for (int i = 0; i < maps_prefix_lines; i++)
             fputs("00001000-00002000 rw-p 00000000 00:00 0 /padding\n", fp);
-        fprintf(fp, "%llx-%llx %s 00000000 00:00 1\n",
-            (unsigned long long)(uintptr_t)storage,
-            (unsigned long long)(uintptr_t)(storage + population * layout.struct_size), perms);
+        if (exclude_rows && (exclude_rows == 1 ? pid != 42 : pid == 42)) {
+            fprintf(fp, "%llx-%llx %s 00000000 00:00 3\n",
+                (unsigned long long)(uintptr_t)arena.pgproc,
+                (unsigned long long)(uintptr_t)(arena.pgproc + 1024), perms);
+        } else fprintf(fp, "%llx-%llx %s 00000000 00:00 %u\n",
+            (unsigned long long)(uintptr_t)&arena,
+            (unsigned long long)(uintptr_t)(&arena + 1), perms, mapping_incarnation);
         fprintf(fp, "%llx-%llx %s 00000000 00:00 2\n",
             (unsigned long long)(uintptr_t)activity,
             (unsigned long long)(uintptr_t)(activity + population), perms);
@@ -134,9 +151,10 @@ static ssize_t io_pread(int fd, void *buf, size_t size, off_t offset)
 {
     (void)fd; reads++;
     uintptr_t addr = (uintptr_t)offset;
-    if ((addr >= (uintptr_t)storage && addr + size <= (uintptr_t)(storage + STORAGE_BYTES)) ||
-        (addr >= (uintptr_t)entries && addr + size <= (uintptr_t)(entries + 1024)) ||
-        (addr >= (uintptr_t)activity && addr + size <= (uintptr_t)(activity + 1024))) {
+    if (addr == (uintptr_t)&anchor_backend_id && size == 4) {
+        memcpy(buf, &anchor_backend_id, size); return (ssize_t)size;
+    }
+    if (addr >= (uintptr_t)&arena && addr + size <= (uintptr_t)(&arena + 1)) {
         memcpy(buf, (void *)addr, size); return (ssize_t)size;
     }
     errno = EFAULT; return -1;
@@ -217,9 +235,10 @@ ssize_t pgwt_test_wait_readv(pid_t pid, const struct iovec *local, unsigned long
             copied += 4;
             continue;
         }
-        CHECK(remote[i].iov_base == &wait_words[i] && remote[i].iov_len == 4,
+        CHECK((uintptr_t)remote[i].iov_base == (layout.major == 13
+                  ? proc_at(i) + 684 : (uintptr_t)&wait_words[i]) && remote[i].iov_len == 4,
               "wait batch reads successor-independent shared wait slots");
-        memcpy(local[i].iov_base, remote[i].iov_base, remote[i].iov_len);
+        memcpy(local[i].iov_base, &wait_words[i], remote[i].iov_len);
         copied += remote[i].iov_len;
     }
     return (ssize_t)copied;
@@ -234,6 +253,8 @@ static void reset_counts(void)
 static void fixture(int major, size_t n)
 {
     for (size_t i = 0; i < 1024; i++) pgwt_pgbs_reader_reset(&cache[i]);
+    private_target = private_reader = reader_gone = mutate_on_span = transient_tear = 0;
+    incarnation = 1; stat_fail = own_short = maps_fail = maps_prefix_lines = 0;
     population = n;
     CHECK(pgwt_pgbs_hard_table_lookup(major, PGWT_PGBS_ARCH_X86_64, 8,
           PGWT_PGBS_ABI_SYSV_LP64, &layout) == 0, "fixture layout exists");
@@ -245,11 +266,28 @@ static void fixture(int major, size_t n)
         if (fields[i]->present) fields[i]->validation = PGWT_PGBS_FIELD_VALIDATED;
     memset(storage, 0, STORAGE_BYTES); memset(targets, 0, sizeof(targets));
     layout.activity_buffer_size = sizeof(activity[0]);
-    layout.status_anchor = (uintptr_t)storage;
-    CHECK((uintptr_t)entries >= (uintptr_t)(storage + STORAGE_BYTES) &&
-          (uintptr_t)activity >= (uintptr_t)(storage + STORAGE_BYTES),
-          "fixture maps nothing below the status rows (PG13 hint budget)");
-    for (size_t i = 0; i < n; i++) {
+    layout.status_anchor = (uintptr_t)row_at(511);
+    layout.status_array_base = (uintptr_t)storage;
+    layout.pgproc_pid_offset = 52;
+    layout.pgproc_backend_id_offset = 60;
+    mapping_incarnation = 1; exclude_rows = 0;
+    layout.shm_generation = pg13_mapping_generation(42, layout.status_anchor);
+    layout.generation_postmaster = 42;
+    layout.pg13_computed = major == 13;
+    memset(arena.below, 0, sizeof(arena.below));
+    for (size_t i = 0; i < sizeof(arena.below) / layout.struct_size; i++) {
+        uint32_t decoy = 1000 + i % (n ? n : 1);
+        uintptr_t base = (uintptr_t)storage - (i + 1) * layout.struct_size;
+        uint64_t pointer = (uintptr_t)activity[decoy - 1000];
+        memcpy((void *)(base + layout.st_procpid.offset), &decoy, sizeof(decoy));
+        memcpy((void *)(base + layout.st_activity_raw.offset), &pointer, sizeof(pointer));
+    }
+    memset(arena.pgproc, 0, sizeof(arena.pgproc));
+    for (size_t i = 0; i < 1024; i++) {
+        uint32_t pid = 1000 + i, slot = proc_slot(i), id = i + 1;
+        memcpy((void *)(uintptr_t)(proc_at(i) + 52), &pid, 4);
+        memcpy((void *)(uintptr_t)(proc_at(i) + 56), &slot, 4);
+        memcpy((void *)(uintptr_t)(proc_at(i) + 60), &id, 4);
         snprintf(activity[i], sizeof(activity[i]), "SELECT %zu", i);
         entries[i] = (uintptr_t)row_at(i);
         put(i, &layout.st_changecount, 20);
@@ -263,9 +301,11 @@ static void fixture(int major, size_t n)
          * the production own-pid resolver and both mapping proofs. */
         cache[i] = (struct pgwt_pgbs_reader){.pid = (pid_t)(1000 + i), .start_time = 1,
             .status_addr = entries[i], .activity_addr = (uintptr_t)activity[i],
-            .shared_reader_pid = 42, .shared = true};
+            .shared_reader_pid = 42, .shared = true,
+            .shm_generation = layout.shm_generation};
         targets[i].pid = (pid_t)(1000 + i); targets[i].reader = &cache[i];
         targets[i].rc = -1;
+        targets[i].pgproc_addr = proc_at(i);
     }
     private_target = private_reader = reader_gone = mutate_on_span = transient_tear = 0;
     incarnation = 1; stat_fail = own_short = maps_fail = maps_prefix_lines = 0;
@@ -319,8 +359,14 @@ static void test_faults(int major)
     CHECK(targets[2].rc == -1 && !cache[2].status_addr && !cache[2].shared,
           "slot reuse rejects PID and drops cached address");
     put(2, &layout.st_procpid, 1002);
-    CHECK(pgwt_pgbs_reader_resolve(&cache[2], 42, (uintptr_t)&entries[2], &layout, NULL) == 0,
-          "slot reuse re-resolves through own pid");
+    if (major == 13) {
+        struct pgwt_pgbs_maps_cache maps = {0};
+        pgwt_pgbs_resolve_pg13_batch(42, &layout, targets, population, &maps, NULL);
+        pgwt_pgbs_maps_cache_reset(&maps);
+    } else {
+        CHECK(pgwt_pgbs_reader_resolve(&cache[2], 42, (uintptr_t)&entries[2], &layout, NULL) == 0,
+              "slot reuse re-resolves through own pid");
+    }
     batch(); CHECK(targets[2].rc == 0, "re-resolved slot is usable");
     fixture(major, 5); targets[1].reader = &cache[2]; targets[2].reader = &cache[1]; batch();
     CHECK(targets[1].rc == -1 && targets[2].rc == -1 && targets[0].rc == 0,
@@ -408,6 +454,144 @@ static void test_resolve(int major)
     CHECK(calls == 1 && targets[1].rc == 0 && targets[1].gate.cmd_open &&
           targets[1].gate.query_id_valid == (major != 13) && !opens && !reads,
           "command recheck uses one foreign-pid batch and same predicate");
+}
+
+static void pg13_anchor(size_t slot)
+{
+    anchor_backend_id = (int32_t)slot + 1;
+    layout.my_backend_id_addr = (uintptr_t)&anchor_backend_id;
+    pg13_record_anchor(&layout, 1000 + (pid_t)slot, 42, (uintptr_t)row_at(slot));
+    CHECK(layout.status_array_base == (uintptr_t)storage && layout.pg13_computed,
+          "PG13 anchor ID establishes array base independent of anchor position");
+}
+static uint64_t scan_uses;
+static void pg13_discover(size_t n)
+{
+    struct pgwt_pgbs_maps_cache maps = {0};
+    pgwt_pgbs_resolve_pg13_batch(42, &layout, targets, n, &maps, &scan_uses);
+    pgwt_pgbs_maps_cache_reset(&maps);
+}
+static void pg13_pending(size_t i)
+{
+    pgwt_pgbs_reader_reset(&cache[i]);
+    CHECK(pgwt_pgbs_reader_enroll(&cache[i], 1000 + (pid_t)i) == 0,
+          "PG13 pending enrollment");
+}
+static void test_pg13_computed(void)
+{
+    const size_t counts[] = {500, 1000, 1024};
+    const size_t anchors[] = {0, 511, 1023};
+    for (size_t c = 0; c < 3; c++) for (size_t a = 0; a < 3; a++) {
+        size_t n = counts[c];
+        fixture(13, n); pg13_anchor(anchors[a]);
+        for (size_t i = 0; i < n; i++) pg13_pending(i);
+        reset_counts(); scan_uses = 0;
+        pg13_discover(n);
+        CHECK(calls == 2 && !own_calls && max_iovs <= 1024 && !scan_uses,
+              "PG13 pending discovery uses at most two bounded postmaster calls");
+        batch();
+        for (size_t i = 0; i < n; i++)
+            CHECK(targets[i].rc == 0 && cache[i].status_addr == entries[i] &&
+                  targets[i].attr.databaseid == 16384 && targets[i].attr.userid == 10 &&
+                  strcmp(targets[i].attr.activity, activity[i]) == 0,
+                  "PG13 all eligible rows are attributed on their first tick");
+        CHECK(!tick_failures, "PG13 initialized first tick has no dropped samples");
+        reset_counts(); pg13_discover(n);
+        CHECK(!calls && !own_calls && !stat_reads && !map_reads && !scan_uses,
+              "PG13 steady state performs zero discovery calls");
+        printf("PG13 computed N=%zu anchor=%zu: first eligible tick, discovery=2, steady=0, iov<=1024\n",
+               n, anchors[a]);
+    }
+    const int distances[] = {-1023, -513, -257, 257, 513, 1023};
+    for (size_t d = 0; d < sizeof(distances)/sizeof(*distances); d++) {
+        fixture(13, 1024);
+        int distance = distances[d];
+        size_t anchor = distance < 0 ? 1023 : 0;
+        size_t i = (size_t)((int)anchor + distance);
+        pg13_anchor(anchor); pg13_pending(i);
+        reset_counts(); scan_uses = 0; pg13_discover(1024);
+        CHECK(calls == 2 && max_iovs == 1 && !own_calls && !scan_uses,
+              "PG13 one pending far row uses two single-range calls");
+        batch();
+        CHECK(targets[i].rc == 0 && cache[i].status_addr == entries[i],
+              "PG13 signed far distances resolve on the first eligible tick");
+    }
+    /* The backendId is assigned before pgstat_bestart initializes its row.
+     * A rejected hint must retry on the very next tick, without backoff. */
+    fixture(13, 1024); pg13_anchor(0); pg13_pending(1023);
+    put(1023, &layout.st_procpid, 0); reset_counts(); pg13_discover(1024); batch();
+    CHECK(targets[1023].rc < 0 && tick_failures == 1,
+          "PG13 preinitialization sample stays counted as unreadable");
+    put(1023, &layout.st_procpid, 2023); reset_counts(); pg13_discover(1024); batch();
+    CHECK(targets[1023].rc == 0 && calls == 6 && !tick_failures,
+          "PG13 initialization after rejection is eligible on the next tick");
+}
+static void test_pg13_guards(void)
+{
+    for (int reader = 1; reader <= 2; reader++) {
+        fixture(13, 1); pg13_anchor(511); pg13_pending(0);
+        exclude_rows = reader; reset_counts(); pg13_discover(1); batch();
+        CHECK(!cache[0].status_addr && targets[0].rc < 0,
+              "PG13 computed row requires both shared range proofs");
+    }
+    fixture(13, 1); pg13_anchor(511); pg13_pending(0);
+    int32_t wrong_pid = 9999;
+    memcpy((void *)(uintptr_t)(proc_at(0) + 52), &wrong_pid, 4);
+    reset_counts(); pg13_discover(1);
+    CHECK(!cache[0].computed_hint,
+          "PG13 PGPROC pid mismatch is never a computed hint");
+    fixture(13, 1); pg13_anchor(511); pg13_pending(0);
+    pg13_discover(1); put(0, &layout.st_procpid, 9999); batch();
+    CHECK(targets[0].rc < 0, "PG13 computed hints still require the row PID");
+    fixture(13, 1); pg13_anchor(511); pg13_pending(0);
+    pg13_discover(1); incarnation = 2; batch();
+    CHECK(targets[0].rc < 0 && targets[0].error == ESTALE && !cache[0].pid,
+          "PG13 computed acceptance checks the enrolled start time");
+    fixture(13, 1); put(0, &layout.st_changecount, 21); batch();
+    CHECK(targets[0].rc < 0, "PG13 odd counters are refused");
+    fixture(13, 1); tear_row = 0; batch();
+    CHECK(targets[0].rc < 0, "PG13 unequal counters are refused");
+    fixture(13, 3); pg13_anchor(511);
+    uint64_t old_generation = layout.shm_generation;
+    mapping_incarnation = 2;
+    CHECK(pgwt_pgbs_pg13_generation(42, &layout) < 0 &&
+          !layout.status_array_base && !layout.status_anchor &&
+          layout.validation == PGWT_PGBS_VALIDATION_NOT_RUN,
+          "PG13 same-postmaster generation change invalidates layout and base");
+    batch(); CHECK(targets[0].rc < 0,
+          "PG13 invalidated layout cannot accept cached rows");
+    layout.validation = PGWT_PGBS_VALIDATION_VALIDATED; pg13_anchor(0);
+    CHECK(layout.shm_generation != old_generation,
+          "PG13 revalidated mapping has a new generation at the same address");
+    private_target = 1; reset_counts(); pg13_discover(3); batch();
+    CHECK(!cache[0].status_addr && targets[0].rc < 0 && map_reads == 4,
+          "PG13 generation change discards accepted rows and mapping proofs");
+    fixture(13, 1); pg13_anchor(0);
+    CHECK(pgwt_pgbs_pg13_generation(43, &layout) < 0 && !layout.status_array_base,
+          "PG13 postmaster replacement invalidates the old layout");
+    /* Without a usable anchor ID the retained scan is explicit and budgeted.
+     * Its pid-only decoys must never become accepted rows. */
+    fixture(13, 1024); layout.status_array_base = 0;
+    for (size_t i = 0; i < 1024; i++) pg13_pending(i);
+    reset_counts(); scan_uses = 0; pg13_discover(1024); batch();
+    CHECK(scan_uses == 1 && !layout.pg13_computed && !own_calls &&
+          calls <= 3 && max_iovs <= 1024,
+          "PG13 unavailable computed route uses one counted bounded scan");
+    for (size_t i = 0; i < population; i++)
+        CHECK(targets[i].rc < 0 || cache[i].status_addr == entries[i],
+              "PG13 shared pid decoys never pass coherent batch acceptance");
+    fixture(13, 1024); pg13_anchor(0); layout.status_array_base = 0;
+    for (size_t i = 0; i < 600; i++) {
+        uintptr_t base = (uintptr_t)storage - (i + 1) * layout.struct_size;
+        uint32_t pid = 2023; uint64_t pointer = (uintptr_t)activity[1023];
+        memcpy((void *)(base + layout.st_procpid.offset), &pid, 4);
+        memcpy((void *)(base + layout.st_activity_raw.offset), &pointer, 8);
+    }
+    pg13_pending(1023); targets[0] = targets[1023]; population = 1;
+    reset_counts(); scan_uses = 0; pg13_discover(1); batch();
+    CHECK(scan_uses == 1 && targets[0].rc < 0 && tick_failures == 1 && calls <= 3,
+          "PG13 lower shared pid decoys are rejected by the coherent acceptor");
+    puts("PG13 computed identity, mapping, generation and counted fallback guards reached");
 }
 
 #ifdef PGWT_LIFECYCLE_SOURCE
@@ -510,6 +694,8 @@ static struct pgwt_daemon *new_daemon(int major)
     d->my_be_entry_addr = (uintptr_t)&entries[0];
     d->mode = PGWT_MODE_TIERED;
     d->pg_major_version = major;
+    d->use_myproc = d->wait_offset_validated = major == 13;
+    d->pgproc_wait_offset = major == 13 ? 684 : 0;
     wait_addr = 0; exit_calls = 0;
     CHECK(pgwt_sampler_start(d) == 0, "sampler init");
     return d;
@@ -523,6 +709,96 @@ static void release_daemon(struct pgwt_daemon *d)
     pgwt_sampler_stop(d);
     free(d->skel); free(d);
 }
+static void test_pg13_registry(void)
+{
+    struct PgBackendStatusLayout offsets = {0};
+    offsets.major = 13; offsets.arch = PGWT_PGBS_ARCH_X86_64;
+    offsets.abi = PGWT_PGBS_ABI_SYSV_LP64; offsets.pointer_width = 8;
+    pgwt_pg13_status_offsets(&offsets, UINT64_C(0x12345678));
+    CHECK(offsets.pgproc_pid_offset == 52 && offsets.pgproc_backend_id_offset == 60 &&
+          offsets.my_backend_id_addr == UINT64_C(0x12345678),
+          "PG13 discovery wires the probed PGPROC and anchor ID layout");
+    offsets.major = 17;
+    struct PgBackendStatusLayout unchanged = offsets;
+    pgwt_pg13_status_offsets(&offsets, 99);
+    CHECK(memcmp(&offsets, &unchanged, sizeof(offsets)) == 0,
+          "PG13 status offsets leave later versions unchanged");
+    offsets.major = 13; offsets.arch = PGWT_PGBS_ARCH_ARM64;
+    unchanged = offsets;
+    pgwt_pg13_status_offsets(&offsets, 99);
+    CHECK(memcmp(&offsets, &unchanged, sizeof(offsets)) == 0,
+          "PG13 status offsets refuse an unprobed architecture");
+    const size_t counts[] = {500, 1000, 1024};
+    for (size_t c = 0; c < 3; c++) {
+        size_t n = counts[c];
+        struct pgwt_daemon *d = new_daemon(13);
+        fixture(13, n); pg13_anchor(511); d->backend_status_layout = layout;
+        for (size_t i = 0; i < n; i++) {
+            struct pgwt_backend *be = alloc_backend(&d->backends, 1000 + (pid_t)i, true);
+            CHECK(be != NULL, "PG13 registry population fits the existing cap");
+            be->wp_addr = proc_at(i) + 684; be->wp_addr_shared = 1; be->meta_parsed = true;
+            CHECK(pgwt_sampler_enroll_backend(be, clock_ns) == 0,
+                  "PG13 retry-deadline fixture already has an enrolled identity");
+            be->pgbs_resolve_retry_ns = clock_ns + UINT64_C(3200000000);
+        }
+        reset_counts();
+        CHECK(sample_registry(d, clock_ns) == (int)n && calls == 2 && !own_calls && max_iovs <= 1024,
+              "PG13 sampler batches all pending discovery without a retry deadline");
+        batch();
+        for (size_t i = 0; i < n; i++) {
+            CHECK(targets[i].rc == 0 && d->backends.entries[i].pgbs_addr == entries[i],
+                  "PG13 sampler attributes the full population on the first eligible tick");
+            finish_sampled_attr(&d->backends.entries[i], targets[i].rc, targets[i].error, clock_ns);
+        }
+        reset_counts();
+        sample_registry(d, clock_ns + 1);
+        CHECK(!calls && !own_calls && !stat_reads && map_reads == 1,
+              "PG13 sampler steady state only refreshes the generation proof");
+        /* The farthest row alone becomes pending and is initially unreadable.
+         * finish() may retain a legacy deadline; this route must ignore it. */
+        size_t i = n - 1;
+        struct pgwt_backend *be = &d->backends.entries[i];
+        pgwt_pgbs_reader_reset(&be->sampled_reader);
+        put(i, &layout.st_procpid, 0);
+        uint64_t t = clock_ns + 2;
+        sample_registry(d, t); batch();
+        finish_sampled_attr(be, targets[i].rc, targets[i].error, t);
+        CHECK(targets[i].rc < 0 && tick_failures == 1,
+              "PG13 sampler counts the uninitialised row once");
+        put(i, &layout.st_procpid, 1000 + i);
+        reset_counts(); sample_registry(d, t + 1);
+        CHECK(calls == 2 && max_iovs == 1 && !own_calls,
+              "PG13 sampler retries one pending row on the next tick");
+        batch(); finish_sampled_attr(be, targets[i].rc, targets[i].error, t + 1);
+        CHECK(targets[i].rc == 0 && !tick_failures,
+              "PG13 sampler attributes the first initialised tick after rejection");
+        release_daemon(d);
+    }
+    struct pgwt_daemon *d = new_daemon(13);
+    struct pgwt_backend *be = alloc_backend(&d->backends, 1000, true);
+    be->wp_addr = proc_at(0) + 684; be->wp_addr_shared = 1; be->meta_parsed = true;
+    sample_registry(d, clock_ns); batch();
+    finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
+    mapping_incarnation = 2;
+    CHECK(refresh_pg13_generation(d) < 0 && !be->sampled_reader.pid &&
+          !be->pgbs_addr && be->sampled_cache_stale &&
+          d->backend_status_layout.validation == PGWT_PGBS_VALIDATION_NOT_RUN,
+          "PG13 sampler generation change retires row and wait-context caches");
+    /* Model successful controlled validation of the new generation, as poll
+     * requires before re-enabling this source. The VA and PM PID are reused. */
+    layout.validation = PGWT_PGBS_VALIDATION_VALIDATED; pg13_anchor(511);
+    d->backend_status_layout = layout;
+    proc_identity(1, 1000, 1); wait_addr = proc_at(1) + 684;
+    put(0, &layout.st_databaseid, 7777);
+    reset_counts(); sample_registry(d, clock_ns + 1); batch();
+    CHECK(targets[0].rc == 0 && be->wp_addr == wait_addr &&
+          !be->sampled_cache_stale && targets[0].attr.databaseid == 7777 &&
+          be->sampled_reader.shm_generation == layout.shm_generation,
+          "PG13 sampler resumes only with freshly validated generation and wait context");
+    release_daemon(d);
+    puts("PG13 sampler loop: full pending populations, every-tick retry, generation invalidation PASS");
+}
+
 static void test_registry_paths(int major)
 {
     const char *paths[] = {"fork sampled", "fork tiered sampled", "fork full",
@@ -538,13 +814,13 @@ static void test_registry_paths(int major)
         if (path == 4) d->backend_status_layout.validation = PGWT_PGBS_VALIDATION_DEGRADED;
         if (path == 13) stat_fail = 1;
         if (path == 4 || path == 5 || path == 11) {
-            wait_addr = path == 11 ? 0 : 1234;
+            wait_addr = path == 11 ? 0 : test_wait(major, 0);
             CHECK(pgwt_scan_existing_backends(d) >= 0, "production startup scan");
         } else if (path == 6) {
-            CHECK(pgwt_handle_init(d, 1000, 1234, 0) == 0, "production unknown INIT");
+            CHECK(pgwt_handle_init(d, 1000, test_wait(major, 0), 0) == 0, "production unknown INIT");
         } else {
             CHECK(pgwt_handle_fork(d, 1000) == 0, "production FORK in each capture mode");
-            if (path == 7) CHECK(pgwt_handle_init(d, 1000, 1234, 0) == 0, "production existing INIT");
+            if (path == 7) CHECK(pgwt_handle_init(d, 1000, test_wait(major, 0), 0) == 0, "production existing INIT");
             if (path == 12) {
                 pgwt_handle_exit(d, 1000);
                 CHECK(pgwt_handle_fork(d, 1000) == 0, "production allocator reuses dead slot");
@@ -569,8 +845,8 @@ static void test_registry_paths(int major)
         }
         d->mode = PGWT_MODE_TIERED;
         d->escalation.active = d->escalation.admitting = false;
-        be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
-        wait_addr = 1234;
+        be->wp_addr = test_wait(major, 0); be->wp_addr_shared = 1; be->meta_parsed = true;
+        wait_addr = test_wait(major, 0);
         reset_counts();
         CHECK(sample_registry(d, clock_ns + UINT64_C(100000000)) == 1,
               "first sampleable tick builds one target");
@@ -578,7 +854,7 @@ static void test_registry_paths(int major)
         finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
         CHECK(be->sampled_reader.pid == be->pid && be->sampled_reader.start_time == 1 &&
               targets[0].rc == 0 && targets[0].attr.databaseid == 16384 &&
-              own_calls == 1 && stat_reads == 2,
+              own_calls == (major == 13 ? 0 : 1) && stat_reads == 2,
               "first sampled tick enrolls every registry path");
         printf("PG%d registry: %s -> first sampled tick enrolled and attributed\n", major, paths[path]);
         release_daemon(d);
@@ -589,7 +865,7 @@ static void test_enrollment_without_attr(int major)
     for (int logger = 0; logger < 2; logger++) {
         struct pgwt_daemon *d = new_daemon(major);
         struct pgwt_backend *be = alloc_backend(&d->backends, 1000, major == 13);
-        be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
+        be->wp_addr = test_wait(major, 0); be->wp_addr_shared = 1; be->meta_parsed = true;
         if (logger) be->meta.backend_type = PGWT_BT_LOGGER;
         else d->backend_status_layout.validation = PGWT_PGBS_VALIDATION_DEGRADED;
         reset_counts();
@@ -600,7 +876,7 @@ static void test_enrollment_without_attr(int major)
     }
     struct pgwt_daemon *d = new_daemon(major);
     struct pgwt_backend *be = alloc_backend(&d->backends, 1000, major == 13);
-    be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
+    be->wp_addr = test_wait(major, 0); be->wp_addr_shared = 1; be->meta_parsed = true;
     stat_fail = 1;
     CHECK(sample_registry(d, clock_ns) == 0 && !be->sampled_reader.pid,
           "failed identity read cannot create an unenrolled sample");
@@ -624,19 +900,25 @@ static void test_lifecycle_identity(int major)
         }
         CHECK(pgwt_handle_fork(d, 1000) == 0, "identity fixture fork");
         struct pgwt_backend *be = &d->backends.entries[0];
-        resolve_sampled_attr(d, be, clock_ns, NULL);
+        if (major == 13) {
+            be->wp_addr = test_wait(major, 0); be->wp_addr_shared = 1;
+            be->meta_parsed = true;
+            sample_registry(d, clock_ns); batch();
+            finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
+        } else resolve_sampled_attr(d, be, clock_ns, NULL);
         uint64_t address = be->sampled_reader.status_addr;
         reset_counts();
-        be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
+        be->wp_addr = test_wait(major, 0); be->wp_addr_shared = 1; be->meta_parsed = true;
         for (int tick = 0; tick < 500; tick++)
             CHECK(sample_registry(d, clock_ns + (uint64_t)tick * 1000000) == 1,
                   "resolved registry target stays sampled");
-        CHECK(!own_calls && !stat_reads && !map_reads && be->sampled_reader.status_addr == address,
+        CHECK(!own_calls && !stat_reads && map_reads == (major == 13 ? 500 : 0) &&
+              be->sampled_reader.status_addr == address,
               "pid-zero guard preserves identity and cached row across sampled ticks");
         CHECK(pgwt_handle_fork(d, 1000) == 0 && be->sampled_reader.status_addr == address && !exit_calls,
               "duplicate fork preserves original identity and proof");
         be->wp_fd = 17; be->bootstrap_fd = 18;
-        be->attach_ts = 1234; be->init_ts = 1235;
+        be->attach_ts = test_wait(major, 0); be->init_ts = 1235;
         be->databaseid = 9999; be->userid = 8888;
         be->meta.backend_type = PGWT_BT_AUTOVAC_WORKER; be->meta_parsed = true;
         incarnation = 2;
@@ -645,22 +927,23 @@ static void test_lifecycle_identity(int major)
               "existing-entry identity check replaces stale enrollment");
         CHECK(!exact || !exit_calls, "exact duplicate fork preserves new child state-map seed");
         if (exact) {
-            CHECK(be->wp_fd == 17 && be->bootstrap_fd == 18 && be->wp_addr == 1234 &&
-                  be->attach_ts == 1234 && be->init_ts == 1235,
+            CHECK(be->wp_fd == 17 && be->bootstrap_fd == 18 && be->wp_addr == test_wait(major, 0) &&
+                  be->attach_ts == test_wait(major, 0) && be->init_ts == 1235,
                   "replacement preserves exact watchpoints and timestamps");
-            CHECK(sample_registry(d, clock_ns) == 0 && be->wp_addr == 1234 && be->sampled_cache_stale,
+            CHECK(sample_registry(d, clock_ns) == 0 && be->wp_addr == test_wait(major, 0) && be->sampled_cache_stale,
                   "replacement cannot sample predecessor wait slot during exact capture");
             if (exact >= 2) {
                 d->escalation.admitting = false;
-                CHECK(sample_registry(d, clock_ns) == 0 && be->sampled_cache_stale && be->wp_addr == 1234,
+                CHECK(sample_registry(d, clock_ns) == 0 && be->sampled_cache_stale && be->wp_addr == test_wait(major, 0),
                       "deferred sampled cache invalidation waits through exact drain");
             }
         }
         d->mode = PGWT_MODE_TIERED;
         d->escalation.active = d->escalation.admitting = false;
-        wait_addr = 2345;
+        wait_addr = test_wait(major, 1);
+        if (major == 13) proc_identity(1, 1000, 1);
         CHECK(sample_registry(d, clock_ns) == 1, "replacement becomes sampleable after teardown");
-        if (exact) CHECK(be->wp_addr == 2345 && !be->sampled_cache_stale &&
+        if (exact) CHECK(be->wp_addr == test_wait(major, 1) && !be->sampled_cache_stale &&
                          be->databaseid == 0 && be->userid == 0,
                          "replacement resolves its own wait slot and discards old sampled context");
         CHECK(recorded_samples[0].backend_type == PGWT_BT_CLIENT,
@@ -679,13 +962,19 @@ static void test_candidate_rejection(int major)
     CHECK(pgwt_sampler_enroll_backend(be, clock_ns) == 0, "candidate fixture enrolls");
     put(0, &layout.st_state, layout.state_max + 1); /* false row hint */
     put(1, &layout.st_procpid, 1000); /* the real row */
-    resolve_sampled_attr(d, be, clock_ns, NULL);
+    if (major == 13) {
+        be->wp_addr = test_wait(major, 0); be->wp_addr_shared = 1;
+        be->meta_parsed = true; sample_registry(d, clock_ns);
+    } else resolve_sampled_attr(d, be, clock_ns, NULL);
     targets[0].reader = &be->sampled_reader; batch();
     finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
     CHECK(targets[0].rc == -1 && !be->sampled_reader.status_addr && stat_reads == 1,
           "an initially rejected candidate never becomes a cached row");
     entries[0] = entries[1];
-    resolve_sampled_attr(d, be, clock_ns + UINT64_C(100000000), NULL);
+    if (major == 13) {
+        proc_identity(0, 1000, 2);
+        sample_registry(d, clock_ns + UINT64_C(100000000));
+    } else resolve_sampled_attr(d, be, clock_ns + UINT64_C(100000000), NULL);
     batch(); finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
     CHECK(targets[0].rc == 0 && be->sampled_reader.status_addr == entries[1] &&
           !be->sampled_reader.candidate && !be->pgbs_resolve_fast_until_ns && stat_reads == 2,
@@ -701,8 +990,8 @@ static void test_reuse_without_events(int major)
     fixture(major, 2); d->backend_status_layout = layout;
     CHECK(pgwt_handle_fork(d, 1000) == 0, "reuse fixture fork");
     struct pgwt_backend *be = &d->backends.entries[0];
-    be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
-    wait_addr = 1234;
+    be->wp_addr = test_wait(major, 0); be->wp_addr_shared = 1; be->meta_parsed = true;
+    wait_addr = test_wait(major, 0);
     put(1, &layout.st_procpid, 0);
     CHECK(sample_registry(d, clock_ns) == 1, "reuse original target");
     batch(); finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
@@ -712,7 +1001,8 @@ static void test_reuse_without_events(int major)
     put(0, &layout.st_procpid, 0);
     put(1, &layout.st_procpid, 1000); put(1, &layout.st_databaseid, 7777);
     entries[0] = (uintptr_t)row_at(1);
-    wait_addr = 2345;
+    if (major == 13) { proc_identity(0, 1000, 2); proc_identity(1, 1000, 2); }
+    wait_addr = test_wait(major, 1);
     be->meta.backend_type = PGWT_BT_PARALLEL_WORKER;
     uint64_t t = clock_ns + UINT64_C(1000000);
     sample_registry(d, t); batch();
@@ -731,8 +1021,8 @@ static void test_reuse_without_events(int major)
     sample_registry(d, t + UINT64_C(200000000)); batch();
     finish_sampled_attr(be, targets[0].rc, targets[0].error, t + UINT64_C(200000000));
     CHECK(targets[0].rc == 0 && be->sampled_reader.start_time == 2 &&
-          targets[0].attr.databaseid == 7777 && be->wp_addr == 2345 &&
-          recorded_samples[0].wait_event_addr == 2345 &&
+          targets[0].attr.databaseid == 7777 && be->wp_addr == test_wait(major, 1) &&
+          recorded_samples[0].wait_event_addr == test_wait(major, 1) &&
           recorded_samples[0].backend_type == PGWT_BT_CLIENT &&
           !be->sampled_cache_stale && stat_reads == 3,
           "successor is sampled only with its own enrollment wait slot and type");
@@ -758,9 +1048,9 @@ static void test_refusal_tick(int major)
         d->escalation.active = tier == 3;
         CHECK(pgwt_handle_fork(d, 1000) == 0, "refusal recording fixture fork");
         struct pgwt_backend *be = &d->backends.entries[0];
-        be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
+        be->wp_addr = test_wait(major, 0); be->wp_addr_shared = 1; be->meta_parsed = true;
         be->meta.backend_type = types[type];
-        wait_addr = refusal_wait_addr = 1234; refusal_wait_value = waits[w];
+        wait_addr = refusal_wait_addr = test_wait(major, 0); refusal_wait_value = waits[w];
         put(1, &layout.st_procpid, 0);
         CHECK(record_registry_tick(d, clock_ns) == 1,
               "original incarnation records before unseen exit");
@@ -768,7 +1058,8 @@ static void test_refusal_tick(int major)
         put(0, &layout.st_procpid, 0);
         put(1, &layout.st_procpid, 1000);
         entries[0] = (uintptr_t)row_at(1);
-        wait_addr = 2345;
+        if (major == 13) { proc_identity(0, 1000, 2); proc_identity(1, 1000, 2); }
+        wait_addr = test_wait(major, 1);
         uint64_t t = clock_ns + UINT64_C(1000000);
         (void)record_registry_tick(d, t); /* cached row rejected; next tick resolves */
         reset_counts();
@@ -784,11 +1075,11 @@ static void test_refusal_tick(int major)
               "stale identity refusal records zero samples for every type and tier");
         /* Exact capture defers cache replacement until teardown completes. */
         d->mode = PGWT_MODE_SAMPLED; d->escalation.active = false;
-        refusal_wait_addr = 2345;
+        refusal_wait_addr = test_wait(major, 1);
         count = record_registry_tick(d, t + UINT64_C(200000000));
         CHECK(count == 1 && d->sampler->samples[0].pid == 1000 &&
               d->sampler->samples[0].new_event == waits[w] &&
-              recorded_samples[0].wait_event_addr == 2345 &&
+              recorded_samples[0].wait_event_addr == test_wait(major, 1) &&
               be->sampled_reader.start_time == 2 && tick_failures == 1,
               "next accepted tick records successor with its own wait slot");
         release_daemon(d);
@@ -801,14 +1092,14 @@ static void test_init_reuse(int major)
         struct pgwt_daemon *d = new_daemon(major);
         CHECK(pgwt_handle_fork(d, 1000) == 0, "INIT reuse fork");
         struct pgwt_backend *be = &d->backends.entries[0];
-        be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
+        be->wp_addr = test_wait(major, 0); be->wp_addr_shared = 1; be->meta_parsed = true;
         sample_registry(d, clock_ns); batch();
         finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
         be->wp_fd = 17; be->bootstrap_fd = -1;
         incarnation = 2;
         d->mode = exact ? PGWT_MODE_FULL : PGWT_MODE_TIERED;
         reset_counts();
-        int init_rc = pgwt_handle_init(d, 1000, 2345, 55);
+        int init_rc = pgwt_handle_init(d, 1000, test_wait(major, 1), 55);
         CHECK(init_rc == 0 &&
               be->sampled_reader.start_time == 2 && !be->sampled_reader.status_addr &&
               be->sampled_cache_stale && be->wp_fd == 17 && !exit_calls && stat_reads == 3,
@@ -862,7 +1153,7 @@ static void test_first_tick_budget(int major)
     d->my_be_entry_addr = UINT64_C(0x1234000);
     for (int i = 0; i < 500; i++) {
         struct pgwt_backend *be = alloc_backend(&d->backends, 1000+i, major == 13);
-        be->wp_addr = (uintptr_t)&wait_words[i]; be->wp_addr_shared = 1; be->meta_parsed = true;
+        be->wp_addr = major == 13 ? proc_at(i) + 684 : (uintptr_t)&wait_words[i]; be->wp_addr_shared = 1; be->meta_parsed = true;
     }
     CHECK(sample_registry(d, clock_ns) == 500, "500 first-tick registry targets");
     batch();
@@ -873,22 +1164,26 @@ static void test_first_tick_budget(int major)
     uint32_t vals[500]; uint8_t valid[500]; uint64_t faults = 0;
     CHECK(pgwt_sampler_read_targets(recorded_samples, 500, vals, valid, &faults) == 500 &&
           wait_calls == 1 && !faults, "first tick includes one real wait batch");
-    CHECK(own_calls + calls + wait_calls + proc_opens + proc_reads + proc_closes == 5507,
+    CHECK(own_calls + calls + wait_calls + proc_opens + proc_reads + proc_closes == (major == 13 ? 5013 : 5507),
           "N=500 complete first-tick syscall bound includes file setup and wait batch");
-    CHECK(own_calls == 500 && calls == 2 && stat_reads == 1000 && map_reads == 501 &&
-          reader_map_reads == 1 && proc_opens == 1501 && proc_reads == 2002 &&
-          proc_closes == 1501 &&
+    CHECK(own_calls == (major == 13 ? 0 : 500) && calls == (major == 13 ? 4 : 2) &&
+          stat_reads == 1000 && map_reads == (major == 13 ? 502 : 501) &&
+          reader_map_reads == (major == 13 ? 2 : 1) && proc_opens == (major == 13 ? 1502 : 1501) &&
+          proc_reads == (major == 13 ? 2004 : 2002) && proc_closes == (major == 13 ? 1502 : 1501) &&
           !opens && !openats && !reads && !closes,
           "N=500 first tick includes enrollment, acceptance and both mapping proofs");
-    printf("PG%d first tick N=500 (maps <=4096 bytes): own VM=500 status VM=2 + wait VM=1; stat=1000 maps=501 (reader=1); open/read/close=1501/2002/1501; total=5507 (general: 4505 + maps read calls)\n", major);
+    if (major == 13)
+        puts("PG13 first tick N=500: own VM=0 discovery VM=2 status VM=2 wait VM=1; stat=1000 maps=502; open/read/close=1502/2004/1502; total=5013");
+    else printf("PG%d first tick N=500 (maps <=4096 bytes): own VM=500 status VM=2 + wait VM=1; stat=1000 maps=501 (reader=1); open/read/close=1501/2002/1501; total=5507 (general: 4505 + maps read calls)\n", major);
     reset_counts();
     CHECK(sample_registry(d, clock_ns + UINT64_C(1000000)) == 500, "500 cached targets");
     batch();
     CHECK(pgwt_sampler_read_targets(recorded_samples, 500, vals, valid, &faults) == 500 &&
           wait_calls == 1 && !faults, "steady tick includes one wait batch");
-    CHECK(!own_calls && !stat_reads && !map_reads && calls == 2 && wait_calls == 1 &&
-          !proc_opens && !proc_reads && !proc_closes,
-          "N=500 resolved second tick does no enrollment or resolution I/O");
+    CHECK(!own_calls && !stat_reads && map_reads == (major == 13 ? 1 : 0) && calls == 2 && wait_calls == 1 &&
+          proc_opens == (major == 13 ? 1 : 0) && proc_reads == (major == 13 ? 2 : 0) &&
+          proc_closes == (major == 13 ? 1 : 0),
+          "N=500 resolved second tick does no enrollment or discovery I/O");
     release_daemon(d);
 }
 static void test_tick_maps_cache(int major)
@@ -1035,10 +1330,12 @@ int main(int argc, char **argv)
 {
     (void)io_openat; /* catches an accidentally reintroduced openat */
     if (argc == 2) {
-        if (!strcmp(argv[1], "faults")) test_faults(18);
+        if (!strcmp(argv[1], "pg13")) { test_pg13_computed(); test_pg13_guards(); }
+        else if (!strcmp(argv[1], "faults")) test_faults(18);
         else if (!strcmp(argv[1], "budget")) test_budget(18, 512, 2);
         else if (!strcmp(argv[1], "resolve")) test_resolve(18);
 #ifdef PGWT_LIFECYCLE_SOURCE
+        else if (!strcmp(argv[1], "pg13-registry")) test_pg13_registry();
         else if (!strcmp(argv[1], "registry")) { test_registry_paths(18); test_enrollment_without_attr(18); }
         else if (!strcmp(argv[1], "identity")) test_lifecycle_identity(18);
         else if (!strcmp(argv[1], "reuse")) test_reuse_without_events(18);
@@ -1050,11 +1347,17 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[1], "retry")) test_retry_and_idle(18);
 #endif
         else return 2;
-    } else for (int i = 0; i < 3; i++) {
+    } else {
+        test_pg13_computed(); test_pg13_guards();
+#ifdef PGWT_LIFECYCLE_SOURCE
+        test_pg13_registry();
+#endif
+        for (int i = 0; i < 3; i++) {
         const int major[] = {13,17,18};
         test_budget(major[i], 512, 2);
         test_budget(major[i], 1024, major[i] == 13 ? 4 : 3);
-        test_faults(major[i]); test_resolve(major[i]);
+        test_faults(major[i]);
+        if (major[i] != 13) test_resolve(major[i]);
 #ifdef PGWT_LIFECYCLE_SOURCE
         test_registry_paths(major[i]);
         test_enrollment_without_attr(major[i]);
@@ -1063,12 +1366,15 @@ int main(int argc, char **argv)
         test_reuse_without_events(major[i]);
         test_refusal_tick(major[i]);
         test_init_reuse(major[i]);
-        test_rejected_backoff(major[i]);
         test_first_tick_budget(major[i]);
-        test_tick_maps_cache(major[i]);
-        test_pending_budget(major[i]);
-        test_retry_and_idle(major[i]);
+        if (major[i] != 13) {
+            test_rejected_backoff(major[i]);
+            test_tick_maps_cache(major[i]);
+            test_pending_budget(major[i]);
+            test_retry_and_idle(major[i]);
+        }
 #endif
+    }
     }
     for (size_t i = 0; i < 1024; i++) pgwt_pgbs_reader_reset(&cache[i]);
     printf("sampled_attr_io: %d/%d checks passed\n", checks-failures, checks);

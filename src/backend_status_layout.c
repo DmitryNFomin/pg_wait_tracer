@@ -1439,7 +1439,7 @@ void pgwt_pgbs_reader_reset(struct pgwt_pgbs_reader *reader)
     memset(reader, 0, sizeof(*reader));
 }
 
-struct pgwt_pgbs_mapping { uint64_t lo, hi; };
+struct pgwt_pgbs_mapping { uint64_t lo, hi, identity; };
 
 void pgwt_pgbs_maps_cache_reset(struct pgwt_pgbs_maps_cache *cache)
 {
@@ -1482,7 +1482,15 @@ static struct pgwt_pgbs_mapping *read_shared_maps(pid_t pid, size_t *count)
             struct pgwt_pgbs_mapping *more = realloc(maps, (n + 1) * sizeof(*maps));
             if (!more) { free(maps); maps = NULL; break; }
             maps = more;
-            maps[n++] = (struct pgwt_pgbs_mapping){lo, hi};
+            uint64_t identity = 0;
+            unsigned long long offset, inode;
+            char dev[32];
+            if (sscanf(line, "%*s %*s %llx %31s %llu", &offset, dev, &inode) == 3 && inode) {
+                identity = UINT64_C(14695981039346656037);
+                for (const unsigned char *p = (const unsigned char *)line; *p; p++)
+                    identity = (identity ^ *p) * UINT64_C(1099511628211);
+            }
+            maps[n++] = (struct pgwt_pgbs_mapping){lo, hi, identity};
         }
     }
     close(fd);
@@ -1536,12 +1544,12 @@ static int batch_span(const struct PgBackendStatusLayout *layout,
 static ssize_t batch_readv(pid_t, struct iovec *, struct iovec *, size_t);
 
 /* PG13 has no exported MyBEEntry. Search at most 512 fixed-stride row hints
- * per attempt, in ONE own-pid VM call (pid + activity pointer only). Keep the
+ * per attempt, in ONE VM call (pid + activity pointer only). Keep the
  * cursor even after finding a candidate: a coincidental pid in non-row shared
  * bytes must not trap resolution forever after the coherent batch rejects it.
  * Neither these pid hints nor the pointer read below accept row identity. */
 static uint64_t reader_pg13_candidate(struct pgwt_pgbs_reader *r,
-    const struct PgBackendStatusLayout *layout, uint64_t *activity_addr)
+    const struct PgBackendStatusLayout *layout, uint64_t *activity_addr, pid_t reader_pid)
 {
     enum { HINTS = 512, SCAN_ROWS = 32769 };
     uint32_t pids[HINTS], cursors[HINTS];
@@ -1571,7 +1579,7 @@ static uint64_t reader_pg13_candidate(struct pgwt_pgbs_reader *r,
         n++;
     }
     if (!n) return 0;
-    ssize_t transferred = batch_readv(r->pid, local, remote, 2*n);
+    ssize_t transferred = batch_readv(reader_pid, local, remote, 2*n);
     size_t complete = transferred > 0 ? (size_t)transferred / 12 : 0;
     if (complete > n) return 0;
     size_t text_len = layout->activity_buffer_size;
@@ -1587,9 +1595,8 @@ static uint64_t reader_pg13_candidate(struct pgwt_pgbs_reader *r,
     return 0;
 }
 
-int pgwt_pgbs_reader_resolve(struct pgwt_pgbs_reader *reader,
-    pid_t postmaster_pid, uint64_t my_be_entry_addr,
-    const struct PgBackendStatusLayout *layout,
+static int reader_prepare(struct pgwt_pgbs_reader *reader,
+    pid_t postmaster_pid, const struct PgBackendStatusLayout *layout,
     struct pgwt_pgbs_maps_cache *maps_cache)
 {
     uint32_t lo, hi;
@@ -1604,7 +1611,6 @@ int pgwt_pgbs_reader_resolve(struct pgwt_pgbs_reader *reader,
         reader->status_addr = reader->activity_addr = 0;
         reader->shared = false;
     }
-    if (reader->status_addr) return 0;
     if (!reader->target_maps)
         reader->target_maps = read_shared_maps(reader->pid, &reader->target_map_count);
     if (!reader->reader_maps) {
@@ -1630,11 +1636,28 @@ int pgwt_pgbs_reader_resolve(struct pgwt_pgbs_reader *reader,
             }
         }
     }
-    if (!reader->target_maps || !reader->reader_maps) return -1;
+    return reader->target_maps && reader->reader_maps ? 0 : -1;
+}
+
+int pgwt_pgbs_reader_resolve(struct pgwt_pgbs_reader *reader,
+    pid_t postmaster_pid, uint64_t my_be_entry_addr,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_maps_cache *maps_cache)
+{
+    uint32_t lo, hi;
+    if (!reader || reader->pid <= 0 || !reader->start_time ||
+        postmaster_pid <= 0 || batch_span(layout, &lo, &hi) != 0)
+        return -1;
+    if (reader->shared_reader_pid != postmaster_pid) {
+        reader->status_addr = reader->activity_addr = 0;
+        reader->shared = false;
+    }
+    if (reader->status_addr) return 0;
+    if (reader_prepare(reader, postmaster_pid, layout, maps_cache) != 0)
+        return -1;
     uint64_t base = 0, activity_addr = 0;
-    if (pgwt_pgbs_sampled_activity_enabled(layout)) {
-        base = reader_pg13_candidate(reader, layout, &activity_addr);
-    } else if (my_be_entry_addr) {
+    if (layout->major == 13) return -1; /* PG13 uses the counted batch resolver. */
+    if (my_be_entry_addr) {
         struct iovec local = {&base, sizeof(base)};
         struct iovec remote = {(void *)(uintptr_t)my_be_entry_addr, sizeof(base)};
         if (batch_readv(reader->pid, &local, &remote, 1) != (ssize_t)sizeof(base))
@@ -1646,6 +1669,165 @@ int pgwt_pgbs_reader_resolve(struct pgwt_pgbs_reader *reader,
     reader->shared = true;
     reader->candidate = true;
     return 0;
+}
+
+/* PGPROC values are unbracketed hints. They never establish status identity. */
+void pgwt_pgbs_resolve_pg13_batch(pid_t postmaster_pid,
+    struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_batch_target *targets, size_t n,
+    struct pgwt_pgbs_maps_cache *maps_cache, uint64_t *scan_total)
+{
+    if (!layout || !pgwt_pgbs_sampled_activity_enabled(layout) ||
+        !targets || !n || n > PGWT_PGBS_BATCH_MAX || postmaster_pid <= 0 ||
+        !layout->shm_generation)
+        return;
+    struct { int32_t pid, pgprocno, backend_id; } hints[PGWT_PGBS_BATCH_MAX];
+    struct iovec local[PGWT_PGBS_BATCH_MAX], remote[PGWT_PGBS_BATCH_MAX];
+    size_t owner[PGWT_PGBS_BATCH_MAX], count = 0;
+    uint64_t bases[PGWT_PGBS_BATCH_MAX], pointers[PGWT_PGBS_BATCH_MAX];
+    for (size_t i = 0; i < n; i++) {
+        struct pgwt_pgbs_reader *r = targets[i].reader;
+        if (!r) continue;
+        if (r->shm_generation != layout->shm_generation ||
+            r->shared_reader_pid != postmaster_pid) {
+            /* Retain enrollment identity, discard every address/mapping proof. */
+            pid_t pid = r->pid;
+            uint64_t start = r->start_time;
+            pgwt_pgbs_reader_reset(r);
+            r->pid = pid; r->start_time = start;
+            r->shm_generation = layout->shm_generation;
+        }
+        /* A scan candidate accepted on the preceding tick can rebase the
+         * computed route. The ID still came from PGPROC, not its counter. */
+        if (!layout->status_array_base && r->status_addr && !r->candidate &&
+            r->backend_id_hint > 0) {
+            uint64_t delta = (uint64_t)(r->backend_id_hint - 1) * layout->struct_size;
+            if (r->status_addr > delta)
+                layout->status_array_base = r->status_addr - delta;
+        }
+    }
+    layout->pg13_computed = layout->status_array_base != 0;
+    bool offsets = layout->pgproc_pid_offset &&
+        layout->pgproc_backend_id_offset == layout->pgproc_pid_offset + 8;
+    for (size_t i = 0; i < n; i++) {
+        struct pgwt_pgbs_reader *r = targets[i].reader;
+        if (!r || r->status_addr || r->pid != targets[i].pid ||
+            reader_prepare(r, postmaster_pid, layout, maps_cache) != 0)
+            continue;
+        uint64_t addr = targets[i].pgproc_addr;
+        if (!offsets || addr > UINT64_MAX - layout->pgproc_pid_offset) continue;
+        addr += layout->pgproc_pid_offset;
+        if (!reader_shared_range(r, addr, sizeof(hints[0]))) continue;
+        owner[count] = i;
+        local[count] = (struct iovec){&hints[count], sizeof(hints[0])};
+        remote[count] = (struct iovec){(void *)(uintptr_t)addr, sizeof(hints[0])};
+        count++;
+    }
+    ssize_t got = count ? batch_readv(postmaster_pid, local, remote, count) : 0;
+    size_t complete = got > 0 ? (size_t)got / sizeof(hints[0]) : 0;
+    if (complete > count) complete = 0;
+    size_t pending = 0;
+    for (size_t j = 0; j < complete; j++) {
+        size_t i = owner[j];
+        struct pgwt_pgbs_reader *r = targets[i].reader;
+        int32_t id = hints[j].backend_id;
+        if (hints[j].pid != r->pid || id <= 0) continue;
+        r->backend_id_hint = id;
+        uint64_t delta = (uint64_t)(id - 1) * layout->struct_size;
+        if (!layout->status_array_base ||
+            delta > UINT64_MAX - layout->status_array_base) continue;
+        uint64_t base = layout->status_array_base + delta;
+        if (!reader_shared_range(r, base, layout->struct_size)) continue;
+        bases[pending] = base;
+        owner[pending] = i;
+        local[pending] = (struct iovec){&pointers[pending], sizeof(uint64_t)};
+        remote[pending] = (struct iovec){
+            (void *)(uintptr_t)(base + layout->st_activity_raw.offset), sizeof(uint64_t)};
+        pending++;
+    }
+    if (pending) {
+        got = pending ? batch_readv(postmaster_pid, local, remote, pending) : 0;
+        complete = got > 0 ? (size_t)got / sizeof(uint64_t) : 0;
+        if (complete > pending) complete = 0;
+        size_t len = layout->activity_buffer_size;
+        if (len > PGWT_PGBS_ACTIVITY_MAX) len = PGWT_PGBS_ACTIVITY_MAX;
+        for (size_t j = 0; j < complete; j++) {
+            struct pgwt_pgbs_reader *r = targets[owner[j]].reader;
+            if (!reader_shared_range(r, pointers[j], len)) continue;
+            r->status_addr = bases[j]; r->activity_addr = pointers[j];
+            r->shared = r->candidate = r->computed_hint = true;
+        }
+        return;
+    }
+    /* One scan attempt per tick, round robin, shares the two-call budget
+     * with the PGPROC hints above. No per-backend syscall fallback storm. */
+    for (size_t j = 0; j < n; j++) {
+        size_t i = (layout->pg13_scan_next + j) % n;
+        struct pgwt_pgbs_reader *r = targets[i].reader;
+        if (!r || r->status_addr || !r->target_maps || !r->reader_maps) continue;
+        layout->pg13_computed = false;
+        if (scan_total) (*scan_total)++;
+        layout->pg13_scan_next = (i + 1) % n;
+        uint64_t pointer = 0;
+        uint64_t base = reader_pg13_candidate(r, layout, &pointer, postmaster_pid);
+        if (base) {
+            r->status_addr = base; r->activity_addr = pointer;
+            r->shared = r->candidate = true;
+            r->computed_hint = false;
+        }
+        break;
+    }
+}
+
+/* Linux gives a rebuilt anonymous shared mapping a new backing inode even
+ * when the surviving postmaster maps it at the same virtual address. Include
+ * the whole maps line (range, device, inode), not just PID/address. */
+static uint64_t pg13_mapping_generation(pid_t pid, uint64_t anchor)
+{
+    size_t n = 0;
+    struct pgwt_pgbs_mapping *maps = read_shared_maps(pid, &n);
+    uint64_t identity = 0;
+    for (size_t i = 0; i < n; i++)
+        if (anchor >= maps[i].lo && anchor < maps[i].hi) {
+            identity = maps[i].identity;
+            break;
+        }
+    free(maps);
+    return identity;
+}
+
+int pgwt_pgbs_pg13_generation(pid_t postmaster_pid,
+    struct PgBackendStatusLayout *layout)
+{
+    if (!layout || layout->major != 13 || !layout->status_anchor) return 0;
+    uint64_t generation = pg13_mapping_generation(postmaster_pid, layout->status_anchor);
+    if (generation && generation == layout->shm_generation &&
+        postmaster_pid == layout->generation_postmaster) return 0;
+    layout->status_array_base = layout->status_anchor = layout->shm_generation = 0;
+    layout->pg13_computed = false;
+    layout->validation = PGWT_PGBS_VALIDATION_NOT_RUN;
+    set_detail(layout, "shared-memory generation changed; PG13 layout needs revalidation");
+    return -1;
+}
+
+/* Called while the independently validated anchor backend is still alive. */
+static void pg13_record_anchor(struct PgBackendStatusLayout *layout,
+    pid_t backend_pid, pid_t postmaster_pid, uint64_t base)
+{
+    layout->status_anchor = base;
+    layout->status_array_base = 0;
+    layout->shm_generation = pg13_mapping_generation(postmaster_pid, base);
+    layout->generation_postmaster = postmaster_pid;
+    int32_t id = 0;
+    int fd = layout->my_backend_id_addr ? open_mem(backend_pid) : -1;
+    if (fd >= 0) {
+        if (pread_exact(fd, &id, sizeof(id), layout->my_backend_id_addr) < 0) id = 0;
+        close(fd);
+    }
+    uint64_t delta = id > 0 ? (uint64_t)(id - 1) * layout->struct_size : 0;
+    if (layout->shm_generation && id > 0 && base > delta)
+        layout->status_array_base = base - delta;
+    layout->pg13_computed = layout->status_array_base != 0;
 }
 
 struct batch_row {
@@ -2816,6 +2998,9 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
             controlled_command_pending = false;
     }
 
+    if (observed == 0 && layout->major == 13)
+        pg13_record_anchor(layout, controlled_pid, postmaster_pid, idle_base);
+
     /* Finish the final statement, then deliver EOF and drain psql's small
      * result stream before reaping it.  Closing stdout first would give psql
      * SIGPIPE after the validation had already succeeded. */
@@ -2994,7 +3179,7 @@ int pgwt_pgbs_validate_uprobe_shadow(struct PgBackendStatusLayout *layout,
         *observed_state = snapshot.state;
     int rc = pgwt_pgbs_validate_snapshot(layout, &snapshot, &expected);
     if (rc == 0 && layout->major == 13)
-        layout->status_anchor = base;
+        pg13_record_anchor(layout, backend_pid, layout->generation_postmaster, base);
     return rc;
 }
 

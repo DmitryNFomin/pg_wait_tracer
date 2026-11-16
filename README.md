@@ -296,7 +296,7 @@ direct connection.
 
 | Command | Request | Response (summary) |
 |---------|---------|--------------------|
-| `status` | `{"cmd":"status"}` | `mode`, `tier` (`sampled`/`escalated`), `escalation_supported`, `escalation_seconds_remaining`, `escalation_budget_remaining_s`, `escalation_reason`, `uptime_s`, `backends`, `pg_pid`, `version` |
+| `status` | `{"cmd":"status"}` | `mode`, `tier` (`sampled`/`escalated`), `escalation_supported`, `escalation_seconds_remaining`, `escalation_budget_remaining_s`, `escalation_reason`, `uptime_s`, `backends`, `pg_pid`, `version`, PG13 `sampled_attr_pg13_route` (`computed`/`scan`) |
 | `metrics` | `{"cmd":"metrics"}` | self-observability counters (below) |
 | `escalate` | `{"cmd":"escalate","duration_s":N}` | `escalated`, `granted_s`, `seconds_remaining`, `budget_remaining_s` — or `ok:false` + `error` + `budget_remaining_s` when over budget / not tiered |
 | `deescalate` | `{"cmd":"deescalate"}` | closes the window now (idempotent); errors if not `--mode tiered` |
@@ -305,6 +305,10 @@ direct connection.
 
 - `events_total`, `events_per_sec`, `lifecycle_events_total`
 - `samples_total`, `samples_per_sec`, `sample_read_faults_total`
+- `sampled_attr_tick_read_failures_total`: failed at-tick status reads, including
+  rows that have not initialised yet
+- `sampled_attr_pg13_scan_fallbacks_total`: PG13 candidate-scan attempts when
+  the computed route is unavailable; each use is counted
 - `wp_attach_failures_total`, `ringbuf_drops_total`, `backends_tracked`
 - `trace_events_written_total`, `trace_bytes_written_total`
 - `tier`, `escalation_active`, `escalation_seconds_remaining`,
@@ -1449,6 +1453,28 @@ percentage points** on one gate box and **2.1** on another (pgbench, 8
 clients, 60 s windows). See [Cross-validation: sampling vs
 exact](#cross-validation-sampling-vs-exact) below for the full per-rate
 table and what still drives the gap.
+
+On PostgreSQL 13, a backend is **attributed from the first tick at which the
+backend's status row is initialised**, provided its shared ranges and enrolled
+process identity can be verified. The row address is computed from
+`PGPROC.backendId` and a validated anchor, independent of its distance from
+that anchor. Pending readers are retried every tick: at most two discovery
+`process_vm_readv` calls through the postmaster, each with at most 1,024 ranges,
+and zero discovery calls in steady state. The existing coherent status batch
+still checks equal even change counters, the row PID, state, activity pointer
+and the enrolled start time at first acceptance. Samples before initialisation
+remain counted in `sampled_attr_tick_read_failures_total`.
+
+The retained scan is a counted fallback when a computed hint is unavailable or
+rejected. It shares the two-call discovery budget, attempts one pending reader
+per tick in rotation, and never accepts pid-only decoys. `status` reports
+`sampled_attr_pg13_route` as `computed` or `scan` for the current discovery route;
+`metrics` reports `sampled_attr_pg13_scan_fallbacks_total`. The postmaster's shared
+mapping identity (including its backing inode) is checked each tick, even with
+no pending readers. A restart or shared-memory rebuild invalidates the layout,
+array base, row addresses and mapping proofs; controlled runtime validation
+must succeed again before this source resumes. PostgreSQL 14 and later keep
+their existing resolution path.
 
 `PGWT_SAMPLER_NICE` accepts an integer from -20 through 19 (the standard
 `nice` range) to request the daemon's own process niceness. Unset or empty

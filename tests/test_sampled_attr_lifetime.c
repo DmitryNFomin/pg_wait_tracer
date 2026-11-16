@@ -41,6 +41,9 @@ static void test_version(int major)
     put(row, &layout.st_activity_raw, (uintptr_t)activity);
     if (major != 13) put(row, &layout.st_query_id, 1234);
     uint64_t entry = (uintptr_t)row;
+    uint8_t *pgproc = row + 6144; /* independent of the status row's counter */
+    uint32_t backend_id = 1;
+    memcpy(pgproc + 60, &backend_id, 4);
     int ready[2], release[2];
     if (pipe(ready) || pipe(release)) { perror("pipe"); exit(2); }
     pid_t pid = fork();
@@ -48,6 +51,8 @@ static void test_version(int major)
     if (!pid) {
         close(ready[0]); close(release[1]);
         put(row, &layout.st_procpid, getpid());
+        uint32_t child_pid = (uint32_t)getpid();
+        memcpy(pgproc + 52, &child_pid, 4);
         if (write(ready[1], "x", 1) != 1) _exit(2);
         char ch;
         _exit(read(release[0], &ch, 1) == 1 ? 0 : 2);
@@ -58,9 +63,22 @@ static void test_version(int major)
     struct pgwt_pgbs_reader reader = {0};
     CHECK(pgwt_pgbs_reader_enroll(&reader, pid) == 0 && reader.start_time,
           "enrollment retains starttime without descriptor");
-    CHECK(pgwt_pgbs_reader_resolve(&reader, getpid(), (uintptr_t)&entry, &layout, NULL) == 0,
-          "own-pid pointer resolves to a row shared in target and reader");
     struct pgwt_pgbs_batch_target target = {.reader = &reader, .pid = pid};
+    if (major == 13) {
+        layout.status_array_base = (uintptr_t)row;
+        layout.shm_generation = 1; /* explicit fixture generation */
+        layout.pgproc_pid_offset = 52; layout.pgproc_backend_id_offset = 60;
+        target.pgproc_addr = (uintptr_t)pgproc;
+        struct pgwt_pgbs_maps_cache maps = {0};
+        uint64_t scans = 0;
+        pgwt_pgbs_resolve_pg13_batch(getpid(), &layout, &target, 1, &maps, &scans);
+        pgwt_pgbs_maps_cache_reset(&maps);
+        CHECK(reader.status_addr == (uintptr_t)row && !scans,
+              "computed PG13 row is shared in target and reader");
+    } else {
+        CHECK(pgwt_pgbs_reader_resolve(&reader, getpid(), (uintptr_t)&entry, &layout, NULL) == 0,
+              "own-pid pointer resolves to a row shared in target and reader");
+    }
     pgwt_pgbs_read_batch(getpid(), &layout, &target, 1, false, NULL);
     CHECK(target.rc == 0 && target.attr.cmd_open && target.attr.databaseid == 16384,
           "parent reads child's shared row through the parent reader");

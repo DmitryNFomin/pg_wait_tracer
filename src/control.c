@@ -130,6 +130,9 @@ static cJSON *build_status(const struct pgwt_daemon *d)
     cJSON_AddNumberToObject(root, "pgbackend_layout_fallback_fields",
                             pgwt_pgbs_fallback_count(
                                 &d->backend_status_layout));
+    if (d->backend_status_layout.major == 13)
+        cJSON_AddStringToObject(root, "sampled_attr_pg13_route",
+            d->backend_status_layout.pg13_computed ? "computed" : "scan");
     cJSON_AddStringToObject(root, "sampled_attr_source",
                             pgwt_pgbs_sampled_attr_enabled(
                                 &d->backend_status_layout)
@@ -256,6 +259,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->sample_read_faults_total);
     cjson_add_uint64(root, "pgbackend_layout_fallbacks_total",
                      ctr->pgbackend_layout_fallbacks_total);
+    cjson_add_uint64(root, "sampled_attr_pg13_scan_fallbacks_total",
+                     ctr->sampled_attr_pg13_scan_fallbacks_total);
     cjson_add_uint64(root, "sampled_attr_tick_read_failures_total",
                      ctr->sampled_attr_tick_read_failures_total);
     cjson_add_uint64(root, "sampled_attr_tick_idle_samples_total",

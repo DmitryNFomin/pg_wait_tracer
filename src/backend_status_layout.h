@@ -61,6 +61,14 @@ struct PgBackendStatusLayout {
     uint32_t struct_size;
     uint32_t activity_buffer_size; /* validated track_activity_query_size */
     uint64_t status_anchor; /* validated row in the shared status array */
+    /* PG13 only. Offsets are header-derived hypotheses; the status batch
+     * remains the sole identity acceptor. All proofs belong to shm_generation. */
+    uint64_t my_backend_id_addr;
+    uint32_t pgproc_pid_offset, pgproc_backend_id_offset;
+    uint64_t status_array_base, shm_generation;
+    pid_t generation_postmaster;
+    bool pg13_computed;
+    size_t pg13_scan_next;
 
     struct pgwt_pgbs_field st_changecount;
     struct pgwt_pgbs_field st_procpid;
@@ -261,7 +269,8 @@ void pgwt_pgbs_maps_cache_reset(struct pgwt_pgbs_maps_cache *cache);
  * start_time is captured at enrollment and compared on lifecycle delivery and
  * when the batch first accepts each resolved candidate (never per attempt).
  * Only the coherent batch accepts row identity; liveness stays on lifecycle
- * events. Mapping snapshots are loaded once per enrollment/postmaster pair. */
+ * events. Mapping snapshots are loaded once per enrollment/postmaster pair,
+ * and PG13 additionally discards them on shared-memory generation changes. */
 struct pgwt_pgbs_reader {
     pid_t pid;
     uint64_t start_time;
@@ -273,6 +282,9 @@ struct pgwt_pgbs_reader {
     struct pgwt_pgbs_mapping *target_maps, *reader_maps;
     size_t target_map_count, reader_map_count;
     uint32_t scan_cursor; /* PG13 fixed-stride candidate scan, across attempts */
+    uint64_t shm_generation;
+    int32_t backend_id_hint;
+    bool computed_hint;
 };
 /* Readers must be zero-initialized before first enrollment. */
 int pgwt_pgbs_reader_enroll(struct pgwt_pgbs_reader *reader, pid_t pid);
@@ -291,7 +303,18 @@ struct pgwt_pgbs_batch_target {
     struct pgwt_pgbs_cmd_gate gate;
     int rc;                        /* 0, NO_CONTEXT, or -1 (unread/invalid) */
     int error;
+    uint64_t pgproc_addr; /* PG13: resolved wait address minus wait offset */
 };
+/* Exactly two discovery calls at most, through the postmaster, no cadence.
+ * The scan fallback shares this budget and increments scan_total per use. */
+void pgwt_pgbs_resolve_pg13_batch(pid_t postmaster_pid,
+    struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_batch_target *targets, size_t n,
+    struct pgwt_pgbs_maps_cache *maps_cache, uint64_t *scan_total);
+/* Compare the backing mapping identity, including its inode, every PG13 tick.
+ * A changed/missing mapping invalidates the layout and its array-base proof. */
+int pgwt_pgbs_pg13_generation(pid_t postmaster_pid,
+    struct PgBackendStatusLayout *layout);
 /* Ordered per-row counter/span/[PG13 text]/counter ranges. Completed ranges
  * are determined from the returned BYTE count. Only torn rows are retried,
  * with at most two extra syscalls. gate_only omits PG13 text for the recheck.

@@ -870,6 +870,21 @@ int pgwt_detect_pgproc_wait_offset(int pg_major)
     }
 }
 
+/* PG13.23 PGDG x86_64 probes on EL8 and Ubuntu agree: pid=52,
+ * pgprocno=56, backendId=60, wait_event_info=684. Never use pgprocno as an ID.
+ * The controlled anchor's MyBackendId and the coherent row independently
+ * establish the base; every computed candidate still needs batch acceptance. */
+void pgwt_pg13_status_offsets(struct PgBackendStatusLayout *layout,
+                              uint64_t my_backend_id_addr)
+{
+    if (layout->major != 13 || layout->arch != PGWT_PGBS_ARCH_X86_64 ||
+        layout->abi != PGWT_PGBS_ABI_SYSV_LP64 || layout->pointer_width != 8)
+        return;
+    layout->my_backend_id_addr = my_backend_id_addr;
+    layout->pgproc_pid_offset = 52;
+    layout->pgproc_backend_id_offset = 60;
+}
+
 int pgwt_detect_pg13_query_offsets(int pg_major,
                                    struct pgwt_pg13_query_offsets *out)
 {
@@ -1563,6 +1578,11 @@ int pgwt_discover(struct pgwt_daemon *d)
      * Stage 2 change. */
     (void)pgwt_pgbs_discover(binary, d->pg_major_version,
                              &d->backend_status_layout);
+    if (d->pg_major_version == 13) {
+        pgwt_pg13_status_offsets(&d->backend_status_layout,
+            pgwt_resolve_symbol(binary, "MyBackendId", pm_pid));
+        d->backend_status_layout.generation_postmaster = pm_pid;
+    }
     d->pgbs_validation_exclusions.count = 0;
     pgwt_pgbs_validate_runtime(&d->backend_status_layout, pm_pid,
                                d->my_be_entry_addr, binary,
