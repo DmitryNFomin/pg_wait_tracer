@@ -26,7 +26,7 @@ FUNCTIONS = ('count_ring_fail', 'count_map_fail', 'test_fail_once',
 
 
 def function(source, name):
-    matches = list(re.finditer(r'^(?:static(?: __always_inline)? )?(?:void|bool|u64|int|struct pgwt_wire_(?:trace|lifecycle)) \**' + name + r'\(', source, re.M))
+    matches = list(re.finditer(r'^(?:static(?: __always_inline)? )?(?:void|bool|u64|int|struct (?:pgwt_wire_(?:trace|lifecycle)|probe_identity)) \**' + name + r'\(', source, re.M))
     assert len(matches) == 1, (name, len(matches))
     start = matches[0].start()
     brace = source.index('{', matches[0].end())
@@ -106,13 +106,17 @@ def run(source, directory, header=None):
 
 
 def run_probe_loop(source, directory):
-    functions = ('probe_note_work', 'probe_instrument', 'probe_drain',
+    functions = ('probe_note_work', 'probe_close_backend', 'probe_identity',
+                 'probe_new_backend', 'probe_instrument', 'probe_record', 'probe_l',
+                 'probe_teardown_one', 'probe_drain',
                  'probe_service_backends', 'probe_read_stats', 'probe_print_stats')
     stats = source[source.index('struct probe_work_stat {'):source.index('static void probe_note_work(')]
+    backends = source[source.index('struct probe_identity {'):source.index('struct probe_helper {')]
     bodies = '\n\n'.join(function(source, name) for name in functions)
     harness = (ROOT / 'tests/transport_probe_harness.h').read_text()
     unit, binary = directory / 'probe-loop.c', directory / 'probe-loop'
-    unit.write_text(harness.replace('/* PROBE_STATS */', stats).replace('/* PROBE_FUNCTIONS */', bodies))
+    unit.write_text(harness.replace('/* PROBE_STATS */', stats)
+                   .replace('/* PROBE_BACKENDS */', backends).replace('/* PROBE_FUNCTIONS */', bodies))
     built = subprocess.run([*shlex.split(os.environ.get('CC', 'cc')), '-std=gnu11',
                             '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'src'),
                             str(unit), '-o', str(binary)], capture_output=True, text=True)
@@ -124,20 +128,25 @@ def check_probe_loop(directory):
     source = (ROOT / 'tests/transport_probe.h').read_text()
     assert 'probe_service_backends(&p);' in function(source, 'probe_run')
     assert 'probe_try_attach(' not in function(source, 'probe_record')
+    assert 'b->closing' in function(source, 'probe_try_attach').split('return;', 1)[0]
     result = run_probe_loop(source, directory)
     assert result.returncode == 0, result.stdout + result.stderr
     stats = [line for line in result.stderr.splitlines() if line.startswith('PROBE-STAT:')]
-    assert len(stats) == 14, stats
+    assert len(stats) == 20, stats
     assert stats[:4] == [f'PROBE-STAT: ringbuf_site_drops site={site} value={value}'
                          for site, value in zip(('LIFECYCLE_FORK', 'LIFECYCLE_EXIT', 'QUERY_TEXT',
                                                  'PG13_QUERY_TEXT'), (11, 13, 15, 17))], stats
-    assert all(line.endswith('value=null') for line in stats[7:11]), stats
+    assert all(line.endswith('value=null') for line in stats[10:14]), stats
+    assert stats[7:10] == [
+        'PROBE-STAT: consume max_us=25 total_calls=2',
+        'PROBE-STAT: lifecycle_rb in_callback_max_producer_minus_consumer_bytes=44000',
+        'PROBE-STAT: teardown max_us=6 total=2'], stats
     print(result.stdout, end='')
     # The real Linux driver removes its temporary log directory after each
     # run. Successful summaries must forward diagnostics before it does.
     from test_transport_producers_live import summary
     log = directory / 'probe.stderr'
-    log.write_text('\n'.join(stats[:7]) + '\n')
+    log.write_text('\n'.join(stats[:10]) + '\n')
     row = {'ok': True}
     class FinishedProbe:
         returncode = 0
@@ -147,7 +156,7 @@ def check_probe_loop(directory):
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         assert summary(FinishedProbe(), log) == row
-    assert output.getvalue().splitlines()[:7] == stats[:7], output.getvalue()
+    assert output.getvalue().splitlines()[:10] == stats[:10], output.getvalue()
     print('probe diagnostics forwarding: PASS (all PROBE-STAT lines survive successful live summary)')
     # Built mutation of the actual loop: both drains move after all backend
     # attaches, precisely the original reader-lag failure. The simulated
@@ -160,6 +169,21 @@ def check_probe_loop(directory):
     assertion = 'FAIL lifecycle ring drained between attach batches'
     assert result.returncode != 0 and assertion in result.stderr, result.stdout + result.stderr
     print(f'mutant drain-after-all-attaches: KILLED ({assertion})')
+    # Reintroduce the slow EXIT work inside the actual lifecycle callback.
+    # It builds and handles an EXIT before the named runtime assertion fires.
+    mutated = replace_once(source, '                p->backends[i].closing = true;',
+                           '                probe_close_backend(&p->backends[i]);')
+    result = run_probe_loop(mutated, directory)
+    assertion = 'FAIL backend teardown runs outside lifecycle callback'
+    assert result.returncode != 0 and assertion in result.stderr, result.stdout + result.stderr
+    print(f'mutant teardown-in-callback: KILLED ({assertion})')
+    # Freeing the PID at mark time permits reuse before the fd/link teardown.
+    mutated = replace_once(source, '                p->backends[i].closing = true;',
+                           '                p->backends[i].closing = true; p->backends[i].pid = 0;')
+    result = run_probe_loop(mutated, directory)
+    assertion = 'FAIL closing slot reserved until deferred teardown'
+    assert result.returncode != 0 and assertion in result.stderr, result.stdout + result.stderr
+    print(f'mutant reuse-before-teardown: KILLED ({assertion})')
 
 
 def main():

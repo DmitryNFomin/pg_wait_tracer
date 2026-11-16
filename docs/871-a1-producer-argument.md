@@ -787,7 +787,7 @@ the reader.
   0 L failures in nine churn runs. The inference that the probe's remaining
   attach and `/proc` work starved its reader is still to be measured.
 
-  **This round:** the probe drains after each backend's bootstrap and two
+  **B1 round 1 (`8bf60d7d`):** the probe drains after each backend's bootstrap and two
   uprobe attaches (at most **K=3** attach attempts between drains), then
   separately after its wait-attach and `/proc` inspection. Already
   instrumented backends also get that latter drain. Even the INIT-restoration
@@ -832,6 +832,57 @@ the reader.
   aggregate counters cannot distinguish those two TEXT causes on their own;
   do not call them all full-ring drops. No result for this revised probe is
   claimed here.
+
+  **Ubuntu 6.8, PG18 result on `8bf60d7d` (supplied by the lead):** the
+  steady arm had 0 FORK/EXIT/TEXT site drops and a sampled lifecycle-ring
+  peak of 2,496 / 65,536 bytes. Unthrottled `pgbench -C` still failed:
+  LIFECYCLE_FORK drops 9, LIFECYCLE_EXIT drops 13, TEXT 0; sampled peak
+  3,008 / 65,536 bytes; at most 3 attaches between drains. The failures were
+  attempt sequence gaps and L records outside their FORK/EXIT positions.
+  That occupancy was sampled before consume, so it cannot show a ring
+  filling during consume. EXIT still closed descriptors and destroyed
+  uprobe links inside the callback. The daemon comparison used rate 200
+  with a 100 ms hold, rather than this unthrottled load; it does not settle
+  the cause.
+
+  **B1 round 2 (consumer changes only; no new box result):** every single
+  `ring_buffer__consume` call is timed, and the L callback samples
+  producer-minus-consumer bytes on every record, including TEXT and
+  boundaries. EXIT only marks its matching PID/cookie slot for close,
+  keeping the identity checks and `exited_before_attach` count. FORK also
+  defers cleanup of an older slot with the same PID. A closing slot remains
+  occupied and cannot be attached or reused until teardown completes.
+  After consume returns, the main thread tears down at most **K=1 backend
+  per drain** (up to two descriptor closes and two link destroys), including
+  during shutdown, with a drain between batches. No PID, cookie or fd is
+  saved across a drain. The existing K=3 attach bound remains.
+
+  Three additional lines are always printed at exit, alongside the seven
+  above, and forwarded by the live driver on success:
+
+  ```text
+  PROBE-STAT: consume max_us=<longest single ring_buffer__consume call> total_calls=<count>
+  PROBE-STAT: lifecycle_rb in_callback_max_producer_minus_consumer_bytes=<bytes>
+  PROBE-STAT: teardown max_us=<longest single deferred backend teardown> total=<count>
+  ```
+
+  Durations use monotonic nanoseconds and print whole microseconds. Consume
+  timing excludes perf consumption and deferred teardown. Teardown includes
+  all descriptor closes and link destroys for one backend. A zero call or
+  teardown count means there was no such timed operation. Callback occupancy
+  is still a sample, not occupancy at the instant of a failed reservation.
+  The host harness executes the actual L callback, registration, teardown
+  and service functions. Restoring teardown in the callback must fail
+  `FAIL backend teardown runs outside lifecycle callback`; freeing a slot
+  before its teardown must fail
+  `FAIL closing slot reserved until deferred teardown`. The existing
+  drain-after-all-attaches mutant remains required.
+
+  **Decision rule for the lead's next box run:** drops going to 0 with only
+  the consumer changed means probe lag. If drops persist with short consume
+  calls, the next step is a failure-time snapshot of positions and length
+  in the BPF reservation path, kept outside the ring (A1). Every L failure
+  still fails the run; this round makes no new Linux measurement claim.
 
 ### What is still unproven, and what was found
 

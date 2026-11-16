@@ -32,8 +32,9 @@ struct probe_backend {
     u32 pid; u64 cookie; int boot, wait;
     bool init_seen;
     /* pending: registered at FORK consumption, not yet instrumented.
-     * raced: an attach step met the exit race; nothing more is attempted. */
-    bool pending, raced;
+     * raced: an attach step met the exit race; nothing more is attempted.
+     * closing: teardown queued; keep the slot occupied and never attach. */
+    bool pending, raced, closing;
     struct bpf_link *activity, *query;
 };
 struct probe_helper {
@@ -51,6 +52,8 @@ struct probe_work_stat { u64 total, since_drain, max; };
 struct probe_stats {
     struct probe_work_stat attaches, proc_reads;
     u64 lifecycle_peak, lifecycle_size, lifecycle_samples;
+    u64 lifecycle_callback_peak, consume_max_ns, consume_calls;
+    u64 teardown_max_ns, teardown_total;
     u64 site_drops[4]; bool sites_valid;
 };
 static void probe_note_work(struct probe_work_stat *work)
@@ -218,7 +221,7 @@ static int probe_addr_is_shared(struct probe *p, u32 pid, u64 addr)
 }
 static void probe_try_attach(struct probe *p, struct probe_backend *b)
 {
-    if (!b->pid || b->pending || p->self || p->stopping) return;
+    if (!b->pid || b->pending || b->closing || p->self || p->stopping) return;
     probe_observe_stored_init(p,b);
     /* Exited before or during instrumentation: no A2 coverage claim, and
      * nothing more to try until its EXIT record frees the slot. */
@@ -269,7 +272,7 @@ static void probe_new_backend(struct probe *p, u32 pid, u64 cookie)
     if (p->self || p->stopping) return;
     struct probe_backend *slot = NULL;
     for (int i=0; i<MAX_BACKENDS; ++i) {
-        if (p->backends[i].pid == pid) probe_close_backend(&p->backends[i]);
+        if (p->backends[i].pid == pid) p->backends[i].closing = true;
         if (!p->backends[i].pid && !slot) slot = &p->backends[i];
     }
     if (!slot) { probe_fail(p, "probe backend registry full"); return; }
@@ -284,6 +287,7 @@ static void probe_new_backend(struct probe *p, u32 pid, u64 cookie)
 /* Main loop only, never from a ring callback. */
 static void probe_instrument(struct probe *p, struct probe_backend *b)
 {
+    if (!b->pid || !b->pending || b->closing) return;
     b->pending = false;
     int fd = probe_watchpoint(p, b->pid, p->ptr, bpf_program__fd(p->skel->progs.on_bootstrap), true);
     if (fd < 0) { b->boot = -1; probe_attach_error(p, b, "open the bootstrap watchpoint", -fd); }
@@ -394,9 +398,10 @@ static int probe_record(struct probe *p, int dest, const void *data, size_t size
             ++p->init_records;
         }
         if (ev.type == PGWT_LIFECYCLE_EXIT) for (int i=0; i<MAX_BACKENDS; ++i)
-            if (p->backends[i].pid == pid && p->backends[i].cookie == hdr.cookie) {
+            if (p->backends[i].pid == pid && p->backends[i].cookie == hdr.cookie &&
+                !p->backends[i].closing) {
                 if (p->backends[i].pending) ++p->exited_before_attach;
-                probe_close_backend(&p->backends[i]);
+                p->backends[i].closing = true;
             }
     } else if (hdr.kind == PGWT_WIRE_TEXT && hdr.payload_len == sizeof(struct pgwt_query_text_event) && dest == 2) {
         struct pgwt_query_text_event ev; memcpy(&ev, payload, sizeof(ev)); pid = ev.pid;
@@ -415,7 +420,19 @@ static int probe_record(struct probe *p, int dest, const void *data, size_t size
     return 0;
 }
 static int probe_e(void *ctx, void *data, size_t size) { return probe_record(ctx, 1, data, size, -1); }
-static int probe_l(void *ctx, void *data, size_t size) { return probe_record(ctx, 2, data, size, -1); }
+static int probe_l(void *ctx, void *data, size_t size)
+{
+    struct probe *p = ctx;
+    /* Every L record, including TEXT/boundaries and records that fail a
+     * check. The consumer position still includes the current record. */
+    struct ring *lifecycle = ring_buffer__ring(p->rings, 1);
+    if (lifecycle) {
+        u64 consumed = ring__consumer_pos(lifecycle);
+        u64 distance = ring__producer_pos(lifecycle) - consumed;
+        if (distance > p->stats.lifecycle_callback_peak) p->stats.lifecycle_callback_peak = distance;
+    }
+    return probe_record(p, 2, data, size, -1);
+}
 static void probe_sample(void *ctx, int cpu, void *data, __u32 size)
 {
     size_t wire=probe_perf_wire_size(data, size);
@@ -473,6 +490,21 @@ static void *probe_requester_loop(void *arg)
     }
     return NULL;
 }
+/* Main thread only, after consume returns. K=1 backend teardown per drain:
+ * a teardown may close two descriptors and destroy two uprobe links. The
+ * slot remains occupied until all of that work finishes. */
+static bool probe_teardown_one(struct probe *p)
+{
+    for (int i=0; i<MAX_BACKENDS; ++i) if (p->backends[i].closing) {
+        u64 start = probe_now();
+        probe_close_backend(&p->backends[i]);
+        u64 elapsed = probe_now() - start;
+        if (elapsed > p->stats.teardown_max_ns) p->stats.teardown_max_ns = elapsed;
+        ++p->stats.teardown_total;
+        return true;
+    }
+    return false;
+}
 static int probe_drain(struct probe *p)
 {
     /* Sample before EVERY drain, including the top of the main loop and
@@ -484,20 +516,31 @@ static int probe_drain(struct probe *p)
         if (distance > p->stats.lifecycle_peak) p->stats.lifecycle_peak = distance;
         ++p->stats.lifecycle_samples;
     }
-    int a = ring_buffer__consume(p->rings), b = perf_buffer__consume(p->perf);
+    u64 start = probe_now();
+    int a = ring_buffer__consume(p->rings);
+    u64 elapsed = probe_now() - start;
+    if (elapsed > p->stats.consume_max_ns) p->stats.consume_max_ns = elapsed;
+    ++p->stats.consume_calls;
+    int b = perf_buffer__consume(p->perf);
     p->stats.attaches.since_drain = p->stats.proc_reads.since_drain = 0;
+    probe_teardown_one(p);
     if (a < 0 || b < 0) { probe_fail(p, "buffer consume"); return -1; }
     return a+b;
 }
 /* At most K=3 attaches (bootstrap plus activity/query uprobes) per drain.
  * The wait attach and /proc inspection get a separate drain, even for an
  * already instrumented backend. Draining can retire/reuse b's slot: never
- * retain a PID, cookie or fd across it. try_attach rechecks pending/pid. */
+ * retain a PID, cookie or fd across it. try_attach rechecks pending/pid and
+ * closing. A closing slot is never instrumented or attached. */
 static void probe_service_backends(struct probe *p)
 {
     for (int i=0; i<MAX_BACKENDS && !p->failed; ++i) {
         struct probe_backend *b = &p->backends[i];
         if (!b->pid) continue;
+        if (b->closing) {
+            if (probe_drain(p) < 0) return;
+            continue;
+        }
         if (b->pending) {
             probe_instrument(p, b);
             if (probe_drain(p) < 0 || p->failed) return;
@@ -632,7 +675,14 @@ static void probe_finish(struct probe *p)
     p->helpers_started=0;
     bpf_link__destroy(p->helper); p->helper=NULL;
     bpf_link__destroy(p->fork); p->fork=NULL;
-    for (int i=0; i<MAX_BACKENDS; ++i) probe_close_backend(&p->backends[i]);
+    for (int i=0; i<MAX_BACKENDS; ++i)
+        if (p->backends[i].pid) p->backends[i].closing=true;
+    /* Also bound shutdown work; no saved backend identity crosses a drain.
+     * A partial setup without consumers has no producer links to service. */
+    for (int i=0; i<MAX_BACKENDS; ++i) if (p->backends[i].closing) {
+        if (p->rings && p->perf) probe_drain(p);
+        else probe_teardown_one(p);
+    }
     bpf_link__destroy(p->exit); p->exit=NULL;
     if (p->rings && p->perf) while (probe_drain(p)>0) {}
 }
@@ -814,6 +864,12 @@ static void probe_print_stats(const struct probe_stats *stats)
         stats->attaches.max, stats->attaches.total);
     fprintf(stderr, "PROBE-STAT: proc_reads max_between_drains=%"PRIu64" total=%"PRIu64"\n",
         stats->proc_reads.max, stats->proc_reads.total);
+    fprintf(stderr, "PROBE-STAT: consume max_us=%"PRIu64" total_calls=%"PRIu64"\n",
+        stats->consume_max_ns / 1000, stats->consume_calls);
+    fprintf(stderr, "PROBE-STAT: lifecycle_rb in_callback_max_producer_minus_consumer_bytes=%"PRIu64"\n",
+        stats->lifecycle_callback_peak);
+    fprintf(stderr, "PROBE-STAT: teardown max_us=%"PRIu64" total=%"PRIu64"\n",
+        stats->teardown_max_ns / 1000, stats->teardown_total);
 }
 static int probe_run(int argc, char **argv, struct probe_stats *stats)
 {
