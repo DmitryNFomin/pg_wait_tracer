@@ -24,6 +24,15 @@ struct pgwt_backend {
     uint64_t init_ts;          /* captured bootstrap time; 0 for direct attach */
     bool     init_attached;    /* real attach completed, retained across tiers */
     bool     wp_attach_exit_race; /* proven exit already counted; retain until EXIT */
+    bool     wp_attach_failed; /* a real failure already gates this retirement */
+    bool     bootstrap_armed; /* retained after close for retirement diagnostics */
+    bool     post_arm_checked;
+    uint64_t post_arm_ptr;
+    int      post_arm_addr_shared;
+    int      post_arm_resolve_errno;
+    int      post_arm_shared_errno;
+    uint64_t enroll_init_no_state, enroll_wait_read_fail;
+    bool     enroll_counters_valid;
     bool     is_alive;
     /* meta has been filled by pgwt_parse_cmdline. A zeroed meta reads as
      * backend_type == CLIENT (enum value 0), which is WRONG for an unparsed

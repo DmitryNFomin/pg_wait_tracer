@@ -75,9 +75,12 @@ bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
     *init_ts = be ? be->init_ts : 0;
     struct pgwt_pid_state st = {0};
     int rc = read_state(ctx, pid, &st);
-    if (rc == -ENOENT)
-        return be && !be->init_attached &&
-               (be->bootstrap_fd >= 0 || be->init_ts != 0);
+    if (rc == -ENOENT) {
+        bool lost = be && !be->init_attached &&
+                    (be->bootstrap_fd >= 0 || be->init_ts != 0);
+        *before_attach = !lost && be && !be->init_attached && !be->wp_attach_failed;
+        return lost;
+    }
     if (rc != 0)
         return false;
     /* A second read recognises an INIT published during the first copy.
@@ -91,6 +94,6 @@ bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
     bool lost = pgwt_stored_init_lost(be, &st) ||
                 ((!be || !be->init_attached) && (st.init_ts || st.init_wait_addr));
     *before_attach = !lost && (!be || (!be->init_attached &&
-                                     !be->wp_attach_exit_race));
+                                     !be->wp_attach_failed));
     return lost;
 }

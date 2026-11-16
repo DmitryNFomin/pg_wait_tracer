@@ -17,8 +17,9 @@ bool pgwt_stored_init_lost(const struct pgwt_backend *be,
 /* Final single-pid sweep after the bootstrap producer is quiesced. EXIT
  * cannot recover coverage: this only recognises evidence and decides loss.
  * Readers return -ENOENT for an absent state entry, another error otherwise.
- * before_attach is true only for an existing state with no INIT evidence,
- * no completed real attachment and no already-counted attach exit race.
+ * before_attach is true for retained state/registry evidence with no INIT facts,
+ * no completed real attachment and no already-counted real attach failure.
+ * An exit-race reason does not exclude opportunity classification.
  * init_ts receives the retained timestamp, or 0 if timing is unavailable. */
 bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
                          void *ctx, pgwt_init_state_reader read_state,

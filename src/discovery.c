@@ -801,9 +801,12 @@ uint64_t pgwt_read_pointer(pid_t pid, uint64_t addr)
         return 0;
 
     uint64_t val = 0;
-    if (pread(fd, &val, sizeof(val), addr) != sizeof(val))
+    ssize_t got = pread(fd, &val, sizeof(val), addr);
+    int error = got < 0 ? errno : got != sizeof(val) ? EIO : 0;
+    if (got != sizeof(val))
         val = 0;
     close(fd);
+    errno = error;
     return val;
 }
 

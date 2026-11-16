@@ -187,7 +187,7 @@ int main(void)
     f.bt.entries[0].wp_attach_exit_race = true;
     assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state,
                                &f.exit_init_ts, &f.before_attach));
-    assert(!f.before_attach); /* already counted as an attach exit race */
+    assert(f.before_attach); /* exit proof does not establish opportunity */
     f.bt.entries[0].wp_attach_exit_race = false;
     f.state.init_ts = 123;
     assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state,

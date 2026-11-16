@@ -250,6 +250,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->wp_attach_failures_live_total);
     cjson_add_uint64(root, "wp_attach_failures_unknown_total",
                      ctr->wp_attach_failures_unknown_total);
+    cjson_add_uint64(root, "wp_attach_failures_gone_total",
+                     ctr->wp_attach_failures_gone_total);
 
     cJSON_AddNumberToObject(root, "backends_tracked", count_backends(d));
 
@@ -382,6 +384,12 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "init_state_read_fail_total", ctr->init_state_read_fail_total);
     cjson_add_uint64(root, "lifecycle_exit_before_attach_total",
                      ctr->lifecycle_exit_before_attach_total);
+    cjson_add_uint64(root, "lifecycle_exit_before_attach_with_opportunity_total",
+                     ctr->lifecycle_exit_before_attach_with_opportunity_total);
+    cjson_add_uint64(root, "lifecycle_exit_before_attach_no_opportunity_total",
+                     ctr->lifecycle_exit_before_attach_no_opportunity_total);
+    cjson_add_uint64(root, "lifecycle_exit_before_attach_unknown_total",
+                     ctr->lifecycle_exit_before_attach_unknown_total);
     cjson_add_uint64(root, "lifecycle_init_lost_total",
                      ctr->lifecycle_init_lost_total);
     cjson_add_uint64(root, "lifecycle_init_lost_with_opportunity_total",

@@ -1052,14 +1052,34 @@ assertion unchanged.
   `wp_attach_exit_race_total` counts ESRCH with a positive pinned-task exit
   proof (gone/Z/X, or PF_EXITING plus zero vsize). Each counted operation emits
   `WP-ATTACH-FAIL` with errno=3; the PF_EXITING class has `liveness=exiting`.
-  `lifecycle_exit_before_attach_total` counts a retired state entry that never
-  attached and has no INIT evidence, excluding an already-counted attach exit
-  race. Each counted PID emits `EXIT-BEFORE-ATTACH`; INIT time and opportunity
-  remain unknown, with no invented duration or no-opportunity classification.
-  Both counters appear as information in rehearsal JSON, outside
-  `DAEMON_INTEGRITY_COUNTERS` pending an owner decision. Unknown INIT/opportunity
-  cannot inherit the owner's no-opportunity exclusion. The frozen merge-v1
-  vector schema is unchanged.
+  In watchpoint capture, `lifecycle_exit_before_attach_total` counts retirements
+  without a completed real attachment or retained INIT evidence, excluding
+  already counted real attach failures. Its three once-per-retirement classes are:
+
+  - `lifecycle_exit_before_attach_with_opportunity_total`: missed attachment,
+    opportunity observed (gated): a registry entry exists.
+  - `lifecycle_exit_before_attach_unknown_total`: opportunity unknown (gated):
+    no registry entry and no positive first-handling exclusion.
+  - `lifecycle_exit_before_attach_no_opportunity_total`: exited before the tracer
+    could attach (reported): no registry entry because first handling positively
+    found the target gone. Earlier enrollment refusals and refusal bookkeeping
+    overflow remain unknown.
+
+  Non-ESRCH failures on gone targets remain real failures, in
+  `wp_attach_failures_gone_total`, matching `WP-ATTACH-FAIL` liveness.
+  Each counted PID emits `EXIT-BEFORE-ATTACH` with the class, entry/armed status,
+  post-arm pointer, shared-address result and errnos, plus global no-state and
+  wait-read counter deltas since enrollment (availability is explicit). These
+  are diagnostic deltas, not per-PID attribution. No INIT timestamp or duration
+  is invented. Retained INIT evidence keeps the existing INIT rule and counters.
+  An exit proof supplies the `wp_attach_exit_race_total` reason; it never proves
+  unavoidable loss or no opportunity. That reason may coexist with an INIT-loss
+  class or a retirement class. `wp_attach_failures_total`, observed-opportunity
+  retirements and unknown-opportunity retirements gate `DAEMON_INTEGRITY_COUNTERS`.
+  The no-opportunity retirement class is reported. A live FORK conflicting with
+  a retained startup exit-race entry is conservatively counted as an enrollment
+  failure, including possible PID reuse; a proven exit is not retried.
+  The frozen merge-v1 vector schema is unchanged.
   `lifecycle_init_lost_total` counts an unattached backend with
   missing state, or INIT evidence never attached before backend exit. A missing
   state entry at bootstrap is only diagnostic (`lifecycle_init_no_state_total`):

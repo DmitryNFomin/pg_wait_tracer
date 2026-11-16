@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def function(source, name):
-    match = re.search(r"^(?:static )?(?:int|void) " + name +
+    match = re.search(r"^(?:static )?(?:int|void|bool|uint64_t) " + name +
                       r"\([^;]*?\)\n\{.*?^\}", source, re.M | re.S)
     assert match, f"missing production function {name}"
     return match[0]

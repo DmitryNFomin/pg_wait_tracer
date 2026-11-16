@@ -42,10 +42,11 @@ struct pgwt_counters {
     uint64_t wp_attach_failures_total; /* operation failure without ESRCH + exit proof;
                                       * includes bootstrap and validation refusals */
     uint64_t wp_attach_exit_race_total; /* ESRCH with pinned gone/Z/X or PF_EXITING + zero vsize proof */
-    /* Subsets recorded after failed hardware operations, excluding lifecycle
+    /* Live/gone/unknown subsets of failed hardware operations, excluding lifecycle
      * eligibility refusals and proven ESRCH exit races. */
     uint64_t wp_attach_failures_live_total;
     uint64_t wp_attach_failures_unknown_total;
+    uint64_t wp_attach_failures_gone_total; /* non-ESRCH failure on a gone target */
     uint64_t prev_events_total;        /* events_total at previous timer tick */
     double   events_per_sec;           /* recent rate, refreshed each tick */
 
@@ -109,7 +110,10 @@ struct pgwt_counters {
     uint64_t writer_push_fail_total; /* every rejected event/sample push call */
     uint64_t init_state_read_fail_total; /* sticky unknown INIT accounting */
     uint64_t state_map_full_total;     /* userspace state_map inserts failed (map full, CAP-1) */
-    uint64_t lifecycle_exit_before_attach_total; /* state existed, never attached, INIT/opportunity unknown */
+    uint64_t lifecycle_exit_before_attach_total; /* sum of the three retirement classes */
+    uint64_t lifecycle_exit_before_attach_with_opportunity_total; /* entry observed; gated */
+    uint64_t lifecycle_exit_before_attach_no_opportunity_total; /* first handling found gone; reported */
+    uint64_t lifecycle_exit_before_attach_unknown_total; /* no entry/proof; gated */
     uint64_t lifecycle_init_lost_total; /* INIT evidence/missing state, never attached */
     uint64_t lifecycle_init_lost_with_opportunity_total; /* lost minus no-opportunity; gates integrity */
     uint64_t lifecycle_init_lost_no_opportunity_total; /* init_ts > last sweep start */
@@ -266,6 +270,12 @@ enum pgwt_format {
 };
 
 struct pgwt_daemon {
+    pid_t lifecycle_first_gone_pid; /* positive first-handling exclusion, only during cleanup */
+    /* Failed enrollment can leave no registry entry. Keep that evidence until
+     * EXIT so a later gone check cannot masquerade as first handling. */
+    pid_t lifecycle_refused_pids[MAX_BACKENDS];
+    int lifecycle_refused_count;
+    bool lifecycle_refused_overflow; /* sticky: never claim no opportunity after overflow */
     /* BPF */
     struct pg_wait_tracer_bpf *skel;
     struct ring_buffer *rb;          /* lifecycle ringbuf consumer */

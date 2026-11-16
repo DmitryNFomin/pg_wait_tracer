@@ -2015,7 +2015,10 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             "state_reseeds_total=%llu invalid_wait_reads_total=%llu "
             "wp_attach_failures_total=%llu wp_attach_exit_race_total=%llu "
             "wp_attach_failures_live_total=%llu wp_attach_failures_unknown_total=%llu "
-            "lifecycle_exit_before_attach_total=%llu "
+            "wp_attach_failures_gone_total=%llu lifecycle_exit_before_attach_total=%llu "
+            "lifecycle_exit_before_attach_with_opportunity_total=%llu "
+            "lifecycle_exit_before_attach_no_opportunity_total=%llu "
+            "lifecycle_exit_before_attach_unknown_total=%llu "
             "state_map_full_total=%llu "
             "cpu_ns_total=%llu offcpu_ns_total=%llu "
             "cpu_clamped_ns_total=%llu wait_gap_cpu_ns_total=%llu "
@@ -2042,7 +2045,11 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             (unsigned long long)d->counters.wp_attach_exit_race_total,
             (unsigned long long)d->counters.wp_attach_failures_live_total,
             (unsigned long long)d->counters.wp_attach_failures_unknown_total,
+            (unsigned long long)d->counters.wp_attach_failures_gone_total,
             (unsigned long long)d->counters.lifecycle_exit_before_attach_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_with_opportunity_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_no_opportunity_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_unknown_total,
             (unsigned long long)d->counters.state_map_full_total,
             (unsigned long long)d->counters.cpu_ns_total,
             (unsigned long long)d->counters.offcpu_ns_total,
