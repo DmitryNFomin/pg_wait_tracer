@@ -125,8 +125,8 @@ static cJSON *build_status(const struct pgwt_daemon *d)
                             pgwt_pgbs_source_name(
                                 d->backend_status_layout.source));
     cJSON_AddStringToObject(root, "pgbackend_layout_validation",
-                            pgwt_pgbs_validation_name(
-                                d->backend_status_layout.validation));
+                            pgwt_pgbs_status_name(&d->backend_status_layout));
+    cJSON_AddStringToObject(root, "pgbackend_layout_reason", d->backend_status_layout.detail);
     cJSON_AddNumberToObject(root, "pgbackend_layout_fallback_fields",
                             pgwt_pgbs_fallback_count(
                                 &d->backend_status_layout));
@@ -259,6 +259,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->sample_read_faults_total);
     cjson_add_uint64(root, "pgbackend_layout_fallbacks_total",
                      ctr->pgbackend_layout_fallbacks_total);
+    cjson_add_uint64(root, "sampled_attr_pg13_recovery_degraded_total",
+                     d->backend_status_layout.pg13_recovery_degraded_total);
     cjson_add_uint64(root, "sampled_attr_pg13_scan_fallbacks_total",
                      ctr->sampled_attr_pg13_scan_fallbacks_total);
     cjson_add_uint64(root, "sampled_attr_tick_read_failures_total",

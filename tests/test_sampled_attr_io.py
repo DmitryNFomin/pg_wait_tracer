@@ -229,7 +229,7 @@ def main():
             "pgwt_handle_fork", "pgwt_handle_init"))
     discovery = (ROOT / "src/discovery.c").read_text()
     policy = function(discovery, "pgwt_pg13_status_offsets") + "\n" + "\n".join(function(sampler, name) for name in
-                       ("resolve_sampled_attr", "resolve_pg13_sampled_attr", "refresh_pg13_generation",
+                       ("resolve_sampled_attr", "resolve_pg13_sampled_attr", "pgwt_sampler_refresh_pg13_generation",
                         "finish_sampled_attr", "note_idle_attr_sample"))
     # Compile the real registry paths and the actual target-building loop.
     # Hardware, directory enumeration, maps and stat are injected by the C harness.
@@ -240,18 +240,22 @@ def main():
     poll = function(sampler, "pgwt_sampler_poll")
     assert "resolve_sampled_attr(d, be, tick_ts, &maps_cache);" in poll
     assert "if (target_tick_enabled && d->backend_status_layout.major != 13)" in poll
-    assert "if (refresh_pg13_generation(d) != 0)" in poll
-    assert "pgwt_pgbs_validate_runtime(&d->backend_status_layout, d->postmaster_pid," in poll
     assert "finish_sampled_attr(be, attr_rows[n].rc, attr_rows[n].error, tick_ts);" in poll
     assert "note_idle_attr_sample(d, &targets[i], tick_enabled[i] && attr_valid[i]," in poll
     assert "getenv" not in function(sampler, "note_idle_attr_sample")
     assert sampler.count('getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW")') == 1
     target_loop = poll[poll.index("    int n = 0;"):poll.index("    int target_count = n;")]
+    period_end = poll.index("\n", poll.index("uint64_t period_ns =")) + 1
+    tick_prelude = poll[period_end:poll.index("    const bool tick_source_enabled")]
+    daemon = (ROOT / "src/daemon.c").read_text()
+    timer = function(daemon, "pgwt_handle_timer")
+    timer_start = timer.index("    if (pgwt_sampler_refresh_pg13_generation(d)")
+    timer_end = timer.index("    /* Stage 3 refreshes capacity", timer_start)
+    interval = "static void interval_registry(struct pgwt_daemon *d)\n{\n    (void)d;\n" + timer[timer_start:timer_end] + "}\n"
     registry = """
 static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
 {
-    (void)refresh_pg13_generation(d);
-    const bool tick_source_enabled = pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout);
+""" + tick_prelude + """    const bool tick_source_enabled = pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout);
     struct pgwt_sample_target sample_targets[MAX_BACKENDS];
     struct pgwt_pgbs_batch_target attr_rows[MAX_BACKENDS];
     uint8_t tick_enabled[MAX_BACKENDS];
@@ -311,11 +315,11 @@ static int record_registry_tick(struct pgwt_daemon *d, uint64_t tick_ts)
         tmp = Path(directory)
 
         def build(label, text, enrollment=lifecycle, resolution=policy, sampler_source=sampler,
-                  registry_source=registry, recording_source=recording):
+                  registry_source=registry, recording_source=recording, interval_source=interval):
             implementation = tmp / f"{label}.c"
             implementation.write_text(text)
             injected = tmp / f"{label}-lifecycle.h"
-            injected.write_text(enrollment + "\n" + resolution + registry_source + recording_source)
+            injected.write_text(enrollment + "\n" + resolution + interval_source + registry_source + recording_source)
             portable_sampler = tmp / f"{label}-sampler.c"
             portable_sampler.write_text(sampler_source.replace(
                 "#include <sys/uio.h>", "#include <sys/uio.h>\n"
@@ -377,10 +381,10 @@ static int record_registry_tick(struct pgwt_daemon *d, uint64_t tick_ts)
              "return before == after;", "PG13 odd counters are refused"),
             ("pg13_accept_unequal_counters", "return before == after && (after & 1u) == 0;",
              "(void)before; return (after & 1u) == 0;", "PG13 unequal counters are refused"),
-            ("pg13_keep_layout_across_generation",
-             "layout->status_array_base = layout->status_anchor = layout->shm_generation = 0;",
-             "/* retain the old array-base proof */",
-             "PG13 same-postmaster generation change invalidates layout and base"),
+            ("pg13_zero_anchor_on_generation",
+             "layout->status_array_base = 0;\n    layout->pg13_computed = false;",
+             "layout->status_array_base = layout->status_anchor = 0;\n    layout->pg13_computed = false;",
+             "PG13 same-range rebuild retains anchor and layout but clears base"),
             ("pg13_keep_reader_across_generation",
              "if (r->shm_generation != layout->shm_generation ||\n"
              "            r->shared_reader_pid != postmaster_pid) {",
@@ -405,6 +409,31 @@ static int record_registry_tick(struct pgwt_daemon *d, uint64_t tick_ts)
         for label, before, after, assertion in pg13_policy_mutations:
             assert policy.count(before) == 1, (label, "mutation anchor changed")
             result = run([str(build(label, source, resolution=policy.replace(before, after))),
+                          "pg13-registry"])
+            assert result.returncode == 1 and f"FAIL: {assertion}" in result.stderr, (
+                label, result.returncode, result.stdout, result.stderr)
+            print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
+        recovery_mutations = [
+            ("pg13_no_interval_retry", interval,
+             "pgwt_sampler_refresh_pg13_generation(d)",
+             "(d->backend_status_layout.pg13_recovery == PGWT_PGBS_PG13_PENDING ? 0 : "
+             "pgwt_sampler_refresh_pg13_generation(d))",
+             "PG13 absent mapping recovers on the next daemon interval"),
+            ("pg13_accept_changed_range", source,
+             "(map.identity && (map.lo != layout->shm_start || map.hi != layout->shm_end))",
+             "(false && map.identity && (map.lo != layout->shm_start || map.hi != layout->shm_end))",
+             "PG13 changed range latches degraded and counts it once"),
+            ("pg13_maps_per_tick", registry,
+             "    const bool tick_source_enabled =",
+             "    (void)pgwt_sampler_refresh_pg13_generation(d);\n    const bool tick_source_enabled =",
+             "PG13 steady-state sampling tick performs zero maps reads"),
+        ]
+        for label, original, before, after, assertion in recovery_mutations:
+            assert original.count(before) == 1, (label, "mutation anchor changed")
+            changed = original.replace(before, after)
+            kwargs = ({"interval_source": changed} if original == interval else
+                      {"registry_source": changed} if original == registry else {})
+            result = run([str(build(label, changed if original == source else source, **kwargs)),
                           "pg13-registry"])
             assert result.returncode == 1 and f"FAIL: {assertion}" in result.stderr, (
                 label, result.returncode, result.stdout, result.stderr)
@@ -538,7 +567,7 @@ static int record_registry_tick(struct pgwt_daemon *d, uint64_t tick_ts)
             assert result.returncode == 1 and f"FAIL: {assertion}" in result.stderr, (label, result)
             print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
 
-        total = len(pg13_mutations) + len(pg13_policy_mutations) + len(mutations) + len(other_mutations)
+        total = len(recovery_mutations) + len(pg13_mutations) + len(pg13_policy_mutations) + len(mutations) + len(other_mutations)
         print(f"sampled_attr_io mutants: {total}/{total} built, reached and rejected by named assertions")
 
 

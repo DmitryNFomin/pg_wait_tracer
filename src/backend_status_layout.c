@@ -1439,7 +1439,7 @@ void pgwt_pgbs_reader_reset(struct pgwt_pgbs_reader *reader)
     memset(reader, 0, sizeof(*reader));
 }
 
-struct pgwt_pgbs_mapping { uint64_t lo, hi, identity; };
+struct pgwt_pgbs_mapping { uint64_t lo, hi, identity, backing; };
 
 void pgwt_pgbs_maps_cache_reset(struct pgwt_pgbs_maps_cache *cache)
 {
@@ -1482,15 +1482,23 @@ static struct pgwt_pgbs_mapping *read_shared_maps(pid_t pid, size_t *count)
             struct pgwt_pgbs_mapping *more = realloc(maps, (n + 1) * sizeof(*maps));
             if (!more) { free(maps); maps = NULL; break; }
             maps = more;
-            uint64_t identity = 0;
+            uint64_t identity = 0, backing = 0;
             unsigned long long offset, inode;
             char dev[32];
-            if (sscanf(line, "%*s %*s %llx %31s %llu", &offset, dev, &inode) == 3 && inode) {
+            int path_at = 0;
+            if (sscanf(line, "%*s %*s %llx %31s %llu %n", &offset, dev, &inode, &path_at) == 3 && inode) {
                 identity = UINT64_C(14695981039346656037);
                 for (const unsigned char *p = (const unsigned char *)line; *p; p++)
                     identity = (identity ^ *p) * UINT64_C(1099511628211);
             }
-            maps[n++] = (struct pgwt_pgbs_mapping){lo, hi, identity};
+            /* A stable backing name can reveal a wholly relocated segment.
+             * It can only cause refusal, never establish a row address. */
+            if (path_at && line[path_at]) {
+                backing = UINT64_C(14695981039346656037);
+                for (const unsigned char *p = (const unsigned char *)line + path_at; *p; p++)
+                    backing = (backing ^ *p) * UINT64_C(1099511628211);
+            }
+            maps[n++] = (struct pgwt_pgbs_mapping){lo, hi, identity, backing};
         }
     }
     close(fd);
@@ -1679,8 +1687,16 @@ void pgwt_pgbs_resolve_pg13_batch(pid_t postmaster_pid,
 {
     if (!layout || !pgwt_pgbs_sampled_activity_enabled(layout) ||
         !targets || !n || n > PGWT_PGBS_BATCH_MAX || postmaster_pid <= 0 ||
-        !layout->shm_generation)
+        (!layout->shm_generation || layout->pg13_recovery != PGWT_PGBS_PG13_READY))
         return;
+    /* The retained anchor index is a layout hint, never an identity proof.
+     * At the same mapping range it restores the computed route immediately;
+     * every candidate still passes the ordinary coherent status batch. */
+    if (!layout->status_array_base && layout->status_anchor_backend_id > 0) {
+        uint64_t delta = (uint64_t)(layout->status_anchor_backend_id - 1) * layout->struct_size;
+        if (layout->status_anchor > delta)
+            layout->status_array_base = layout->status_anchor - delta;
+    }
     struct { int32_t pid, pgprocno, backend_id; } hints[PGWT_PGBS_BATCH_MAX];
     struct iovec local[PGWT_PGBS_BATCH_MAX], remote[PGWT_PGBS_BATCH_MAX];
     size_t owner[PGWT_PGBS_BATCH_MAX], count = 0;
@@ -1785,31 +1801,64 @@ void pgwt_pgbs_resolve_pg13_batch(pid_t postmaster_pid,
 /* Linux gives a rebuilt anonymous shared mapping a new backing inode even
  * when the surviving postmaster maps it at the same virtual address. Include
  * the whole maps line (range, device, inode), not just PID/address. */
-static uint64_t pg13_mapping_generation(pid_t pid, uint64_t anchor)
+static struct pgwt_pgbs_mapping pg13_main_mapping(pid_t pid,
+    const struct PgBackendStatusLayout *layout)
 {
     size_t n = 0;
     struct pgwt_pgbs_mapping *maps = read_shared_maps(pid, &n);
-    uint64_t identity = 0;
+    struct pgwt_pgbs_mapping found = {0};
     for (size_t i = 0; i < n; i++)
-        if (anchor >= maps[i].lo && anchor < maps[i].hi) {
-            identity = maps[i].identity;
+        if (layout->status_anchor >= maps[i].lo && layout->status_anchor < maps[i].hi) {
+            found = maps[i];
             break;
         }
+    if (!found.identity && layout->shm_backing) {
+        size_t matches = 0;
+        for (size_t i = 0; i < n; i++)
+            if (maps[i].backing == layout->shm_backing) {
+                found = maps[i];
+                matches++;
+            }
+        if (matches != 1) memset(&found, 0, sizeof(found));
+    }
     free(maps);
-    return identity;
+    return found;
+}
+
+const char *pgwt_pgbs_status_name(const struct PgBackendStatusLayout *layout)
+{
+    if (layout->major == 13) {
+        if (layout->pg13_recovery == PGWT_PGBS_PG13_PENDING) return "revalidating";
+        if (layout->pg13_recovery == PGWT_PGBS_PG13_DEGRADED) return "degraded";
+    }
+    return pgwt_pgbs_validation_name(layout->validation);
 }
 
 int pgwt_pgbs_pg13_generation(pid_t postmaster_pid,
     struct PgBackendStatusLayout *layout)
 {
-    if (!layout || layout->major != 13 || !layout->status_anchor) return 0;
-    uint64_t generation = pg13_mapping_generation(postmaster_pid, layout->status_anchor);
-    if (generation && generation == layout->shm_generation &&
+    if (!layout || layout->major != 13 || !layout->status_anchor ||
+        layout->validation != PGWT_PGBS_VALIDATION_VALIDATED ||
+        layout->pg13_recovery == PGWT_PGBS_PG13_DEGRADED) return 0;
+    struct pgwt_pgbs_mapping map = pg13_main_mapping(postmaster_pid, layout);
+    if (map.identity && map.identity == layout->shm_generation &&
         postmaster_pid == layout->generation_postmaster) return 0;
-    layout->status_array_base = layout->status_anchor = layout->shm_generation = 0;
+    layout->status_array_base = 0;
     layout->pg13_computed = false;
-    layout->validation = PGWT_PGBS_VALIDATION_NOT_RUN;
-    set_detail(layout, "shared-memory generation changed; PG13 layout needs revalidation");
+    layout->shm_generation = map.identity;
+    if (postmaster_pid != layout->generation_postmaster ||
+        (map.identity && (map.lo != layout->shm_start || map.hi != layout->shm_end))) {
+        layout->pg13_recovery = PGWT_PGBS_PG13_DEGRADED;
+        layout->pg13_recovery_degraded_total++;
+        set_detail(layout, "PG13 shared-memory address range or postmaster changed; restart the daemon");
+    } else if (!map.identity) {
+        if (layout->pg13_recovery == PGWT_PGBS_PG13_PENDING) return 0;
+        layout->pg13_recovery = PGWT_PGBS_PG13_PENDING;
+        set_detail(layout, "PG13 shared-memory mapping absent; revalidating on daemon interval");
+    } else {
+        layout->pg13_recovery = PGWT_PGBS_PG13_READY;
+        set_detail(layout, "PG13 shared-memory mapping re-anchored; rows require batch identity proof");
+    }
     return -1;
 }
 
@@ -1819,7 +1868,10 @@ static void pg13_record_anchor(struct PgBackendStatusLayout *layout,
 {
     layout->status_anchor = base;
     layout->status_array_base = 0;
-    layout->shm_generation = pg13_mapping_generation(postmaster_pid, base);
+    struct pgwt_pgbs_mapping map = pg13_main_mapping(postmaster_pid, layout);
+    layout->shm_generation = map.identity;
+    layout->shm_start = map.lo; layout->shm_end = map.hi;
+    layout->shm_backing = map.backing;
     layout->generation_postmaster = postmaster_pid;
     int32_t id = 0;
     int fd = layout->my_backend_id_addr ? open_mem(backend_pid) : -1;
@@ -1827,6 +1879,7 @@ static void pg13_record_anchor(struct PgBackendStatusLayout *layout,
         if (pread_exact(fd, &id, sizeof(id), layout->my_backend_id_addr) < 0) id = 0;
         close(fd);
     }
+    layout->status_anchor_backend_id = id;
     uint64_t delta = id > 0 ? (uint64_t)(id - 1) * layout->struct_size : 0;
     if (layout->shm_generation && id > 0 && base > delta)
         layout->status_array_base = base - delta;
@@ -1907,6 +1960,11 @@ void pgwt_pgbs_read_batch(pid_t postmaster_pid,
     /* Live negative control: leave every target unread and issue no status
      * syscall. Both the volume floor and positive-attribution gate must fail. */
     if (getenv("PGWT_TEST_DISABLE_STATUS_BATCH")) {
+        batch_count_failures(targets, n, failures_total);
+        return;
+    }
+    if (layout && layout->major == 13 &&
+        layout->pg13_recovery != PGWT_PGBS_PG13_READY) {
         batch_count_failures(targets, n, failures_total);
         return;
     }
@@ -3316,7 +3374,7 @@ void pgwt_pgbs_log(const struct PgBackendStatusLayout *layout)
             pgwt_pgbs_arch_name(layout->arch), layout->pointer_width,
             pgwt_pgbs_abi_name(layout->abi), layout->struct_size,
             layout->activity_buffer_size,
-            pgwt_pgbs_validation_name(layout->validation),
+            pgwt_pgbs_status_name(layout),
             layout->validated_pid, layout->state_running,
             layout->state_fastpath, layout->state_max);
     fprintf(stderr, "INFO: PgBackendStatus fields:");

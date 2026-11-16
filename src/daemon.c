@@ -455,6 +455,11 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
         }
     }
 
+    /* Crash recovery can rebuild PG13 shared memory under the live postmaster.
+     * Retry absent mappings here, never with a client or on the sampling tick. */
+    if (pgwt_sampler_refresh_pg13_generation(d) != 0)
+        pgwt_pgbs_log(&d->backend_status_layout);
+
     /* Stage 3 refreshes capacity at sampler cadence when the anomaly engine
      * is armed, so the CUSUM consumes every material-change signal. Other
      * modes retain Stage 2's display-cadence refresh for observability. */

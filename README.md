@@ -1472,11 +1472,18 @@ discovery budget, attempts one pending reader per tick in rotation, and never
 accepts pid-only decoys. `status` reports
 `sampled_attr_pg13_route` as `computed` or `scan` for the current discovery route;
 `metrics` reports `sampled_attr_pg13_scan_fallbacks_total`. The postmaster's shared
-mapping identity (including its backing inode) is checked each tick, even with
-no pending readers. A restart or shared-memory rebuild invalidates the layout,
-array base, row addresses and mapping proofs; controlled runtime validation
-must succeed again before this source resumes. PostgreSQL 14 and later keep
-their existing resolution path.
+mapping identity (including its backing inode) is checked once per daemon
+interval, even with no pending readers; steady-state sampling ticks do no maps
+I/O. A shared-memory rebuild retains the validated offsets and anchor but clears
+the array base, row addresses and mapping proofs. At the same address range,
+attribution resumes through the coherent batch's identity checks without opening
+any validation connection. An absent mapping leaves `pgbackend_layout_validation`
+as `revalidating`; samples remain unattributed and counted in
+`sampled_attr_tick_read_failures_total` until an interval check finds it again.
+A changed address range latches `degraded` for this postmaster, increments
+`sampled_attr_pg13_recovery_degraded_total` once, and leaves samples unattributed.
+`pgbackend_layout_reason` explains the state; for a changed range, **restart the
+daemon**. PostgreSQL 14 and later keep their existing resolution path.
 
 `PGWT_SAMPLER_NICE` accepts an integer from -20 through 19 (the standard
 `nice` range) to request the daemon's own process niceness. Unset or empty

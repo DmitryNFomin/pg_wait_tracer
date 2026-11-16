@@ -53,6 +53,12 @@ enum pgwt_pgbs_fallback {
     PGWT_PGBS_FALLBACK_QUERY_ID     = 1u << 2,
 };
 
+enum pgwt_pgbs_pg13_recovery {
+    PGWT_PGBS_PG13_READY = 0,
+    PGWT_PGBS_PG13_PENDING,
+    PGWT_PGBS_PG13_DEGRADED,
+};
+
 struct PgBackendStatusLayout {
     int major;
     enum pgwt_pgbs_arch arch;
@@ -64,8 +70,13 @@ struct PgBackendStatusLayout {
     /* PG13 only. Offsets are header-derived hypotheses; the status batch
      * remains the sole identity acceptor. All proofs belong to shm_generation. */
     uint64_t my_backend_id_addr;
+    int32_t status_anchor_backend_id; /* retained array offset, only a row-address hint */
     uint32_t pgproc_pid_offset, pgproc_backend_id_offset;
     uint64_t status_array_base, shm_generation;
+    uint64_t shm_start, shm_end; /* validated main segment range, retained on rebuild */
+    uint64_t shm_backing; /* stable maps descriptor, used only to refuse relocation */
+    enum pgwt_pgbs_pg13_recovery pg13_recovery;
+    uint64_t pg13_recovery_degraded_total;
     pid_t generation_postmaster;
     bool pg13_computed;
     size_t pg13_scan_next;
@@ -311,8 +322,9 @@ void pgwt_pgbs_resolve_pg13_batch(pid_t postmaster_pid,
     struct PgBackendStatusLayout *layout,
     struct pgwt_pgbs_batch_target *targets, size_t n,
     struct pgwt_pgbs_maps_cache *maps_cache, uint64_t *scan_total);
-/* Compare the backing mapping identity, including its inode, every PG13 tick.
- * A changed/missing mapping invalidates the layout and its array-base proof. */
+/* Interval-only mapping check. Retain the anchor/layout, retire address proofs.
+ * Missing mappings remain pending; a changed range is latched until restart. */
+const char *pgwt_pgbs_status_name(const struct PgBackendStatusLayout *layout);
 int pgwt_pgbs_pg13_generation(pid_t postmaster_pid,
     struct PgBackendStatusLayout *layout);
 /* Ordered per-row counter/span/[PG13 text]/counter ranges. Completed ranges

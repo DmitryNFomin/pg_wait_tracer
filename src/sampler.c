@@ -1028,9 +1028,8 @@ static void resolve_sampled_attr(struct pgwt_daemon *d, struct pgwt_backend *be,
             d->my_be_entry_addr, &d->backend_status_layout, maps_cache);
 }
 
-/* Mapping identity is checked even with no pending rows: crash recovery can
- * rebuild shared memory under the same postmaster PID and at the same VA. */
-static int refresh_pg13_generation(struct pgwt_daemon *d)
+/* Called once per daemon interval, including while a mapping is absent. */
+int pgwt_sampler_refresh_pg13_generation(struct pgwt_daemon *d)
 {
     if (pgwt_pgbs_pg13_generation(d->postmaster_pid, &d->backend_status_layout) == 0)
         return 0;
@@ -1134,13 +1133,6 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
      * as the first weight in a block or a timestamp difference. */
     uint64_t period_ns = pgwt_sampler_tick_period(s, tick_ts);
 
-    if (refresh_pg13_generation(d) != 0) {
-        char binary[PATH_MAX];
-        if (pgwt_find_pg_binary(d->postmaster_pid, binary, sizeof(binary)) == 0)
-            pgwt_pgbs_validate_runtime(&d->backend_status_layout, d->postmaster_pid,
-                d->my_be_entry_addr, binary, &d->pgbs_validation_exclusions);
-        pgwt_pgbs_log(&d->backend_status_layout);
-    }
     const bool tick_source_enabled =
         pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout);
     uint32_t attr_edge_mask = d->exact_probes.core.attached_mask &

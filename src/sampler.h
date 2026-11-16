@@ -228,6 +228,9 @@ struct pgwt_sampler {
     uint64_t read_failures_total; /* targets with no successful read */
 };
 
+/* PG13 mapping maintenance: daemon interval only, never the sampling tick. */
+int pgwt_sampler_refresh_pg13_generation(struct pgwt_daemon *d);
+
 /* Provider hooks (see provider.h). Exposed for the vtable in sampler.c. */
 /* Live folding, also built by the portable weight parity test. */
 void pgwt_sampler_accumulate(struct pgwt_daemon *d,
