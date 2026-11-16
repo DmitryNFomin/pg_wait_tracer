@@ -141,7 +141,29 @@ def pg13_live_pure_cases():
                               10_000_000) == green
     late = [*samples[:-1], dict(samples[-1], timestamp_ns=cohort[-1]["backend_start_ns"] + 20_000_001)]
     red = assess_pg13_timing(cohort, late, 10_000_000)
+    # The pre-fix tracer has validation status but no reason field. It must
+    # pass the anchor prerequisite and reach the timing negative control.
+    legacy_status = {"pgbackend_layout_validation": "validated"}
+    live.require_pg13_anchor_status(legacy_status, negative=True)
     assert "first attribution > 2 tick periods" in require_pg13_negative_control(red)
+    candidate_status = dict(legacy_status,
+                            pgbackend_layout_reason="controlled backend retired before capture")
+    live.require_pg13_anchor_status(candidate_status)
+    for negative in (False, True):
+        try:
+            live.require_pg13_anchor_status(dict(candidate_status, pgbackend_layout_validation="degraded"),
+                                            negative=negative)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("unvalidated anchor accepted")
+    for status in (legacy_status, dict(candidate_status, pgbackend_layout_reason="validation failed")):
+        try:
+            live.require_pg13_anchor_status(status)
+        except (KeyError, AssertionError):
+            pass
+        else:
+            raise AssertionError("candidate accepted without controlled-anchor reason")
     missing = assess_pg13_timing(cohort, samples[:-1] + [dict(samples[-1], query_id=0),
                                                       dict(samples[-1], pid=999)], 10_000_000)
     assert "first attribution missing: pids=[1199]" in require_pg13_negative_control(missing)
@@ -218,6 +240,7 @@ def pg13_live_pure_cases():
     result = run(["python3", "-B", "tests/test_sampler_batch_live.py", "--dry-run", "--pg-version", "13"])
     assert result.returncode == 0 and "pg13-far-rows" in json.loads(result.stdout)["arms"]
     print("PG13 timing: every pid, max/p99, exact two-period edge, missing/late RED; syscall census and per-tick bound PASS")
+    print("PG13 anchor status: pre-fix reason absent reaches timing RED; validation required for both, candidate reason required PASS")
     print("PG13 arguments/default selection/dry-run: PASS (no Linux, PostgreSQL or libpq loaded)")
 
 

@@ -328,6 +328,16 @@ class IdleConnections:
         self.handles.clear()
 
 
+def require_pg13_anchor_status(status, *, negative=False):
+    """Confirm validation after observing its anchor pid/backend id via pg_locks."""
+    assert status["pgbackend_layout_validation"] == "validated", status
+    # 0b1d7dd6 exposes validation but predates the reason field. Its anchor is
+    # still observed independently by validation_anchor() before this check.
+    if not negative:
+        assert "controlled backend retired before capture" in status["pgbackend_layout_reason"], \
+            "observed anchor was not the successful controlled validation anchor"
+
+
 def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
     """Far-row churn, with independent SQL identities and persisted timing.
 
@@ -367,9 +377,7 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
             wait_until(daemon, lambda: metrics(trace).get("sampler_ticks_total", 0) > 0,
                        30, "PG13 sampler not ready")
             status = metrics(trace, "status")
-            assert status["pgbackend_layout_validation"] == "validated", status
-            assert "controlled backend retired before capture" in status["pgbackend_layout_reason"], \
-                "observed anchor was not the successful controlled validation anchor"
+            require_pg13_anchor_status(status, negative=negative)
             assert metrics(trace)["exact_probe_attached_mask"] == 0, "timing arm must stay sampled"
             # No far slot is retired here. Retire only those closest to the
             # measured anchor, leaving the low slots available for far churn.
