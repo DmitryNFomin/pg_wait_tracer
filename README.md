@@ -1465,9 +1465,11 @@ still checks equal even change counters, the row PID, state, activity pointer
 and the enrolled start time at first acceptance. Samples before initialisation
 remain counted in `sampled_attr_tick_read_failures_total`.
 
-The retained scan is a counted fallback when a computed hint is unavailable or
-rejected. It shares the two-call discovery budget, attempts one pending reader
-per tick in rotation, and never accepts pid-only decoys. `status` reports
+The retained scan is a counted fallback only while the computed array base is
+unavailable. With a known base, an unset backend ID or rejected computed hint
+stays pending and is retried on the next tick. The scan shares the two-call
+discovery budget, attempts one pending reader per tick in rotation, and never
+accepts pid-only decoys. `status` reports
 `sampled_attr_pg13_route` as `computed` or `scan` for the current discovery route;
 `metrics` reports `sampled_attr_pg13_scan_fallbacks_total`. The postmaster's shared
 mapping identity (including its backing inode) is checked each tick, even with

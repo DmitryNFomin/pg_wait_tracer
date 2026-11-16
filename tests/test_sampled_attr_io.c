@@ -526,6 +526,42 @@ static void test_pg13_computed(void)
     CHECK(targets[1023].rc == 0 && calls == 6 && !tick_failures,
           "PG13 initialization after rejection is eligible on the next tick");
 }
+static void test_pg13_pending_backend_id_known_base(void)
+{
+    fixture(13, 1); pg13_anchor(511); pg13_pending(0);
+    int32_t id = -1;
+    memcpy((void *)(uintptr_t)(proc_at(0) + layout.pgproc_backend_id_offset), &id, sizeof(id));
+    reset_counts(); scan_uses = 0; pg13_discover(1); batch();
+    CHECK(targets[0].rc < 0 && tick_failures == 1 && !cache[0].status_addr &&
+          !scan_uses && layout.pg13_computed && calls == 1 && !own_calls,
+          "PG13 known base keeps backendId -1 pending without a scan fallback");
+    id = 1;
+    memcpy((void *)(uintptr_t)(proc_at(0) + layout.pgproc_backend_id_offset), &id, sizeof(id));
+    reset_counts(); pg13_discover(1); batch();
+    CHECK(targets[0].rc == 0 && cache[0].status_addr == entries[0] &&
+          !tick_failures && !scan_uses && layout.pg13_computed && calls == 3 && !own_calls,
+          "PG13 initialised backendId resumes the computed route on the next tick");
+    puts("test_pg13_pending_backend_id_known_base: PASS (pending counted; computed route; next-tick retry)");
+}
+
+static void test_pg13_rejected_computed_hint(void)
+{
+    fixture(13, 1); pg13_anchor(511); pg13_pending(0);
+    put(0, &layout.st_procpid, 0);
+    scan_uses = 0;
+    for (int tick = 0; tick < 2; tick++) {
+        reset_counts(); pg13_discover(1); batch();
+        CHECK(targets[0].rc < 0 && tick_failures == 1 &&
+              !scan_uses && layout.pg13_computed && calls == 3 && !own_calls,
+              "PG13 rejected computed hint is retried without a scan fallback");
+    }
+    put(0, &layout.st_procpid, 1000);
+    reset_counts(); pg13_discover(1); batch();
+    CHECK(targets[0].rc == 0 && !tick_failures && !scan_uses && layout.pg13_computed,
+          "PG13 rejected computed hint recovers on the next eligible tick");
+    puts("test_pg13_rejected_computed_hint: PASS (rejected hints retry computed; no fallback)");
+}
+
 static void test_pg13_guards(void)
 {
     for (int reader = 1; reader <= 2; reader++) {
@@ -1330,7 +1366,10 @@ int main(int argc, char **argv)
 {
     (void)io_openat; /* catches an accidentally reintroduced openat */
     if (argc == 2) {
-        if (!strcmp(argv[1], "pg13")) { test_pg13_computed(); test_pg13_guards(); }
+        if (!strcmp(argv[1], "pg13")) {
+            test_pg13_computed(); test_pg13_guards();
+            test_pg13_pending_backend_id_known_base(); test_pg13_rejected_computed_hint();
+        }
         else if (!strcmp(argv[1], "faults")) test_faults(18);
         else if (!strcmp(argv[1], "budget")) test_budget(18, 512, 2);
         else if (!strcmp(argv[1], "resolve")) test_resolve(18);
@@ -1349,6 +1388,7 @@ int main(int argc, char **argv)
         else return 2;
     } else {
         test_pg13_computed(); test_pg13_guards();
+        test_pg13_pending_backend_id_known_base(); test_pg13_rejected_computed_hint();
 #ifdef PGWT_LIFECYCLE_SOURCE
         test_pg13_registry();
 #endif

@@ -1759,6 +1759,9 @@ void pgwt_pgbs_resolve_pg13_batch(pid_t postmaster_pid,
         }
         return;
     }
+    /* A known base keeps uninitialised/rejected hints pending until the next
+     * tick. Only an unavailable computed route uses the scan fallback. */
+    if (layout->status_array_base) return;
     /* One scan attempt per tick, round robin, shares the two-call budget
      * with the PGPROC hints above. No per-backend syscall fallback storm. */
     for (size_t j = 0; j < n; j++) {

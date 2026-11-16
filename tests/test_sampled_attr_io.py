@@ -235,6 +235,8 @@ def main():
     # Hardware, directory enumeration, maps and stat are injected by the C harness.
     for name in ("pgwt_scan_existing_backends", "pgwt_handle_init", "pgwt_handle_fork"):
         assert "pgwt_sampler_enroll_backend(be, now_ns());" in function(backend, name), name
+    control = (ROOT / "src/control.c").read_text()
+    assert 'd->backend_status_layout.pg13_computed ? "computed" : "scan"' in control
     poll = function(sampler, "pgwt_sampler_poll")
     assert "resolve_sampled_attr(d, be, tick_ts, &maps_cache);" in poll
     assert "if (target_tick_enabled && d->backend_status_layout.major != 13)" in poll
@@ -336,6 +338,9 @@ static int record_registry_tick(struct pgwt_daemon *d, uint64_t tick_ts)
         assert result.returncode == 0, result.stdout + result.stderr
         print(result.stdout, end="")
         pg13_mutations = [
+            ("pg13_scan_with_known_base", "    if (layout->status_array_base) return;",
+             "    /* scan even though the computed base is available */",
+             "PG13 known base keeps backendId -1 pending without a scan fallback"),
             ("pg13_pgprocno_as_backend_id", "int32_t id = hints[j].backend_id;",
              "int32_t id = hints[j].pgprocno;",
              "PG13 all eligible rows are attributed on their first tick"),
