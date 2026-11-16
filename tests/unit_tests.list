@@ -1070,6 +1070,9 @@ test_phase_capability
 test_phase_probe
 
 # Core wait_time v1: independent contract answers, no server dependency.
+test_evidence_capture
+test_evidence_capture_kinds.sh
+test_evidence_capture_portable.py
 test_core_wait_time_contract
 test_core_wait_time_differential.py
 
@@ -1097,9 +1100,14 @@ test_ringbuf_metrics
 test_backend_init
 test_backend_init_order.py
 test_backend_attach_race.py
+test_backend_exit_accounting.py
 
 # Refs #871: explicit loss-vector validity and sticky writer rejection.
 test_counter_vector
 test_writer_failure
 test_counter_failures.py
 test_counter_vector_portable.py
+
+# Stateless evidence-v1 fixture-to-screen pilot and consumer boundary.
+test_pilot_route.py
+test_consumer_boundary.sh

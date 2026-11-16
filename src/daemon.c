@@ -7,6 +7,7 @@
 #include "event_writer.h"
 #include "map_reader.h"
 #include "capture_counters.h"
+#include "evidence_capture.h"
 #include "output.h"
 #include "perf_event.h"
 #include "provider_coop.h"
@@ -208,7 +209,7 @@ static int process_lifecycle_event(void *ctx, void *data, size_t data_sz)
     struct pgwt_daemon *d = ctx;
     struct pgwt_lifecycle_event *ev = data;
 
-    (void)data_sz;
+    pgwt_evidence_capture_observe(d->evidence_capture, data, data_sz);
 
     d->counters.lifecycle_events_total++;
 
@@ -1859,6 +1860,10 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
 
     if (!d->quiet)
         pgwt_print_header(d);
+    /* Set up the optional writer only after every fatal initialisation step.
+     * Failed daemon startup must never publish an empty evidence capture.
+     * Call even without -T so an explicit opt-in explains why it is off. */
+    d->evidence_capture = pgwt_evidence_capture_init(d->trace_dir, d->pg_major_version);
     return 0;
 
 fail:
@@ -2056,7 +2061,13 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             "test_delays_left=%u "
             "timer_settime_rc=%d timer_epoll_rc=%d "
             "state_reseeds_total=%llu invalid_wait_reads_total=%llu "
-            "wp_attach_failures_total=%llu wp_attach_exit_race_total=%llu state_map_full_total=%llu "
+            "wp_attach_failures_total=%llu wp_attach_exit_race_total=%llu "
+            "wp_attach_failures_live_total=%llu wp_attach_failures_unknown_total=%llu "
+            "wp_attach_failures_gone_total=%llu lifecycle_exit_before_attach_total=%llu "
+            "lifecycle_exit_before_attach_with_opportunity_total=%llu "
+            "lifecycle_exit_before_attach_no_opportunity_total=%llu "
+            "lifecycle_exit_before_attach_unknown_total=%llu "
+            "state_map_full_total=%llu "
             "cpu_ns_total=%llu offcpu_ns_total=%llu "
             "cpu_clamped_ns_total=%llu wait_gap_cpu_ns_total=%llu "
             "tick_drain_records_total=%llu tick_drain_max_records=%llu "
@@ -2080,6 +2091,13 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             (unsigned long long)d->counters.invalid_wait_reads_total,
             (unsigned long long)d->counters.wp_attach_failures_total,
             (unsigned long long)d->counters.wp_attach_exit_race_total,
+            (unsigned long long)d->counters.wp_attach_failures_live_total,
+            (unsigned long long)d->counters.wp_attach_failures_unknown_total,
+            (unsigned long long)d->counters.wp_attach_failures_gone_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_with_opportunity_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_no_opportunity_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_unknown_total,
             (unsigned long long)d->counters.state_map_full_total,
             (unsigned long long)d->counters.cpu_ns_total,
             (unsigned long long)d->counters.offcpu_ns_total,
@@ -2189,6 +2207,8 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
         free(d->event_writer);
         d->event_writer = NULL;
     }
+    if (d->evidence_capture)
+        pgwt_evidence_capture_close(&d->evidence_capture, pgwt_daemon_counter_vector(d));
 
     pgwt_ring_free(&d->ring);
     pgwt_close_all_backends(&d->backends);

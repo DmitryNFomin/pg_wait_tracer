@@ -65,6 +65,7 @@ fi
 
 step "watchpoint attach exit races (portable backend C harness)"
 run python3 -B tests/test_backend_attach_race.py --mutants
+run python3 -B tests/test_backend_exit_accounting.py
 
 # Portable C core: this script builds/runs the contract C test in a temporary
 # directory. The differential compares against the independent reference;
@@ -92,6 +93,12 @@ step "portable v5 evidence codec, independent bytes and mutation checks"
 run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_oracle.py
 run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_redelivery.py
 run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_mutants.py
+
+step "stateless evidence-v1 pilot route, browser, uint64 and mutations"
+run python3 -B tests/check_server_test_links.py --self-test
+run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py --require-browser
+run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py --mutants
+run bash tests/test_consumer_boundary.sh --self-test
 
 step "C11 core merge contract and API safety (ASan/UBSan, Refs #871)"
 if merge_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-core-merge-check.XXXXXX"); then

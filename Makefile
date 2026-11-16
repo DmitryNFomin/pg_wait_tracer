@@ -123,6 +123,10 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/map_reader.c \
              $(SRC_DIR)/counter_vector.c \
              $(SRC_DIR)/capture_counters.c \
+             $(SRC_DIR)/evidence_capture.c \
+             $(SRC_DIR)/core/evidence_codec.c \
+             $(SRC_DIR)/core/evidence_replay.c \
+             $(SRC_DIR)/core/wait_metrics.c \
              $(SRC_DIR)/percpu_transport.c \
              $(SRC_DIR)/merge_capture.c \
              $(SRC_DIR)/core/merge.c \
@@ -150,6 +154,10 @@ USER_OBJS  = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(USER_SRCS))
 
 # pgwt-server: lightweight replay server (no BPF dependencies)
 SERVER_SRCS = $(SRC_DIR)/server.c \
+              $(SRC_DIR)/core/evidence_query.c \
+              $(SRC_DIR)/core/evidence_codec.c \
+              $(SRC_DIR)/core/evidence_replay.c \
+              $(SRC_DIR)/core/wait_metrics.c \
               $(SRC_DIR)/phase_capability.c \
               $(SRC_DIR)/compute.c \
               $(SRC_DIR)/backend_span.c \
@@ -276,6 +284,7 @@ $(TARGET): $(USER_OBJS)
 
 # pgwt-server: compile WITHOUT skeleton dependency, with -DPGWT_SERVER
 $(BUILD_DIR)/server_%.o: $(SRC_DIR)/%.c $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR)
+	@mkdir -p $(@D)
 	@echo "  CC       $@ (server)"
 	@$(CC) $(CFLAGS) $(DEPFLAGS) -DPGWT_SERVER -c $< -o $@
 

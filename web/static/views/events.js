@@ -21,6 +21,8 @@
  *     'histogram-event' pivot intent via ctx.onDrill; row-click unchanged).
  */
 
+import { mountEventsPilot, unmountEventsPilot } from './events-pilot.js';
+
 import {
     buildTableModel, buildTruncationRow, createStableOrder, applyDefaultOrder,
     createOrderResetGate, orderResetKey,
@@ -188,7 +190,7 @@ export function createEventsView() {
             });
         },
 
-        enter() { /* no chart */ },
-        leave() { /* no chart */ },
+        enter(ctx) { mountEventsPilot(ctx); },
+        leave() { unmountEventsPilot(); },
     };
 }

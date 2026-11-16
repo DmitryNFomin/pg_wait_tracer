@@ -1108,6 +1108,9 @@ DAEMON_INTEGRITY_COUNTERS = (
     "fork_state_update_fail_total",
     "writer_push_fail_total",
     "init_state_read_fail_total",
+    "wp_attach_failures_total",
+    "lifecycle_exit_before_attach_with_opportunity_total",
+    "lifecycle_exit_before_attach_unknown_total",
     "counter_vector_valid",
 )
 
@@ -1134,6 +1137,12 @@ def daemon_integrity_ok(metrics):
     "Count, don't fail (Recommended)": total losses, no-opportunity losses
     and their untraced ns are reported as information; only
     lifecycle_init_lost_with_opportunity_total gates INIT integrity.
+    Missed attachment, opportunity observed (gated), and opportunity unknown
+    (gated) are separate retirement classes. Exited before the tracer could
+    attach (reported) requires no entry and positive proof that first handling
+    found the target gone. An exit proof supplies an exit-race reason, never
+    proof of unavoidable loss; retained INIT uses the existing INIT rule.
+    wp_attach_failures_total also gates integrity.
     The final per-pid exit sweep
     recognises raced INITs but cannot recover coverage after exit. The BPF
     lifecycle_init_no_state_total diagnostic alone does not decide loss:

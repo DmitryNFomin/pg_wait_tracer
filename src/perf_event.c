@@ -65,12 +65,13 @@ static int open_watchpoint_common(pid_t pid, uint64_t addr, int bpf_prog_fd,
 
     int fd = sys_perf_event_open(&attr, pid, -1, -1, PERF_FLAG_FD_CLOEXEC);
     if (fd < 0) {
+        int error = errno;
         /* ESRCH = process exited before we could attach — expected for
          * short-lived backends. Don't spam stderr with these.
          * EMFILE/ENFILE (CAP-12) is a very different failure — the daemon
          * ran out of file descriptors, and every further backend would
          * silently record nothing. Scream, with the fix. */
-        if (errno == EMFILE || errno == ENFILE) {
+        if (error == EMFILE || error == ENFILE) {
             fprintf(stderr,
                     "ERROR: perf_event_open(pid=%d): %s — file descriptor "
                     "limit reached.\n"
@@ -78,23 +79,28 @@ static int open_watchpoint_common(pid_t pid, uint64_t addr, int bpf_prog_fd,
                     "daemon raises RLIMIT_NOFILE at startup; if this "
                     "persists, raise the hard limit (ulimit -Hn / "
                     "LimitNOFILE= in the systemd unit).\n",
-                    pid, strerror(errno));
-        } else if (errno != ESRCH) {
+                    pid, strerror(error));
+        } else if (error != ESRCH) {
             fprintf(stderr, "perf_event_open(pid=%d, addr=0x%lx): %s\n",
-                    pid, (unsigned long)addr, strerror(errno));
+                    pid, (unsigned long)addr, strerror(error));
         }
+        errno = error;
         return -1;
     }
 
     if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, bpf_prog_fd) != 0) {
-        fprintf(stderr, "ioctl SET_BPF(pid=%d): %s\n", pid, strerror(errno));
+        int error = errno;
+        fprintf(stderr, "ioctl SET_BPF(pid=%d): %s\n", pid, strerror(error));
         close(fd);
+        errno = error;
         return -1;
     }
 
     if (start_enabled && ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
-        fprintf(stderr, "ioctl ENABLE(pid=%d): %s\n", pid, strerror(errno));
+        int error = errno;
+        fprintf(stderr, "ioctl ENABLE(pid=%d): %s\n", pid, strerror(error));
         close(fd);
+        errno = error;
         return -1;
     }
 
@@ -114,7 +120,9 @@ int pgwt_open_watchpoint_disabled(pid_t pid, uint64_t addr, int bpf_prog_fd)
 int pgwt_watchpoint_enable(int perf_fd)
 {
     if (ioctl(perf_fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
-        fprintf(stderr, "ioctl ENABLE: %s\n", strerror(errno));
+        int error = errno;
+        fprintf(stderr, "ioctl ENABLE: %s\n", strerror(error));
+        errno = error;
         return -1;
     }
     return 0;
