@@ -454,6 +454,8 @@ struct pgwt_daemon {
      * from tick: tick advances only after handle_timer completes, so it cannot
      * tell "never entered" from "entered and stalled before completion". */
     bool        debug_dump_state;
+    /* Opt-in overrun control, cached at init; zero adds no delay. */
+    uint32_t    debug_sample_tick_delay_us;
     uint64_t    debug_loop_iterations;
     uint64_t    debug_timer_entries;
     uint64_t    debug_timer_expirations;

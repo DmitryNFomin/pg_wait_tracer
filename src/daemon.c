@@ -782,6 +782,26 @@ static void arm_sample_timer_jittered(struct pgwt_daemon *d)
     }
 }
 
+static void configure_sample_tick_delay(struct pgwt_daemon *d)
+{
+    d->debug_sample_tick_delay_us = 0;
+    const char *value = getenv("PGWT_DEBUG_SAMPLE_TICK_DELAY_US");
+    if (!value)
+        return;
+    char *end = NULL;
+    errno = 0;
+    unsigned long delay = strtoul(value, &end, 10);
+    if (errno || value[0] < '0' || value[0] > '9' || *end != '\0' ||
+        delay == 0 || delay > 1000000UL) {
+        fprintf(stderr, "WARN: ignoring invalid PGWT_DEBUG_SAMPLE_TICK_DELAY_US=%s "
+                "(expected integer 1..1000000)\n", value);
+        return;
+    }
+    d->debug_sample_tick_delay_us = (uint32_t)delay;
+    fprintf(stderr, "WARN: PGWT_DEBUG_SAMPLE_TICK_DELAY_US=%u — delaying each "
+            "sample tick after capture (DEBUG ONLY)\n", d->debug_sample_tick_delay_us);
+}
+
 static void handle_sample_timer(struct pgwt_daemon *d)
 {
     uint64_t expirations = 0;
@@ -809,6 +829,16 @@ static void handle_sample_timer(struct pgwt_daemon *d)
         started_ns = pgwt_debug_block_begin(d);
         d->provider->poll(d);
         pgwt_debug_block_end(d, "capture_provider_poll", 0, started_ns);
+    }
+    /* Gate-fires control: a FORK arriving during this opt-in tick tail is
+     * queued while the re-armed timer expires, reproducing the ordering race.
+     * One sleep only; an interrupt may shorten the diagnostic delay. */
+    if (d->debug_sample_tick_delay_us) {
+        struct timespec delay = {
+            .tv_sec = d->debug_sample_tick_delay_us / 1000000U,
+            .tv_nsec = (long)(d->debug_sample_tick_delay_us % 1000000U) * 1000L,
+        };
+        nanosleep(&delay, NULL);
     }
 }
 
@@ -1102,6 +1132,7 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
      * duration probes key off this bool; when unset they do no syscalls and
      * emit nothing. Reset the per-run counters for daemon-mode re-attach. */
     d->debug_dump_state = getenv("PGWT_DEBUG_DUMP_STATE") != NULL;
+    configure_sample_tick_delay(d);
     d->debug_loop_iterations = 0;
     d->debug_timer_entries = 0;
     d->debug_timer_expirations = 0;
@@ -1835,6 +1866,48 @@ fail:
     return -1;
 }
 
+/* Keep fd dispatch independent of epoll's returned order. The host test
+ * drives this same function with a timer ahead of a queued lifecycle fd. */
+static void dispatch_ready_fd(struct pgwt_daemon *d, int fd,
+                              int rb_fd, int event_rb_fd)
+{
+    uint64_t started_ns;
+    if (fd == d->timer_fd) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_handle_timer(d);
+        pgwt_debug_block_end(d, "timer_handler", 0, started_ns);
+    } else if (d->sample_timer_fd >= 0
+               && fd == d->sample_timer_fd) {
+        started_ns = pgwt_debug_block_begin(d);
+        /* Include FORKs queued before this tick even when epoll returned the
+         * timer first, or the record arrived after epoll_wait returned. Keep
+         * the lifecycle reader's existing processing/identity policy. */
+        pgwt_consume_lifecycle_ring(d);
+        handle_sample_timer(d);
+        pgwt_debug_block_end(d, "sample_timer_handler", 0, started_ns);
+    } else if (fd == rb_fd) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_consume_lifecycle_ring(d);
+        pgwt_debug_block_end(d, "lifecycle_ring_consume", 0, started_ns);
+    } else if (fd == event_rb_fd) {
+        /* The common bounded drain below handles this readiness. Doing
+         * it here as well would spend two callback budgets per pass. */
+    } else if (fd == d->signal_fd) {
+        started_ns = pgwt_debug_block_begin(d);
+        handle_signal(d);
+        pgwt_debug_block_end(d, "signal_handler", 0, started_ns);
+    } else if (pgwt_escalation_is_timer_fd(d, fd)) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_escalation_on_timer(d);
+        pgwt_debug_block_end(d, "escalation_timer_handler", 0,
+                             started_ns);
+    } else if (d->control) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_control_handle_fd(d->control, fd);
+        pgwt_debug_block_end(d, "control_handler", 0, started_ns);
+    }
+}
+
 int pgwt_daemon_run(struct pgwt_daemon *d)
 {
     struct epoll_event events[8];
@@ -1899,38 +1972,8 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
             return -1;
         }
         pgwt_sweep_bootstrap_backends(d);
-        for (int i = 0; i < n; i++) {
-            if (events[i].data.fd == d->timer_fd) {
-                started_ns = pgwt_debug_block_begin(d);
-                pgwt_handle_timer(d);
-                pgwt_debug_block_end(d, "timer_handler", 0, started_ns);
-            } else if (d->sample_timer_fd >= 0
-                       && events[i].data.fd == d->sample_timer_fd) {
-                started_ns = pgwt_debug_block_begin(d);
-                handle_sample_timer(d);
-                pgwt_debug_block_end(d, "sample_timer_handler", 0, started_ns);
-            } else if (events[i].data.fd == rb_fd) {
-                started_ns = pgwt_debug_block_begin(d);
-                pgwt_consume_lifecycle_ring(d);
-                pgwt_debug_block_end(d, "lifecycle_ring_consume", 0, started_ns);
-            } else if (events[i].data.fd == event_rb_fd) {
-                /* The common bounded drain below handles this readiness. Doing
-                 * it here as well would spend two callback budgets per pass. */
-            } else if (events[i].data.fd == d->signal_fd) {
-                started_ns = pgwt_debug_block_begin(d);
-                handle_signal(d);
-                pgwt_debug_block_end(d, "signal_handler", 0, started_ns);
-            } else if (pgwt_escalation_is_timer_fd(d, events[i].data.fd)) {
-                started_ns = pgwt_debug_block_begin(d);
-                pgwt_escalation_on_timer(d);
-                pgwt_debug_block_end(d, "escalation_timer_handler", 0,
-                                     started_ns);
-            } else if (d->control) {
-                started_ns = pgwt_debug_block_begin(d);
-                pgwt_control_handle_fd(d->control, events[i].data.fd);
-                pgwt_debug_block_end(d, "control_handler", 0, started_ns);
-            }
-        }
+        for (int i = 0; i < n; i++)
+            dispatch_ready_fd(d, events[i].data.fd, rb_fd, event_rb_fd);
 
         /* Drain event ringbuf on every iteration (poll-based with NO_WAKEUP) */
         if (d->event_rb || d->exact_perf) {

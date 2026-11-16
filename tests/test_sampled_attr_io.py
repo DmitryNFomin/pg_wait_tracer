@@ -449,22 +449,7 @@ int main(void)
     print("sampled_attr_failure_diagnostic_opt_in_preserves_outcomes_errno_and_incarnation: PASS")
 
 
-def main():
-    failure_diagnostic_case()
-    perf_gate_cases()
-    pg13_live_pure_cases()
-    pg13_recorded_sample_case()
-    writer_group_failure_case()
-    live_setup_cases()
-    late_promotion_setup_case()
-    unsupported_version_cases()
-    cc = shlex.split(os.environ.get("CC", "cc"))
-    flags = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
-             f"-I{ROOT / 'src'}"] + shlex.split(os.environ.get("CFLAGS", ""))
-    if os.uname().sysname == "Darwin":
-        flags += ["-include", str(ROOT / "demos/replay-compat.h")]
-        flags += ["-include", str(ROOT / "tests/sample_weight_compat.h")]
-    source = (ROOT / "src/backend_status_layout.c").read_text()
+def registry_sources():
     backend = (ROOT / "src/backend.c").read_text()
     sampler = (ROOT / "src/sampler.c").read_text()
     # Keep the merged attach failure classification in the compiled lifecycle,
@@ -559,6 +544,28 @@ static int record_registry_tick(struct pgwt_daemon *d, uint64_t tick_ts)
 }
 """
     assert 'cjson_add_uint64(root, "sampled_attr_tick_idle_samples_total",' in (ROOT / "src/control.c").read_text()
+    return lifecycle, policy, registry, recording, interval
+
+
+def main():
+    failure_diagnostic_case()
+    perf_gate_cases()
+    pg13_live_pure_cases()
+    pg13_recorded_sample_case()
+    writer_group_failure_case()
+    live_setup_cases()
+    late_promotion_setup_case()
+    unsupported_version_cases()
+    cc = shlex.split(os.environ.get("CC", "cc"))
+    flags = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+             f"-I{ROOT / 'src'}"] + shlex.split(os.environ.get("CFLAGS", ""))
+    if os.uname().sysname == "Darwin":
+        flags += ["-include", str(ROOT / "demos/replay-compat.h")]
+        flags += ["-include", str(ROOT / "tests/sample_weight_compat.h")]
+    source = (ROOT / "src/backend_status_layout.c").read_text()
+    backend = (ROOT / "src/backend.c").read_text()
+    sampler = (ROOT / "src/sampler.c").read_text()
+    lifecycle, policy, registry, recording, interval = registry_sources()
     with tempfile.TemporaryDirectory(prefix="pgwt-sampled-io-") as directory:
         tmp = Path(directory)
 
