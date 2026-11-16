@@ -41,6 +41,7 @@ import os
 import pwd
 from pathlib import Path
 import re
+import select
 import signal
 import shlex
 import socket
@@ -348,13 +349,50 @@ def require_pg13_anchor_status(status, *, negative=False):
             "observed anchor was not the successful controlled validation anchor"
 
 
-def start_pg13_perf(daemon_pid, tick_event, trace, stem="perf"):
-    """Record to a regular file: the gate images do not flush a live pipe."""
-    with (trace / (stem + ".stderr")).open("w") as perr:
-        return spawn(["perf", "record", "-q", "-m", str(PG13_PERF_PAGES),
-                      "-p", str(daemon_pid), "-e", VM_EVENTS + "," + tick_event,
-                      "-o", str(trace / (stem + ".data"))],
-                     stdout=subprocess.DEVNULL, stderr=perr)
+PG13_PERF_ACK_SECONDS = 60
+
+
+def start_pg13_perf(daemon_pid, tick_event, trace, stem="perf", ack_seconds=PG13_PERF_ACK_SECONDS):
+    """Record to a regular file: the gate images do not flush a live pipe.
+
+    Return only once perf itself acknowledges that its events are enabled.
+    `perf record -p` with a 64 MiB ring took 0.2 s to over 1 s to attach live
+    (Ubuntu 6.8 and EL8 4.18 VMs), so a fixed warm-up could open a window
+    perf had not yet seen. perf starts disabled (-D -1); `enable` on its
+    control FIFO is acknowledged after the events are enabled, i.e. after
+    every thread is attached. No ack within the bound (or perf exiting)
+    fails: attachment is proven, never assumed.
+    """
+    ctl, ack = trace / (stem + ".ctl"), trace / (stem + ".ack")
+    os.mkfifo(ctl)
+    os.mkfifo(ack)
+    # Hold both ends open first: perf opens the ack FIFO write-only (blocking
+    # until a reader exists), and a queued `enable` survives until it reads.
+    ctl_fd = os.open(ctl, os.O_RDWR | os.O_NONBLOCK)
+    ack_fd = os.open(ack, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        with (trace / (stem + ".stderr")).open("w") as perr:
+            perf = spawn(["perf", "record", "-q", "-m", str(PG13_PERF_PAGES),
+                          "-D", "-1", "--control", f"fifo:{ctl},{ack}",
+                          "-p", str(daemon_pid), "-e", VM_EVENTS + "," + tick_event,
+                          "-o", str(trace / (stem + ".data"))],
+                         stdout=subprocess.DEVNULL, stderr=perr)
+        os.write(ctl_fd, b"enable\n")
+        reply = b""
+        deadline = time.monotonic() + ack_seconds
+        while b"ack\n" not in reply:
+            assert perf.poll() is None, \
+                f"perf exited {perf.returncode} before acknowledging enable: " + \
+                (trace / (stem + ".stderr")).read_text()
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"perf did not acknowledge enable within {ack_seconds} s; attachment unproven"
+            ready, _, _ = select.select([ack_fd], [], [], min(remaining, .1))
+            if ready:
+                reply += os.read(ack_fd, 64)
+        return perf
+    finally:
+        os.close(ctl_fd)
+        os.close(ack_fd)
 
 
 def decode_pg13_perf(perf, tick_event, trace, stem="perf"):
@@ -440,11 +478,12 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
             tick_event = event  # delete only after a successful registration
             # Prove attachment in a separate fixed probe window before opening
             # the workload. Neither perf image flushes the former live pipe.
+            # The window starts at perf's own enable ack, not at its launch.
             perf = start_pg13_perf(daemon.pid, tick_event, trace, "perf.attach")
             time.sleep(1)  # attachment probe, independent of workload assertions
             decode_pg13_perf(perf, tick_event, trace, "perf.attach")
             spanning_before = metrics(trace)
-            perf = start_pg13_perf(daemon.pid, tick_event, trace)
+            perf = start_pg13_perf(daemon.pid, tick_event, trace)  # returns once enabled
             time.sleep(1)  # recorder warm-up before the measured tick census
             assert perf.poll() is None, "PG13 perf stopped before measurement"
             before = metrics(trace)

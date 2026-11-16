@@ -19,6 +19,7 @@ from collections import Counter
 from pathlib import Path
 import sys
 import tempfile
+import time
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -248,6 +249,55 @@ def recorded_file_vm_cases():
           "50 wait-shaped calls; Ubuntu 20 verbatim tick lines PASS")
 
 
+def fake_perf_ack(ctl, ack, reply=b"ack\n"):
+    """Stand-in perf: read `enable` from the control FIFO, then acknowledge."""
+    import os
+    import threading
+    def run():
+        fd = os.open(ctl, os.O_RDONLY | os.O_NONBLOCK)
+        data = b""
+        try:
+            for _ in range(500):
+                try:
+                    data += os.read(fd, 64)
+                except BlockingIOError:
+                    pass
+                if b"enable\n" in data:
+                    break
+                time.sleep(.01)
+        finally:
+            os.close(fd)
+        if b"enable\n" in data and reply:
+            out = os.open(ack, os.O_WRONLY | os.O_NONBLOCK)
+            os.write(out, reply)
+            os.close(out)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+def perf_ack_cases():
+    """Attachment is proven by perf's own enable ack, never by elapsed time."""
+    import test_sampler_batch_live as live
+    for reply, exits, reason in ((b"ack\n", False, None), (b"", False, "did not acknowledge enable"),
+                                 (b"", True, "exited 1 before acknowledging enable")):
+        with tempfile.TemporaryDirectory(prefix="pgwt866-ack-test-") as tmp:
+            trace = Path(tmp)
+            proc = mock.Mock(returncode=1 if exits else None)
+            proc.poll.side_effect = lambda: proc.returncode
+            def spawn(command, **kwargs):
+                fake_perf_ack(trace / "perf.ctl", trace / "perf.ack", reply)
+                return proc
+            with mock.patch.object(live, "spawn", side_effect=spawn):
+                try:
+                    perf = live.start_pg13_perf(7473, "g:tick", trace, ack_seconds=1)
+                except AssertionError as error:
+                    assert reason and reason in str(error), (reason, str(error))
+                else:
+                    assert reason is None and perf is proc
+    print("perf_ack_cases: enable acknowledged; no ack and early exit both fail PASS")
+
+
 def file_capture_cases():
     """The recorder exposes nothing until stopped; decoding must follow wait."""
     import test_sampler_batch_live as live
@@ -278,8 +328,12 @@ def file_capture_cases():
                 assert command[command.index("-o") + 1] == str(trace / "perf.attach.data")
                 assert command[command.index("-e") + 1] == live.VM_EVENTS + "," + event
                 assert command[command.index("-p") + 1] == "7473"
+                assert command[command.index("-D") + 1] == "-1"
+                assert command[command.index("--control") + 1] == \
+                    f"fifo:{trace / 'perf.attach.ctl'},{trace / 'perf.attach.ack'}"
                 assert kwargs["stdout"] == live.subprocess.DEVNULL and "stdin" not in kwargs
                 kwargs["stderr"].write(record_error)
+                fake_perf_ack(trace / "perf.attach.ctl", trace / "perf.attach.ack")
                 return proc
             def decode(command, **kwargs):
                 assert order == [("signal", live.signal.SIGINT), "wait"]
@@ -530,6 +584,7 @@ def main():
     recorded_vm_script_cases()
     recorded_file_vm_cases()
     file_capture_cases()
+    perf_ack_cases()
     pg13_selection_cases()
     cohort_file_cases()
     postmaster_name_cases()
