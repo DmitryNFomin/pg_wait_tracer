@@ -47,11 +47,50 @@ fail qualification. The offset is never inferred from successful attribution.
 All 200 PIDs need a nonzero-query-id sample at T or earlier; T+1 is RED.
 There is no nominal-period or elapsed-time bound. The churn counter window
 starts before the first connection and ends when the last one retires from
-enrollment. `churn.metrics.json` retains both counter snapshots. Its
-`sampled_attr_tick_read_failures_total` delta must not exceed the number of
-distinct observed `(pid, tick)` samples whose tick starts before that PID's E,
-including query-id-zero samples. This uses the perf marker, even if E falls
-between that marker and the sampler's timestamp read. The summary reports both quantities.
+enrollment. `churn.metrics.json` retains both counter snapshots. Every failure
+must have a daemon outcome keyed by PID, `/proc` start-time incarnation, raw
+monotonic tick stamp and phase (`first` or `gate`). The cumulative failure
+sequence must reconcile exactly with that counter window; gate outcomes also
+reconcile with `cmd_gate_order_read_failed_total`. Missing, duplicated or
+malformed evidence is RED.
+
+The existing `PGWT_DEBUG_SAMPLED_ATTR_SHADOW` was checked at every use in
+`src/sampler.c`: it controls diagnostic printing, but its invalid-row message
+has only PID/errno and it does not print failed gate re-reads. It cannot supply
+this evidence. The arm instead enables `PGWT_DEBUG_SAMPLED_ATTR_FAILURES`,
+off by default and read once at startup. Its wrapper makes the same batch call
+with the same arguments and counter, copies cached incarnation before a reader
+can be retired, brackets that call with monotonic timestamps, prints one line
+per counted failure, and preserves errno. It adds no target reads or retries.
+The portable C case `sampled_attr_failure_diagnostic_opt_in_preserves_outcomes_errno_and_incarnation`
+compiles that production wrapper with injected I/O and checks both phases,
+retired identities, unchanged results/counters/errno, and zero diagnostic clock
+reads when disabled.
+
+The new (d) checks have no elapsed-time allowance or offsetting between classes:
+
+- (d1) Every cohort PID has a persisted sample in every observed tick between
+  its first and last sample. A hole is independently RED.
+- (d2) An individually identified cohort failure is pre-eligibility only before
+  that PID's T. It is terminal only when its read **begins** at/after an observed
+  statement return or EXIT. The PQexec return stamp is a conservative upper
+  bound on statement end; a read overlapping it stays unexplained. EXIT must
+  have an unambiguous recorded fork for the same PID/incarnation. Cached row
+  invalidation or errno alone does not prove a cleared/reused row; this
+  diagnostic does not expose row contents, so those cases require end/EXIT
+  evidence. No inferred exit allowance is granted.
+- (d3) Eligible cohort failures and all non-cohort failures are RED. Incarnation
+  mismatches and unclassified outcomes are separately counted and RED. Unused
+  pre-eligibility or terminal exemptions cannot cancel any of them. The summary
+  retains every classified outcome and counts each class and phase separately.
+
+The perf recorder uses system-wide mode for `sched:sched_process_fork` and
+`sched:sched_process_exit`: `-p daemon` alone cannot record postmaster forks.
+Readv and tick events retain filters for all existing daemon threads. Every
+scheduler loss is subject to the same lossless rule as readv/ticks. Each cohort
+PID requires exactly one observed postmaster fork before E; the summary's
+`late_backend_timeline` reports fork monotonic time, E wall time and monotonic
+bounds, T, first attribution tick, and extra ticks for every late PID.
 Computed route, zero scan fallbacks, at most two discovery calls per tick,
 zero quiet-window failures, and rejection of every perf loss remain required.
 The pre-fix control qualifies only with valid timing evidence and an explicit
@@ -60,22 +99,26 @@ missing/late attribution RED; clock or counter failures cannot substitute.
 Every run retains its evidence directory, including default `/tmp` directories
 and failed runs. Inspect `churn.starts.json`, `churn.samples.json`,
 `perf.script.txt`, `clock-alignment.json`, `churn.metrics.json`, and
-`summary.json` together. A setup failure before churn cannot qualify a run.
+`churn.failures.json`, `lifecycle.json`, and `summary.json` together. A setup failure before churn cannot qualify a run.
 Mac cases `pg13_at_T_passes`, `pg13_at_T_plus_1_RED`,
 `pg13_missing_attribution_RED`, `pg13_alignment_unavailable_or_ambiguous_RED`,
-and `pg13_churn_failures_above_pre_E_ticks_RED` run on a synthetic jittered
+and `pg13_unlocated_failures_RED` run on a synthetic jittered
 cadence and both verbatim EL8/Ubuntu tick fixtures above. Their E/sample
 witnesses are hand-placed synthetic inputs; the historical live runs did not
 record statement E and cannot retrospectively qualify this gate.
+Additional portable cases cover eligible/background RED, holes, both phases,
+incarnation mismatch, terminal evidence, counter reconciliation, non-offsetting
+classes, and late-PID timelines. See `../pg13_live5/README.md` for the newer
+recorded E/sample regression data.
 
 Lead box commands, from the built candidate tree on each PG13 box, with the
 unmodified `0b1d7dd6` tracer built at `/tmp/0b1d7dd6/pg_wait_tracer`:
 
 ```sh
 # Ubuntu 6.8
-sudo python3 -B tests/test_sampler_batch_live.py --pg13-far-rows --master-tracer /tmp/0b1d7dd6/pg_wait_tracer --require-negative-control --evidence-dir /tmp/p866-tick-gate-ubuntu-$(date -u +%Y%m%dT%H%M%SZ)
+sudo python3 -B tests/test_sampler_batch_live.py --pg13-far-rows --master-tracer /tmp/0b1d7dd6/pg_wait_tracer --require-negative-control --evidence-dir /tmp/p866-failure-gate-ubuntu-$(date -u +%Y%m%dT%H%M%SZ)
 # EL8 4.18
-sudo python3 -B tests/test_sampler_batch_live.py --pg13-far-rows --master-tracer /tmp/0b1d7dd6/pg_wait_tracer --require-negative-control --evidence-dir /tmp/p866-tick-gate-el8-$(date -u +%Y%m%dT%H%M%SZ)
+sudo python3 -B tests/test_sampler_batch_live.py --pg13-far-rows --master-tracer /tmp/0b1d7dd6/pg_wait_tracer --require-negative-control --evidence-dir /tmp/p866-failure-gate-el8-$(date -u +%Y%m%dT%H%M%SZ)
 ```
 
 Each command runs the candidate and pre-fix control with the same gate and

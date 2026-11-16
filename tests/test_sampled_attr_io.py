@@ -367,7 +367,90 @@ def unsupported_version_cases():
     print("PG14-16: real runner branch EXCLUDED under --require-live; direct test exits before cluster/libpq")
 
 
+def failure_diagnostic_case():
+    """Compile the actual sampler wrapper: opt-in cannot change read outcomes."""
+    from sampler_batch_perf import parse_attr_failures
+    sampler = (ROOT / "src/sampler.c").read_text()
+    assert sampler.count('getenv("PGWT_DEBUG_SAMPLED_ATTR_FAILURES")') == 1
+    poll = function(sampler, "pgwt_sampler_poll")
+    assert "sampler_read_attr_batch(d, attr_rows, (size_t)n, false, tick_ts);" in poll
+    assert "sampler_read_attr_batch(d, attr_rows, (size_t)n, true, tick_ts);" in poll
+    source = r'''#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <errno.h>
+#include <sys/types.h>
+#define MAX_BACKENDS 1024
+struct pgwt_pgbs_reader { uint64_t start_time; };
+struct pgwt_pgbs_batch_target { struct pgwt_pgbs_reader *reader; pid_t pid; int rc, error; };
+struct pgwt_sampler { bool debug_sampled_attr_failures; };
+struct pgwt_daemon {
+    struct pgwt_sampler *sampler;
+    pid_t postmaster_pid;
+    int backend_status_layout;
+    struct { uint64_t sampled_attr_tick_read_failures_total; } counters;
+};
+static int calls, clocks;
+static uint64_t mono_ns(void) { return 1000 + (uint64_t)++clocks; }
+static void pgwt_pgbs_read_batch(pid_t pid, const int *layout,
+    struct pgwt_pgbs_batch_target *rows, size_t n, bool gate, uint64_t *total)
+{
+    assert(pid == 42 && *layout == 13 && n == 4);
+    (void)gate; calls++;
+    for (size_t i = 0; i < n; i++) {
+        rows[i].rc = i == 1 ? 0 : -1;
+        rows[i].error = rows[i].rc ? 11 : 0;
+        if (rows[i].reader && rows[i].rc < 0) {
+            (*total)++;
+            rows[i].reader->start_time = 0; /* real acceptance may retire it */
+        }
+    }
+    errno = EFAULT;
+}
+''' + function(sampler, "sampler_read_attr_batch") + r'''
+int main(void)
+{
+    struct pgwt_sampler sampler = {0};
+    struct pgwt_daemon d = {.sampler=&sampler, .postmaster_pid=42,
+        .backend_status_layout=13, .counters={10}};
+    struct pgwt_pgbs_reader readers[4] = {{789}, {790}, {0}, {792}};
+    struct pgwt_pgbs_batch_target rows[4] = {
+        {&readers[0],123,0,0}, {&readers[1],124,0,0}, {NULL,125,0,0}, {&readers[3],126,0,0}};
+    sampler_read_attr_batch(&d, rows, 4, false, 1000);
+    assert(calls == 1 && clocks == 0 && errno == EFAULT);
+    assert(d.counters.sampled_attr_tick_read_failures_total == 12);
+    sampler.debug_sampled_attr_failures = true;
+    d.counters.sampled_attr_tick_read_failures_total = 10;
+    for (int phase = 0; phase < 2; phase++) {
+        readers[0].start_time = 789; readers[3].start_time = 792;
+        sampler_read_attr_batch(&d, rows, 4, phase != 0, 1000);
+        assert(rows[0].rc == -1 && rows[1].rc == 0 && rows[2].rc == -1 && rows[3].rc == -1);
+        assert(errno == EFAULT);
+    }
+    assert(calls == 3 && clocks == 4 && d.counters.sampled_attr_tick_read_failures_total == 14);
+    return 0;
+}
+'''
+    with tempfile.TemporaryDirectory(prefix="pgwt-failure-diagnostic-") as tmp:
+        path = Path(tmp) / "diagnostic.c"
+        path.write_text(source)
+        binary = path.with_suffix("")
+        compiled = run(shlex.split(os.environ.get("CC", "cc")) +
+                       ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(path), "-o", str(binary)])
+        assert compiled.returncode == 0, compiled.stderr
+        result = run([str(binary)])
+        assert result.returncode == 0, result.stderr
+        rows = parse_attr_failures(result.stderr, 10, 14)
+        assert [(r["pid"], r["incarnation"], r["phase"]) for r in rows] == \
+               [(123, 789, "first"), (126, 792, "first"), (123, 789, "gate"), (126, 792, "gate")]
+        assert all(r["tick_ns"] == 1000 for r in rows)
+    print("sampled_attr_failure_diagnostic_opt_in_preserves_outcomes_errno_and_incarnation: PASS")
+
+
 def main():
+    failure_diagnostic_case()
     perf_gate_cases()
     pg13_live_pure_cases()
     pg13_recorded_sample_case()

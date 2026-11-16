@@ -202,6 +202,7 @@ struct pgwt_sampler {
     uint64_t sample_period_ns;
     uint64_t last_tick_ns;        /* previous tick timestamp (0 = first) */
     bool debug_sampled_attr;      /* environment is read once at start */
+    bool debug_sampled_attr_failures; /* opt-in per-outcome evidence, no extra reads */
 
     /* Scratch buffers sized for MAX_BACKENDS, allocated once. */
     uint32_t     *read_vals;     /* MAX_BACKENDS — wait_event_info per target */

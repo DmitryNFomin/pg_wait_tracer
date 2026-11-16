@@ -56,7 +56,8 @@ import time
 
 from sampler_batch_perf import (CALLS, SUPPORTED_MAJORS, assess_counts, file_io_reds,
                                 parse_summary, assess_pg13_timing, require_pg13_negative_control,
-                                assess_pg13_vm_calls, pg13_vm_diagnostics, parse_vm_trace, VM_EVENTS)
+                                assess_pg13_vm_calls, pg13_vm_diagnostics, parse_vm_trace, VM_EVENTS,
+                                parse_attr_failures, parse_pg13_lifecycle)
 from testutil import find_postmaster
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,7 +74,9 @@ PG13_CHURN = 200
 # 2 tracepoints/call + 1 tick marker and <=256 bytes/event (no stacks):
 # (16*2+1)*100*256 = 844800 bytes/s.
 # 16384 4-KiB pages = 64 MiB per ring, >79 s of that stream (>25 s arm).
-# Only readv is recorded; open/pread/close enrollment storms cannot fill it.
+# Readv/ticks are filtered to the daemon; system-wide fork/exit events are
+# also recorded. Enrollment file I/O cannot fill the ring. Scheduler volume
+# depends on host activity; the lossless rule applies to the entire stream.
 # This is capacity planning, NEVER permission to accept a loss record.
 PG13_PERF_PAGES = 16384
 
@@ -109,7 +112,10 @@ def churn_statement(connections, handle):
     assert len(rows) == 1 and len(rows[0]) == 4, f"missing statement identity: {rows}"
     pid, start, slot = map(int, rows[0][:3])
     assert pid == connections.lib.PQbackendPID(handle) and start > 0 and slot > 0
-    return {"pid": pid, "statement_start_ns": start, "backend_id": slot}
+    return {"pid": pid, "statement_start_ns": start, "backend_id": slot,
+            # A conservative end witness: PQexec has returned the whole result.
+            # It cannot exempt a read that might have preceded statement end.
+            "statement_return_mono_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC)}
 
 
 PG13_CLOCK_READS = 5
@@ -416,12 +422,20 @@ def start_pg13_perf(daemon_pid, tick_event, trace, stem="perf", ack_seconds=PG13
     ctl_fd = os.open(ctl, os.O_RDWR | os.O_NONBLOCK)
     ack_fd = os.open(ack, os.O_RDWR | os.O_NONBLOCK)
     try:
+        # -p daemon alone cannot observe the POSTMASTER's forks. Record
+        # scheduler events system-wide and filter only the daemon events.
+        # Include all existing daemon tids, preserving the former -p scope.
+        tids = sorted(int(path.name) for path in Path(f"/proc/{daemon_pid}/task").iterdir())
+        daemon_filter = " || ".join(f"common_pid == {tid}" for tid in tids)
+        events = []
+        for event in (*VM_EVENTS.split(","), tick_event):
+            events += ["-e", event, "--filter", daemon_filter]
+        events += ["-e", "sched:sched_process_fork", "-e", "sched:sched_process_exit"]
         with (trace / (stem + ".stderr")).open("w") as perr:
             perf = spawn(["perf", "record", "-q", "-m", str(PG13_PERF_PAGES),
                           "--clockid", "mono",
                           "-D", "-1", "--control", f"fifo:{ctl},{ack}",
-                          "-p", str(daemon_pid), "-e", VM_EVENTS + "," + tick_event,
-                          "-o", str(trace / (stem + ".data"))],
+                          "-a", *events, "-o", str(trace / (stem + ".data"))],
                          stdout=subprocess.DEVNULL, stderr=perr)
         os.write(ctl_fd, b"enable\n")
         reply = b""
@@ -483,6 +497,7 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
             initial.open(PG13_INITIAL, "pgwt866_anchor_side")
             initial_rows = {handle: session_evidence(initial, handle) for handle in initial.handles}
             env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
+            env["PGWT_DEBUG_SAMPLED_ATTR_FAILURES"] = "1"
             daemon = spawn(
                 [str(binary), "--pid", str(pm_pid), "--mode", "tiered", "--sample-rate", str(PG13_RATE),
                  "--escalation-budget", "0", "-i", "1", "-q", "-T", str(trace)],
@@ -566,10 +581,17 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
                     time.sleep(delay)
                 churn.open(1, "pgwt866_short")
                 handle = churn.handles[-1]
+                pid = churn.lib.PQbackendPID(handle)
+                # Cached-reader incarnation is /proc stat field 22. Read the
+                # independent witness while the connection is held alive.
+                stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+                incarnation = int(stat[19])
+                assert incarnation > 0
                 try:
                     alignment["probes"].append(clock_probe())
                     row = churn_statement(churn, handle)
                     alignment["probes"].append(clock_probe())
+                    row["incarnation"] = incarnation
                     row["distance"] = abs(row["backend_id"] - anchor_id)
                     cohort.append(row)
                     (trace / "churn.starts.json").write_text(json.dumps(cohort, indent=2) + "\n")
@@ -611,7 +633,26 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
             tids = {tid for tid, _ in parsed["ticks"]}
             assert len(tids) == 1, "timing evidence needs one sampler tick thread"
             ticks = [ts for _, ts in parsed["ticks"]]
-            result = assess_pg13_timing(cohort, samples, ticks, alignment, churn_failures)
+            lifecycle = parse_pg13_lifecycle(text, perf_errors, postmaster=pm_pid)
+            (trace / "lifecycle.json").write_text(json.dumps(lifecycle, indent=2) + "\n")
+            # A pre-fix binary has no new diagnostic. It still must reach (c)
+            # with valid timing evidence; missing diagnostics cannot stand in
+            # for missing/late attribution in require_pg13_negative_control.
+            failure_errors = []
+            try:
+                failures = parse_attr_failures((trace / "daemon.stderr").read_text(),
+                    churn_before["sampled_attr_tick_read_failures_total"],
+                    quiet_before["sampled_attr_tick_read_failures_total"])
+            except AssertionError as error:
+                failures = []
+                failure_errors.append(str(error))
+            (trace / "churn.failures.json").write_text(json.dumps(failures, indent=2) + "\n")
+            gate_failures = (quiet_before["cmd_gate_order_read_failed_total"] -
+                             churn_before["cmd_gate_order_read_failed_total"])
+            result = assess_pg13_timing(cohort, samples, ticks, alignment, churn_failures,
+                failures=failures, lifecycle=lifecycle, gate_read_failures=gate_failures)
+            result["churn_failure_errors"].extend(failure_errors)
+            result["timing_errors"].extend(failure_errors)
             # The pre-fix control retains lossless parsing, but no syscall gate
             # can substitute for its required first-attribution timing RED.
             syscall = pg13_vm_diagnostics(text, perf_errors) if negative else None
@@ -915,7 +956,8 @@ def main():
                        "eligibility": "statement_timestamp(); first observed tick starting at or after E",
                        "perf_clock": "CLOCK_MONOTONIC",
                        "quiet_window_s": 5, "negative_control_revision": "0b1d7dd6",
-                       "perf_pages": PG13_PERF_PAGES, "perf_events": VM_EVENTS,
+                       "perf_pages": PG13_PERF_PAGES,
+                       "perf_events": VM_EVENTS + ",sched:sched_process_fork,sched:sched_process_exit",
                        "perf_tick_marker": "pgwt_sampler_poll symbol-entry uprobe"},
               "master_tracer": str(args.master_tracer) if args.master_tracer else None,
               "require_negative_control": args.require_negative_control}, sort_keys=True))

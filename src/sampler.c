@@ -799,6 +799,8 @@ int pgwt_sampler_start(struct pgwt_daemon *d)
     s->health.healthy = 1;
     s->qid_batch_supported = -1;
     s->debug_sampled_attr = getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW") != NULL;
+    s->debug_sampled_attr_failures =
+        getenv("PGWT_DEBUG_SAMPLED_ATTR_FAILURES") != NULL;
 
     /* qid dump buffers sized to the loaded exact_attr_map capacity.
      * shrunk via PGWT_STATE_MAP_ENTRIES in test builds). */
@@ -1060,6 +1062,45 @@ static void resolve_pg13_sampled_attr(struct pgwt_daemon *d,
         backends[i]->pgbs_addr = backends[i]->sampled_reader.status_addr;
 }
 
+/* Mirror exactly the batch counter's population. Capture incarnation BEFORE
+ * the batch can retire a stale reader. No extra target reads, retries or policy
+ * changes: the opt-in only copies cached identities, brackets the existing
+ * call and prints its final outcomes (preserving errno). Counter sequence
+ * numbers join diagnostics to control-socket snapshots without clock races. */
+static void sampler_read_attr_batch(struct pgwt_daemon *d,
+    struct pgwt_pgbs_batch_target *rows, size_t n, bool gate_only,
+    uint64_t tick_ts)
+{
+    uint64_t incarnations[MAX_BACKENDS];
+    bool debug = d->sampler->debug_sampled_attr_failures;
+    uint64_t before = 0;
+    if (debug) {
+        for (size_t i = 0; i < n; i++)
+            incarnations[i] = rows[i].reader ? rows[i].reader->start_time : 0;
+        before = mono_ns();
+    }
+    pgwt_pgbs_read_batch(d->postmaster_pid, &d->backend_status_layout,
+        rows, n, gate_only, &d->counters.sampled_attr_tick_read_failures_total);
+    if (debug) {
+        int saved_errno = errno;
+        uint64_t after = mono_ns();
+        uint64_t sequence = d->counters.sampled_attr_tick_read_failures_total;
+        for (size_t i = 0; i < n; i++)
+            if (rows[i].reader && rows[i].rc < 0) sequence--;
+        for (size_t i = 0; i < n; i++) {
+            if (!rows[i].reader || rows[i].rc >= 0) continue;
+            fprintf(stderr, "SAMPLED-ATTR-FAILURE: pid=%d incarnation=%llu "
+                "tick_ns=%llu phase=%s read_begin_ns=%llu read_end_ns=%llu "
+                "sequence=%llu error=%d\n", rows[i].pid,
+                (unsigned long long)incarnations[i],
+                (unsigned long long)tick_ts, gate_only ? "gate" : "first",
+                (unsigned long long)before, (unsigned long long)after,
+                (unsigned long long)++sequence, rows[i].error);
+        }
+        errno = saved_errno;
+    }
+}
+
 static void finish_sampled_attr(struct pgwt_backend *be, int rc, int error,
                                 uint64_t tick_ts)
 {
@@ -1277,9 +1318,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     pgwt_pgbs_maps_cache_reset(&maps_cache);
     int target_count = n;
     if (tick_source_enabled)
-        pgwt_pgbs_read_batch(d->postmaster_pid, &d->backend_status_layout,
-                              attr_rows, (size_t)n, false,
-                              &d->counters.sampled_attr_tick_read_failures_total);
+        sampler_read_attr_batch(d, attr_rows, (size_t)n, false, tick_ts);
     for (n = 0; n < target_count; n++) {
         struct pgwt_backend *be = backend_rows[n];
         const bool target_tick_enabled = tick_enabled[n];
@@ -1510,9 +1549,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                                              targets[i].cmd_open)
                 ? targets[i].attr_reader : NULL;
         }
-        pgwt_pgbs_read_batch(d->postmaster_pid, &d->backend_status_layout,
-                              attr_rows, (size_t)n, true,
-                              &d->counters.sampled_attr_tick_read_failures_total);
+        sampler_read_attr_batch(d, attr_rows, (size_t)n, true, tick_ts);
         struct sampler_gate_batch gate_batch = {d, attr_rows};
         struct pgwt_sampler_recheck_stats rs;
         pgwt_sampler_recheck_cmd_gate(targets, s->read_vals, s->read_valid, n,

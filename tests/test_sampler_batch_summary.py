@@ -26,7 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sampler_batch_perf import (FILE_IO_PER_TICK_BOUND, assess_counts, file_io_reds,  # noqa: E402
                                 parse_summary, parse_vm_calls, parse_vm_trace,
                                 assess_pg13_vm_calls, pg13_vm_diagnostics,
-                                assess_pg13_timing, require_pg13_negative_control)
+                                assess_pg13_timing, require_pg13_negative_control,
+                                parse_attr_failures, parse_pg13_lifecycle)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sampler_batch"
 CLEAN = {"open": 0, "openat": 6 * 210, "pread64": 2 * 210, "close": 7 * 210,
@@ -41,7 +42,8 @@ def pg13_timing_inputs(ticks):
     """
     offset = 1_790_000_000_000_000_000
     cohort = [{"pid": 1000 + i, "statement_start_ns": ticks[1] + offset,
-               "backend_id": i + 1} for i in range(200)]
+               "backend_id": i + 1, "incarnation": 5000 + i,
+               "statement_return_mono_ns": ticks[-1] - 100} for i in range(200)]
     samples = [{"pid": row["pid"], "timestamp_ns": ticks[1] + offset + 100,
                 "monotonic_ns": ticks[1] + 100, "query_id": 42} for row in cohort]
     alignment = {"perf_clock": "CLOCK_MONOTONIC", "probes": [
@@ -78,11 +80,11 @@ def pg13_observed_tick_cases():
         assert not delayed_e["timing_errors"] and set(delayed_e["eligible_tick"].values()) == {2}
         # E can fall between the marker and the sampler's timestamp read.
         # Those observations still belong to the tick that STARTED before E.
-        pre_e_tick = assess_pg13_timing(between, samples, ticks, alignment, 200)
+        pre_e_tick = assess_pg13_timing(between, samples, ticks, alignment, 0)
         assert not pre_e_tick["timing_errors"] and pre_e_tick["cohort_pre_e_ticks"] == 200
         # A nonzero sample even before E satisfies 'at T or earlier'.
         early = [dict(samples[0], monotonic_ns=ticks[0] + 100)] + samples[1:]
-        assert not assess_pg13_timing(cohort, early, ticks, alignment, 1)["timing_errors"]
+        assert not assess_pg13_timing(cohort, early, ticks, alignment, 0)["timing_errors"]
         late = samples[:-1] + [dict(samples[-1], monotonic_ns=ticks[2] + 100)]
         red = assess_pg13_timing(cohort, late, ticks, alignment, 0)
         assert red["late_attribution_ticks"] == {1199: 1}
@@ -114,22 +116,21 @@ def pg13_observed_tick_cases():
         red = assess_pg13_timing(cohort, samples, ticks, dict(alignment, probes=probes), 0)
         assert "ambiguous at statement start" in red["evidence_errors"][0]
         print(f"pg13_alignment_unavailable_or_ambiguous_RED [{label}]: PASS")
-        # Two copies of the same pre-E pid/tick are ONE allowed failure;
-        # an unattributed pre-E point stays counted as promised.
+        # Pre-E successes are diagnostic, never a pool of failure allowances.
         pre_e = dict(samples[0], query_id=0, monotonic_ns=ticks[0] + 100)
         with_pre_e = [pre_e, pre_e, *samples]
-        at_bound = assess_pg13_timing(cohort, with_pre_e, ticks, alignment, 1)
+        at_bound = assess_pg13_timing(cohort, with_pre_e, ticks, alignment, 0)
         assert not at_bound["timing_errors"] and at_bound["cohort_pre_e_ticks"] == 1
         red = assess_pg13_timing(cohort, with_pre_e, ticks, alignment, 2)
-        assert red["churn_read_failures"] == 2 and red["cohort_pre_e_ticks"] == 1
-        assert red["churn_failure_errors"] == ["churn read failures=2 > cohort pre-E ticks=1"]
+        assert red["failure_class_counts"]["unclassified"] == 2
+        assert red["churn_failure_errors"]
         try:
             require_pg13_negative_control(red)
         except AssertionError as error:
             assert "did not redden first attribution" in str(error)
         else:
             raise AssertionError("failure counter substituted for a negative-control attribution RED")
-        print(f"pg13_churn_failures_above_pre_E_ticks_RED [{label}]: PASS")
+        print(f"pg13_unlocated_failures_RED [{label}]: PASS")
         # First observation wins; changing the wall anchor cannot hide T+1.
         duplicates = samples + [dict(samples[0], monotonic_ns=ticks[2] + 100)]
         assert assess_pg13_timing(cohort, duplicates, ticks, alignment, 0) == green
@@ -141,13 +142,156 @@ def pg13_observed_tick_cases():
             assert assess_pg13_timing(cohort, invalid, ticks, alignment, 0)["evidence_errors"]
 
 
+def pg13_failure_class_cases():
+    ticks = [1_000_000_000 + i * 10_000_000 for i in range(7)]
+    cohort, samples, alignment = pg13_timing_inputs(ticks)
+    def failure(pid=1000, tick=1, phase="first", **changes):
+        return dict({"pid": pid, "incarnation": 5000 + pid - 1000,
+                     "tick_ns": ticks[tick] + 1, "phase": phase,
+                     "read_begin_ns": ticks[tick] + 2, "read_end_ns": ticks[tick] + 3}, **changes)
+    def assess(failures, rows=cohort, points=samples, **kwargs):
+        return assess_pg13_timing(rows, points, ticks, alignment, len(failures),
+                                  failures=failures, **kwargs)
+    for phase in ("first", "gate"):
+        pre = failure(tick=0, phase=phase)
+        result = assess([pre])
+        assert not result["timing_errors"] and result["failure_class_counts"]["pre_eligibility"] == 1
+        assert result["failure_phase_counts"][phase] == 1
+        terminal_rows = [dict(row, statement_return_mono_ns=ticks[2]) for row in cohort]
+        terminal = failure(tick=2, phase=phase)
+        result = assess([terminal], rows=terminal_rows)
+        assert not result["timing_errors"] and result["failure_class_counts"]["terminal"] == 1
+        assert result["classified_failures"][0]["terminal_evidence"] == "statement_return"
+        eligible = failure(phase=phase)
+        result = assess([eligible])
+        assert result["failure_class_counts"]["eligible"] == 1 and result["churn_failure_errors"]
+        assert not result["attribution_errors"]  # (d3) is independent of (c).
+        result = assess([failure(pid=42, phase=phase, incarnation=9000)])
+        assert result["failure_class_counts"]["background"] == 1 and result["churn_failure_errors"]
+        result = assess([failure(phase=phase, incarnation=1)])
+        assert result["failure_class_counts"]["incarnation_mismatch"] == 1 and result["churn_failure_errors"]
+        # No unused exemption can cancel a failure in a different class/phase.
+        exempt = [failure(pid=1001 + i, tick=0, phase=phase) for i in range(100)]
+        result = assess([*exempt, eligible, terminal], rows=terminal_rows)
+        assert result["failure_class_counts"]["pre_eligibility"] == 100
+        assert result["failure_class_counts"]["terminal"] == 1
+        assert result["failure_class_counts"]["eligible"] == 1 and result["timing_errors"]
+    print("pg13_pre_eligibility_terminal_eligible_background_incarnation_classes: PASS")
+    print("pg13_eligible_window_failure_RED; pg13_background_failure_RED; pg13_offsetting_RED: PASS")
+    # A read overlapping the end witness is not proven terminal.
+    rows = [dict(row, statement_return_mono_ns=ticks[1] + 3) for row in cohort]
+    assert assess([failure()], rows=rows)["failure_class_counts"]["eligible"] == 1
+    # errno, a zero/changed cached address, or a claim of a cleared/reused row
+    # alone does not evidence termination: the decoder did not expose that row.
+    for error in (11, 116):
+        assert assess([failure(error=error)])["failure_class_counts"]["eligible"] == 1
+    lifecycle = {"forks": [{"pid": r["pid"], "timestamp_ns": ticks[0] + 10} for r in cohort],
+                 "exits": [{"pid": 1000, "timestamp_ns": ticks[2]}]}
+    result = assess([failure(tick=2)], lifecycle=lifecycle)
+    assert not result["timing_errors"] and result["classified_failures"][0]["terminal_evidence"] == "EXIT"
+    # Ambiguous/reused lifecycle identities cannot supply an EXIT exemption.
+    reused = dict(lifecycle, forks=[*lifecycle["forks"], lifecycle["forks"][0]])
+    assert assess([failure(tick=2)], lifecycle=reused)["evidence_errors"]
+    print("pg13_terminal_requires_individual_end_or_EXIT_evidence: PASS")
+    points = [*samples, dict(samples[0], monotonic_ns=ticks[3] + 100)]
+    result = assess([], points=points)
+    assert result["cohort_sample_holes"] == {1000: [2]} and result["churn_failure_errors"]
+    assert not result["attribution_errors"]
+    print("pg13_sample_hole_RED: PASS")
+    for rows in ([failure(), failure()], [failure(incarnation=0)],
+                 [dict(failure(), read_end_ns=ticks[-1])], [dict(failure(), phase="unknown")]):
+        assert assess(rows)["failure_class_counts"]["unclassified"] and assess(rows)["timing_errors"]
+    assert assess([failure(tick=0)], gate_read_failures=1)["churn_failure_errors"]
+    print("pg13_failure_duplicates_missing_identity_bad_bracket_phase_census_RED: PASS")
+    late = [*samples[:-1], dict(samples[-1], monotonic_ns=ticks[2] + 100)]
+    result = assess([], points=late, lifecycle=lifecycle)
+    detail, = result["late_backend_timeline"]
+    assert detail == {"pid": 1199, "incarnation": 5199, "extra_ticks": 1,
+                      "fork_mono_ns": ticks[0] + 10, "E_wall_ns": cohort[-1]["statement_start_ns"],
+                      "E_mono_bounds_ns": [ticks[1], ticks[1]], "T_tick": 1, "T_mono_ns": ticks[1],
+                      "first_attribution_tick": 2, "first_attribution_mono_ns": ticks[2]}
+    assert "first attribution late" in require_pg13_negative_control(result)
+    print("pg13_late_pid_fork_E_T_first_attribution_report_and_control_RED: PASS")
+
+
+def pg13_failure_parser_cases():
+    line = ("SAMPLED-ATTR-FAILURE: pid=123 incarnation=789 tick_ns=1000 phase=first "
+            "read_begin_ns=1001 read_end_ns=1002 sequence=11 error=11")
+    gate = line.replace("phase=first", "phase=gate").replace("sequence=11", "sequence=12")
+    text = "unrelated warning\n" + line + "\n" + gate + "\n"
+    rows = parse_attr_failures(text, 10, 12)
+    assert [r["phase"] for r in rows] == ["first", "gate"]
+    assert parse_attr_failures(text, 11, 12) == rows[1:]
+    assert parse_attr_failures(text, 12, 12) == []
+    for invalid, before, after in (("", 10, 11), (text + line + "\n", 10, 12),
+                                   (text.replace("incarnation=789 ", ""), 10, 12),
+                                   (text, 12, 11), (gate + "\n" + line, 10, 12)):
+        try:
+            parse_attr_failures(invalid, before, after)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("missing, duplicated or malformed failure evidence accepted")
+    fork = " 42 1.000000001: sched:sched_process_fork: comm=postmaster pid=42 child_comm=postmaster child_pid=123\n"
+    exit_line = " 123 1.050000001: sched:sched_process_exit: comm=postmaster pid=123 prio=120\n"
+    result = parse_pg13_lifecycle(exit_line + fork, postmaster=42)
+    assert result == {"forks": [{"pid": 123, "parent_pid": 42, "timestamp_ns": 1000000001}],
+                      "exits": [{"pid": 123, "timestamp_ns": 1050000001}]}
+    assert not parse_pg13_lifecycle(fork, postmaster=43)["forks"]
+    for invalid in (fork.replace("child_pid=123", "child_pid=?"), fork.replace("1.000000001", "unknown"),
+                    fork + "PERF_RECORD_LOST id=1 lost=0"):
+        try:
+            parse_pg13_lifecycle(invalid)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("malformed/lost scheduler evidence accepted")
+    print("pg13_failure_counter_window_census_and_lossless_fork_exit_parser: PASS")
+
+
+def pg13_live5_recorded_cases():
+    # Recorded E, raw sample stamps, perf markers and independent clock probes.
+    # The old recordings cannot classify individual failures or reconstruct
+    # forks. In particular, an aggregate exit-time pattern is NOT an exemption.
+    for label, failures, gate, pre_e, late in (("ubuntu", 135, 48, 44, {13275: 1}),
+                                               ("el8", 66, 23, 27, {})):
+        recorded = json.loads((FIXTURES / "pg13_live5" / (label + ".json")).read_text())
+        metrics = recorded["metrics"]
+        gate_delta = metrics["after"]["cmd_gate_order_read_failed_total"] - \
+                     metrics["before"]["cmd_gate_order_read_failed_total"]
+        assert metrics["read_failure_delta"] == failures and gate_delta == gate
+        result = assess_pg13_timing(recorded["cohort"], recorded["samples"], recorded["ticks"],
+                                    recorded["alignment"], failures, gate_read_failures=gate_delta)
+        assert not result["evidence_errors"] and result["attributed_sessions"] == 200
+        assert result["cohort_pre_e_ticks"] == pre_e and result["late_attribution_ticks"] == late
+        assert not result["cohort_sample_holes"]
+        assert result["failure_class_counts"] == {"pre_eligibility": 0, "terminal": 0, "eligible": 0,
+            "background": 0, "incarnation_mismatch": 0, "unclassified": failures}
+        assert result["churn_failure_errors"]
+        if late:
+            assert "first attribution late" in require_pg13_negative_control(result)
+            assert result["late_backend_timeline"][0]["fork_mono_ns"] is None
+        # Reconcile old stderr: aggregate counters cannot manufacture identities.
+        try:
+            parse_attr_failures("", metrics["before"]["sampled_attr_tick_read_failures_total"],
+                                metrics["after"]["sampled_attr_tick_read_failures_total"])
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("old recording accepted as attributed failure evidence")
+        print(f"pg13_live5_{label}: 200/200, pre-T={pre_e}, holes=0, first/gate={failures-gate}/{gate}, "
+              f"unclassified={failures} RED, late={late}: PASS")
+
+
 def pg13_statement_and_clock_cases():
     import test_sampler_batch_live as live
     connections = mock.Mock()
     connections.query.return_value = [["123", "1790000000000123000", "2", ""]]
     connections.lib.PQbackendPID.return_value = 123
-    assert live.churn_statement(connections, 7) == {
-        "pid": 123, "statement_start_ns": 1790000000000123000, "backend_id": 2}
+    with mock.patch.object(live.time, "clock_gettime_ns", return_value=2000):
+        assert live.churn_statement(connections, 7) == {
+            "pid": 123, "statement_start_ns": 1790000000000123000, "backend_id": 2,
+            "statement_return_mono_ns": 2000}
     connections.query.assert_called_once_with(7, live.CHURN_SQL)
     assert "statement_timestamp()" in live.CHURN_SQL and "pg_sleep(0.05)" in live.CHURN_SQL
     assert "backend_start" not in live.CHURN_SQL and ";" not in live.CHURN_SQL
@@ -421,7 +565,8 @@ def perf_ack_cases():
             def spawn(command, **kwargs):
                 fake_perf_ack(trace / "perf.ctl", trace / "perf.ack", reply)
                 return proc
-            with mock.patch.object(live, "spawn", side_effect=spawn):
+            with mock.patch.object(live, "spawn", side_effect=spawn), \
+                 mock.patch.object(Path, "iterdir", return_value=iter([Path("7473")])):
                 try:
                     perf = live.start_pg13_perf(7473, "g:tick", trace, ack_seconds=1)
                 except AssertionError as error:
@@ -460,8 +605,12 @@ def file_capture_cases():
                 assert command[:2] == ["perf", "record"]
                 assert command[command.index("--clockid") + 1] == "mono"
                 assert command[command.index("-o") + 1] == str(trace / "perf.attach.data")
-                assert command[command.index("-e") + 1] == live.VM_EVENTS + "," + event
-                assert command[command.index("-p") + 1] == "7473"
+                event_names = [command[i + 1] for i, value in enumerate(command) if value == "-e"]
+                assert event_names == [*live.VM_EVENTS.split(","), event,
+                                       "sched:sched_process_fork", "sched:sched_process_exit"]
+                assert "-a" in command and "-p" not in command
+                assert [command[i + 1] for i, value in enumerate(command) if value == "--filter"] == \
+                       ["common_pid == 7473"] * 3
                 assert command[command.index("-D") + 1] == "-1"
                 assert command[command.index("--control") + 1] == \
                     f"fifo:{trace / 'perf.attach.ctl'},{trace / 'perf.attach.ack'}"
@@ -480,7 +629,8 @@ def file_capture_cases():
                 kwargs["stderr"].write(script_error)
                 return live.subprocess.CompletedProcess(command, 0)
             with mock.patch.object(live, "spawn", side_effect=spawn), \
-                 mock.patch.object(live.subprocess, "run", side_effect=decode):
+                 mock.patch.object(live.subprocess, "run", side_effect=decode), \
+                 mock.patch.object(Path, "iterdir", return_value=iter([Path("7473")])):
                 perf = live.start_pg13_perf(7473, event, trace, "perf.attach")
                 assert not (trace / "perf.attach.data").exists()
                 try:
@@ -714,6 +864,9 @@ def postmaster_name_cases():
 def main():
     pg13_observed_tick_cases()
     pg13_statement_and_clock_cases()
+    pg13_failure_class_cases()
+    pg13_failure_parser_cases()
+    pg13_live5_recorded_cases()
     parser_cases()
     bound_cases()
     recorded_cases()

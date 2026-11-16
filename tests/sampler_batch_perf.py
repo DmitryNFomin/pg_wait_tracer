@@ -258,13 +258,40 @@ def pg13_clock_bounds(alignment):
     return min(lower), max(upper), probes[0]["mono_before_ns"], probes[-1]["mono_after_ns"]
 
 
-def assess_pg13_timing(cohort, samples, ticks, alignment, churn_read_failures):
+def parse_attr_failures(text, before, after):
+    """Join debug outcomes to the EXACT aggregate counter window, not log arrival."""
+    assert type(before) is int and type(after) is int and 0 <= before <= after, \
+        "churn read-failure counter unavailable or moved backwards"
+    pattern = re.compile(r"SAMPLED-ATTR-FAILURE: pid=(\d+) incarnation=(\d+) "
+                         r"tick_ns=(\d+) phase=(first|gate) read_begin_ns=(\d+) "
+                         r"read_end_ns=(\d+) sequence=(\d+) error=(\d+)")
+    records = []
+    for line in text.splitlines():
+        if "SAMPLED-ATTR-FAILURE:" not in line:
+            continue
+        match = pattern.fullmatch(line)
+        assert match, f"malformed attribution failure diagnostic: {line}"
+        keys = ("pid", "incarnation", "tick_ns", "phase", "read_begin_ns",
+                "read_end_ns", "sequence", "error")
+        row = {key: value if key == "phase" else int(value)
+               for key, value in zip(keys, match.groups())}
+        if before < row["sequence"] <= after:
+            records.append(row)
+    assert [r["sequence"] for r in records] == list(range(before + 1, after + 1)), \
+        "failure diagnostics do not reconcile with churn counter window"
+    return records
+
+
+def assess_pg13_timing(cohort, samples, ticks, alignment, churn_read_failures,
+                       *, failures=None, lifecycle=None, gate_read_failures=None):
     """E = SQL statement_timestamp(); T = first observed tick starting >= E.
 
     Every one of 200 backends needs a nonzero-query-id sample at T or earlier.
     No nominal period or elapsed-time allowance participates in this gate.
-    Count distinct observed (pid, tick) samples before E, including query-id 0;
-    only that count can explain churn-window read failures before eligibility.
+    Every failure needs its own pid/incarnation/tick/phase and exemption.
+    Pre-T samples are diagnostic only; they never buy a failure allowance.
+    A client-observed statement return is a conservative upper bound on end:
+    only reads beginning at/after it (or an observed EXIT) are terminal.
     Samples keep their raw monotonic stamp, so rotated file anchors cannot
     move a sample into an earlier tick. The final marker closes the last tick.
     """
@@ -274,6 +301,14 @@ def assess_pg13_timing(cohort, samples, ticks, alignment, churn_read_failures):
     samples = list(samples)
     evidence_errors, attribution_errors, failure_errors = [], [], []
     first, eligible, pre_e, late, missing = {}, {}, set(), {}, []
+    sample_ticks = {pid: set() for pid in starts}
+    holes, classified, late_details = {}, [], []
+    classes = dict.fromkeys(("pre_eligibility", "terminal", "eligible", "background",
+                             "incarnation_mismatch", "unclassified"), 0)
+    phases = dict.fromkeys(("first", "gate"), 0)
+    cohort_by_pid = {row["pid"]: row for row in cohort}
+    lifecycle_supplied = lifecycle is not None
+    lifecycle = lifecycle or {"forks": [], "exits": []}
     try:
         low, high, probe_start, probe_end = pg13_clock_bounds(alignment)
         assert len(ticks) >= 2 and all(a < b for a, b in zip(ticks, ticks[1:])), \
@@ -287,6 +322,10 @@ def assess_pg13_timing(cohort, samples, ticks, alignment, churn_read_failures):
                 f"clock alignment ambiguous at statement start: pid={pid}"
             assert 0 < t < len(ticks) - 1, f"statement start outside closed perf ticks: pid={pid}"
             eligible[pid] = t
+            if lifecycle_supplied:
+                forks = [r["timestamp_ns"] for r in lifecycle["forks"] if r["pid"] == pid]
+                assert len(forks) == 1 and ticks[0] <= forks[0] <= e_low, \
+                    f"missing, reused or out-of-window fork evidence: pid={pid}"
         for row in samples:
             pid = row["pid"]
             if pid not in starts:
@@ -298,6 +337,7 @@ def assess_pg13_timing(cohort, samples, ticks, alignment, churn_read_failures):
             # The perf marker defines a tick's start. A sample stamped a few
             # instructions after that marker still belongs to that same tick,
             # including when E falls between marker and sample timestamp.
+            sample_ticks[pid].add(tick)
             if tick < eligible[pid]:
                 pre_e.add((pid, tick))
             if row["query_id"]:
@@ -312,15 +352,85 @@ def assess_pg13_timing(cohort, samples, ticks, alignment, churn_read_failures):
             attribution_errors.append(f"first attribution missing: pids={missing}")
         if late:
             attribution_errors.append(f"first attribution late: extra observed ticks={late} (required <= 0)")
-        if not isinstance(churn_read_failures, int) or churn_read_failures < 0:
-            evidence_errors.append("churn read-failure counter unavailable or moved backwards")
-        elif churn_read_failures > len(pre_e):
-            failure_errors.append(f"churn read failures={churn_read_failures} > cohort pre-E ticks={len(pre_e)}")
+        for pid, seen in sample_ticks.items():
+            if seen:
+                absent = sorted(set(range(min(seen), max(seen) + 1)) - seen)
+                if absent:
+                    holes[pid] = absent
+        if holes:
+            failure_errors.append(f"cohort sample holes: {holes}")
+        # Failure diagnostics are independently reconciled, with no netting
+        # between phases, backgrounds, incarnations or eligibility classes.
+        failures = [] if failures is None else list(failures)
+        if type(churn_read_failures) is not int or churn_read_failures < 0:
+            failure_errors.append("churn read-failure counter unavailable or moved backwards")
+        elif len(failures) != churn_read_failures:
+            classes["unclassified"] += max(0, churn_read_failures - len(failures))
+            failure_errors.append(f"failure diagnostic census={len(failures)} != counter={churn_read_failures}")
+        identities = set()
+        for failure in failures:
+            result = dict(failure, classification="unclassified")
+            try:
+                pid, incarnation = failure["pid"], failure["incarnation"]
+                assert pid > 0 and incarnation > 0, "missing failure identity"
+                phase = failure["phase"]
+                assert phase in phases, "unknown read phase"
+                phases[phase] += 1
+                stamp, begin, end = (failure[k] for k in ("tick_ns", "read_begin_ns", "read_end_ns"))
+                tick = bisect_right(ticks, stamp) - 1
+                assert 0 <= tick < len(ticks) - 1, "failure outside closed perf ticks"
+                assert ticks[tick] <= stamp <= begin <= end < ticks[tick + 1], "invalid failure read bracket"
+                key = (pid, incarnation, tick, phase)
+                assert key not in identities, "duplicate failure outcome"
+                identities.add(key)
+                result["tick"] = tick
+                if pid not in starts:
+                    result["classification"] = "background"
+                elif incarnation != cohort_by_pid[pid].get("incarnation"):
+                    result["classification"] = "incarnation_mismatch"
+                elif tick < eligible[pid]:
+                    result["classification"] = "pre_eligibility"
+                else:
+                    returned = cohort_by_pid[pid].get("statement_return_mono_ns")
+                    forks = [r["timestamp_ns"] for r in lifecycle["forks"] if r["pid"] == pid]
+                    exits = [r["timestamp_ns"] for r in lifecycle["exits"] if r["pid"] == pid]
+                    # Multiple forks for the pid make a lifecycle exemption
+                    # ambiguous. Do not join a successor's EXIT to this reader.
+                    exit_time = exits[0] if len(forks) == len(exits) == 1 and exits[0] >= forks[0] else None
+                    terminal = [(returned, "statement_return"), (exit_time, "EXIT")]
+                    proof = next(((ts, source) for ts, source in terminal
+                                  if ts is not None and begin >= ts), None)
+                    if proof:
+                        result.update(classification="terminal", terminal_ns=proof[0], terminal_evidence=proof[1])
+                    else:
+                        result["classification"] = "eligible"
+            except (AssertionError, KeyError, TypeError) as error:
+                result.update(classification="unclassified", evidence_error=str(error))
+            classes[result["classification"]] += 1
+            classified.append(result)
+        for name in ("eligible", "background", "incarnation_mismatch", "unclassified"):
+            if classes[name]:
+                failure_errors.append(f"unexplained {name} failures={classes[name]} (required zero)")
+        if gate_read_failures is not None and phases["gate"] != gate_read_failures:
+            failure_errors.append(f"gate failure census={phases['gate']} != counter={gate_read_failures}")
+        for pid, extra in late.items():
+            forks = [r["timestamp_ns"] for r in lifecycle["forks"] if r["pid"] == pid]
+            detail = {"pid": pid, "incarnation": cohort_by_pid[pid].get("incarnation"),
+                      "extra_ticks": extra, "fork_mono_ns": forks[0] if len(forks) == 1 else None,
+                      "E_wall_ns": starts[pid], "E_mono_bounds_ns": [starts[pid] - high, starts[pid] - low],
+                      "T_tick": eligible[pid], "T_mono_ns": ticks[eligible[pid]],
+                      "first_attribution_tick": first[pid], "first_attribution_mono_ns": ticks[first[pid]]}
+            late_details.append(detail)
+            if detail["fork_mono_ns"] is None:
+                failure_errors.append(f"fork evidence unavailable for late pid={pid}")
     return {"churn_sessions": len(starts), "attributed_sessions": len(first),
             "extra_observed_ticks_bound": 0, "first_attribution_tick": first,
             "eligible_tick": eligible, "missing_attribution_pids": missing,
             "late_attribution_ticks": late, "cohort_pre_e_ticks": len(pre_e),
             "churn_read_failures": churn_read_failures, "clock_alignment": alignment,
+            "cohort_sample_holes": holes, "failure_class_counts": classes,
+            "failure_phase_counts": phases, "classified_failures": classified,
+            "late_backend_timeline": late_details,
             "evidence_errors": evidence_errors, "attribution_errors": attribution_errors,
             "churn_failure_errors": failure_errors,
             "timing_errors": evidence_errors + attribution_errors + failure_errors}
@@ -352,6 +462,34 @@ def require_lossless(*streams):
         # a zero count); a loss record is never evidence of syscall absence.
         if LOST.search(stream) or "PERF_RECORD_LOST" in stream:
             raise AssertionError("perf lost events; syscall absence is unproven")
+
+
+def parse_pg13_lifecycle(text, extra_streams=(), *, postmaster=None):
+    """sched events are system-wide: attaching only to the daemon misses PG forks."""
+    require_lossless(text, *extra_streams)
+    lifecycle = {"forks": [], "exits": []}
+    pattern = re.compile(r"^\s*\d+\s+(\d+)\.(\d{1,9}):\s+"
+                         r"sched:sched_process_(fork|exit):\s*(.*)$")
+    for line in text.splitlines():
+        if not re.search(r"sched:sched_process_(?:fork|exit):", line):
+            continue
+        match = pattern.fullmatch(line)
+        assert match, f"unparseable scheduler lifecycle event: {line}"
+        seconds, fraction, kind, body = match.groups()
+        ts = int(seconds) * 1_000_000_000 + int(fraction.ljust(9, "0"))
+        def number(key):
+            field = re.search(r"(?:^|\s)" + key + r"=(\d+)(?=\s|$)", body)
+            assert field, f"missing {key} in scheduler event: {line}"
+            return int(field[1])
+        if kind == "fork":
+            parent, pid = number("pid"), number("child_pid")
+            if postmaster is None or parent == postmaster:
+                lifecycle["forks"].append({"pid": pid, "parent_pid": parent, "timestamp_ns": ts})
+        else:
+            lifecycle["exits"].append({"pid": number("pid"), "timestamp_ns": ts})
+    for rows in lifecycle.values():
+        rows.sort(key=lambda row: row["timestamp_ns"])
+    return lifecycle
 
 
 def vm_arguments(body):
