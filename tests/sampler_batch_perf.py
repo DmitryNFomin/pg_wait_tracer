@@ -14,7 +14,7 @@ entry tick marker instead of perf trace's syscall pretty-printer or stacks.
 Only closed tick intervals are qualified; any loss anywhere invalidates a run.
 """
 import re
-import math
+from bisect import bisect_left, bisect_right
 
 CALLS = "open,openat,pread64,close,process_vm_readv"
 HEADER = re.compile(r"^\s*(\d+\.\d+)\s+\([^)]*\):\s*(?:(\d+)\s+)?(.*)$")
@@ -235,42 +235,103 @@ def file_io_reds(errors):
     return [e for e in errors if re.match(r"(?:openat|pread64|close)/tick=", e)]
 
 
-def assess_pg13_timing(cohort, samples, tick_ns):
-    """Same timing gate for candidate and pre-fix captures, in wall-clock ns.
+def pg13_clock_bounds(alignment):
+    """Independent realtime-minus-monotonic bounds, never fitted to samples.
 
-    `cohort` is independent SQL backend_start evidence, not sample-derived.
-    Only a persisted sample with a nonzero query ID proves attribution; an
-    idle/query-less observation cannot satisfy this gate. Nearest-rank p99
-    is descriptive; EVERY backend must meet the two-period bound.
+    Each realtime read is bracketed by monotonic reads on the same host as
+    PostgreSQL. Keep the entire observed offset envelope (including drift).
+    Any resulting ambiguity about T fails closed.
+    perf must explicitly select mono; the sample reader retains raw mono ns.
     """
-    assert tick_ns > 0 and len(cohort) == 200, "need 200 short-session starts"
-    starts = {row["pid"]: row["backend_start_ns"] for row in cohort}
+    assert alignment and alignment.get("perf_clock") == "CLOCK_MONOTONIC", \
+        "clock alignment unavailable: perf must explicitly use CLOCK_MONOTONIC"
+    probes = alignment.get("probes", [])
+    assert len(probes) >= 2, "clock alignment unavailable: need bracketing clock probes"
+    lower, upper, previous = [], [], 0
+    for probe in probes:
+        before, wall, after = (probe[k] for k in ("mono_before_ns", "wall_ns", "mono_after_ns"))
+        assert 0 < before <= after and before >= previous and wall > 0, \
+            "clock alignment unavailable: invalid clock probe ordering"
+        previous = after
+        lower.append(wall - after)
+        upper.append(wall - before)
+    return min(lower), max(upper), probes[0]["mono_before_ns"], probes[-1]["mono_after_ns"]
+
+
+def assess_pg13_timing(cohort, samples, ticks, alignment, churn_read_failures):
+    """E = SQL statement_timestamp(); T = first observed tick starting >= E.
+
+    Every one of 200 backends needs a nonzero-query-id sample at T or earlier.
+    No nominal period or elapsed-time allowance participates in this gate.
+    Count distinct observed (pid, tick) samples before E, including query-id 0;
+    only that count can explain churn-window read failures before eligibility.
+    Samples keep their raw monotonic stamp, so rotated file anchors cannot
+    move a sample into an earlier tick. The final marker closes the last tick.
+    """
+    assert len(cohort) == 200, "need 200 short-session starts"
+    starts = {row["pid"]: row["statement_start_ns"] for row in cohort}
     assert len(starts) == 200 and all(pid > 0 and ts > 0 for pid, ts in starts.items())
-    first = {}
-    for row in samples:
-        pid, ts = row["pid"], row["timestamp_ns"]
-        if pid in starts and row["query_id"]:
-            assert ts >= starts[pid], f"sample predates backend_start: pid={pid}"
-            first[pid] = min(first.get(pid, ts), ts)
-    delays = sorted(first[pid] - starts[pid] for pid in first)
-    errors = []
-    missing = sorted(starts.keys() - first.keys())
-    if missing:
-        errors.append(f"first attribution missing: pids={missing}")
-    late = {pid: first[pid] - starts[pid] for pid in first
-            if first[pid] - starts[pid] > 2 * tick_ns}
-    if late:
-        errors.append(f"first attribution > 2 tick periods ({2 * tick_ns} ns): {late}")
+    samples = list(samples)
+    evidence_errors, attribution_errors, failure_errors = [], [], []
+    first, eligible, pre_e, late, missing = {}, {}, set(), {}, []
+    try:
+        low, high, probe_start, probe_end = pg13_clock_bounds(alignment)
+        assert len(ticks) >= 2 and all(a < b for a, b in zip(ticks, ticks[1:])), \
+            "clock alignment unavailable: need ordered closed tick intervals"
+        assert probe_start <= ticks[0] < ticks[-1] <= probe_end, \
+            "clock alignment unavailable: clock probes do not bracket perf ticks"
+        for pid, wall in starts.items():
+            e_low, e_high = wall - high, wall - low
+            t = bisect_left(ticks, e_low)
+            assert t == bisect_left(ticks, e_high), \
+                f"clock alignment ambiguous at statement start: pid={pid}"
+            assert 0 < t < len(ticks) - 1, f"statement start outside closed perf ticks: pid={pid}"
+            eligible[pid] = t
+        for row in samples:
+            pid = row["pid"]
+            if pid not in starts:
+                continue
+            assert "monotonic_ns" in row, "clock alignment unavailable: sample lacks raw monotonic timestamp"
+            ts = row["monotonic_ns"]
+            tick = bisect_right(ticks, ts) - 1
+            assert 0 <= tick < len(ticks) - 1, f"sample outside closed perf ticks: pid={pid}"
+            # The perf marker defines a tick's start. A sample stamped a few
+            # instructions after that marker still belongs to that same tick,
+            # including when E falls between marker and sample timestamp.
+            if tick < eligible[pid]:
+                pre_e.add((pid, tick))
+            if row["query_id"]:
+                first[pid] = min(first.get(pid, tick), tick)
+    except (AssertionError, KeyError, TypeError) as error:
+        evidence_errors.append(str(error))
+    # Partial/ambiguous evidence cannot be accepted as a negative control.
+    if not evidence_errors:
+        missing = sorted(starts.keys() - first.keys())
+        late = {pid: first[pid] - eligible[pid] for pid in first if first[pid] > eligible[pid]}
+        if missing:
+            attribution_errors.append(f"first attribution missing: pids={missing}")
+        if late:
+            attribution_errors.append(f"first attribution late: extra observed ticks={late} (required <= 0)")
+        if not isinstance(churn_read_failures, int) or churn_read_failures < 0:
+            evidence_errors.append("churn read-failure counter unavailable or moved backwards")
+        elif churn_read_failures > len(pre_e):
+            failure_errors.append(f"churn read failures={churn_read_failures} > cohort pre-E ticks={len(pre_e)}")
     return {"churn_sessions": len(starts), "attributed_sessions": len(first),
-            "tick_ns": tick_ns, "max_first_attribution_ns": max(delays) if delays else None,
-            "p99_first_attribution_ns": delays[math.ceil(.99 * len(delays)) - 1] if delays else None,
-            "timing_errors": errors}
+            "extra_observed_ticks_bound": 0, "first_attribution_tick": first,
+            "eligible_tick": eligible, "missing_attribution_pids": missing,
+            "late_attribution_ticks": late, "cohort_pre_e_ticks": len(pre_e),
+            "churn_read_failures": churn_read_failures, "clock_alignment": alignment,
+            "evidence_errors": evidence_errors, "attribution_errors": attribution_errors,
+            "churn_failure_errors": failure_errors,
+            "timing_errors": evidence_errors + attribution_errors + failure_errors}
 
 
 def require_pg13_negative_control(result):
     """A setup, route or perf failure cannot stand in for the timing RED."""
-    assert result["timing_errors"], "pre-fix negative control did not redden first attribution"
-    return "pre-fix PG13 negative control: RED at " + "; ".join(result["timing_errors"])
+    assert not result["evidence_errors"], f"pre-fix negative control has invalid timing evidence: {result['evidence_errors']}"
+    reds = result["attribution_errors"]
+    assert reds, "pre-fix negative control did not redden first attribution (missing or late)"
+    return "pre-fix PG13 negative control: RED at " + "; ".join(reds)
 
 
 # Explicit syscall tracepoints, decoded by `perf script -F tid,time,event,trace`.

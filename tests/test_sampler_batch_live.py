@@ -18,9 +18,13 @@ scan tracer 0b1d7dd6, and the SAME first-attribution assertion must go RED.
 Use --syscalls-only for the original syscall/master control in isolation.
 The PG13 arm holds 520 initial sessions, retires 32 near the observed anchor,
 then opens 500 more; 200 new 50 ms sessions reuse a measured far slot (>513).
-It uses 100 Hz, with an unchanged two-period (20 ms) timing bound, a 5 s quiet
-window, the computed route and zero scan fallbacks. Persisted trace timestamps
-are compared with SQL backend_start, never log-arrival or polling times.
+It uses 100 Hz and requires attribution by the first observed tick at or after
+SQL statement_timestamp(), with zero extra ticks. Each short session runs one
+statement returning its identity/start and sleeping 50 ms. A 5 s quiet window,
+the computed route and zero scan fallbacks remain required. perf explicitly
+uses CLOCK_MONOTONIC; independent bracketed realtime/monotonic reads align SQL
+time with perf. Ambiguous alignment fails. Raw persisted sample stamps select
+their perf tick without using the trace writer's wall-clock anchor.
 Its syscall entry/exit tracepoints require postmaster readers outside the
 explicit wait-word argument-shape exemption and at most two possible discovery
 calls per tick. No stack resolution is used; incomplete/lost evidence fails.
@@ -59,7 +63,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SHADOW = ("sampled_attr_shadow_total", "sampled_attr_shadow_mismatch_total",
           "sampled_attr_shadow_cmd_open_mismatch_total",
           "sampled_attr_shadow_query_id_mismatch_total")
-PG13_RATE = 100  # 50 ms sessions span five ticks; the bound stays TWO periods.
+PG13_RATE = 100  # Workload rate only; the assertion uses observed tick markers.
 PG13_INITIAL = 520
 PG13_RETIRE = 32
 PG13_LATER = 500
@@ -82,6 +86,15 @@ SESSION_SQL = """SELECT a.pid,
     FROM pg_stat_activity a JOIN pg_locks l USING (pid)
     WHERE a.pid=pg_backend_pid() AND l.locktype='virtualxid' AND l.granted"""
 
+# One statement: no separate identity query or idle gap after eligibility E.
+# Round epoch to integer microseconds BEFORE scaling to ns (PG13 extract is
+# float8); PostgreSQL timestamps have microsecond precision.
+CHURN_SQL = """SELECT pg_backend_pid(),
+    (extract(epoch FROM statement_timestamp()) * 1000000)::bigint * 1000,
+    split_part(l.virtualtransaction, '/', 1)::int, pg_sleep(0.05)
+    FROM pg_locks l WHERE l.pid=pg_backend_pid()
+    AND l.locktype='virtualxid' AND l.granted"""
+
 
 def session_evidence(connections, handle):
     rows = connections.query(handle, SESSION_SQL)
@@ -89,6 +102,22 @@ def session_evidence(connections, handle):
     pid, start, slot = map(int, rows[0])
     assert pid == connections.lib.PQbackendPID(handle) and start > 0 and slot > 0
     return {"pid": pid, "backend_start_ns": start, "backend_id": slot}
+
+
+def churn_statement(connections, handle):
+    rows = connections.query(handle, CHURN_SQL)
+    assert len(rows) == 1 and len(rows[0]) == 4, f"missing statement identity: {rows}"
+    pid, start, slot = map(int, rows[0][:3])
+    assert pid == connections.lib.PQbackendPID(handle) and start > 0 and slot > 0
+    return {"pid": pid, "statement_start_ns": start, "backend_id": slot}
+
+
+def clock_probe():
+    """Same host/kernel clocks as PG's gettimeofday and perf --clockid mono."""
+    before = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    wall = time.clock_gettime_ns(time.CLOCK_REALTIME)
+    after = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    return {"mono_before_ns": before, "wall_ns": wall, "mono_after_ns": after}
 
 
 def build_sample_reader(directory):
@@ -130,8 +159,9 @@ int main(int argc, char **argv) {
             for (int i = 0; i < n; i++) {
                 struct pgwt_trace_event *e = &events[i];
                 if (!bsearch(&e->pid, pids, npids, sizeof(*pids), cmp)) continue;
-                printf("{\"pid\":%u,\"timestamp_ns\":%"PRIu64",\"query_id\":%"PRIu64"}\n",
-                    e->pid, pgwt_reader_mono_to_wall(&r, e->timestamp_ns), e->query_id);
+                printf("{\"pid\":%u,\"timestamp_ns\":%"PRIu64",\"monotonic_ns\":%"PRIu64
+                       ",\"query_id\":%"PRIu64"}\n",
+                    e->pid, pgwt_reader_mono_to_wall(&r, e->timestamp_ns), e->timestamp_ns, e->query_id);
             }
         }
         pgwt_reader_close(&r);
@@ -373,6 +403,7 @@ def start_pg13_perf(daemon_pid, tick_event, trace, stem="perf", ack_seconds=PG13
     try:
         with (trace / (stem + ".stderr")).open("w") as perr:
             perf = spawn(["perf", "record", "-q", "-m", str(PG13_PERF_PAGES),
+                          "--clockid", "mono",
                           "-D", "-1", "--control", f"fifo:{ctl},{ack}",
                           "-p", str(daemon_pid), "-e", VM_EVENTS + "," + tick_event,
                           "-o", str(trace / (stem + ".data"))],
@@ -427,7 +458,11 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
     initial, later, churn = IdleConnections(), IdleConnections(), IdleConnections()
     daemon = perf = None
     tick_event = None
+    perf_stem, perf_decode_attempted, samples_read_attempted = "perf.attach", False, False
     cohort = []
+    alignment = {"perf_clock": "CLOCK_MONOTONIC", "probes": []}
+    (trace / "churn.starts.json").write_text("[]\n")
+    (trace / "churn.samples.json").write_text("[]\n")
     with (trace / "daemon.stderr").open("w") as err, (trace / "perf.probe.stderr").open("w") as perr:
         try:
             initial.open(PG13_INITIAL, "pgwt866_anchor_side")
@@ -481,8 +516,12 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
             # The window starts at perf's own enable ack, not at its launch.
             perf = start_pg13_perf(daemon.pid, tick_event, trace, "perf.attach")
             time.sleep(1)  # attachment probe, independent of workload assertions
+            perf_decode_attempted = True
             decode_pg13_perf(perf, tick_event, trace, "perf.attach")
             spanning_before = metrics(trace)
+            alignment["probes"].append(clock_probe())
+            perf_stem, perf_decode_attempted = "perf", False
+            perf = None
             perf = start_pg13_perf(daemon.pid, tick_event, trace)  # returns once enabled
             time.sleep(1)  # recorder warm-up before the measured tick census
             assert perf.poll() is None, "PG13 perf stopped before measurement"
@@ -502,21 +541,25 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
             initial.close_handle(far_handle)
             wait_until(daemon, lambda: not Path(f"/proc/{far_row['pid']}").exists(),
                        15, "far slot did not retire before churn")
+            churn_before = metrics(trace)
             start = time.monotonic()
             for index in range(PG13_CHURN):
                 # Fixed workload pacing spreads 200 connections over >=20 s;
-                # neither session duration nor timing bounds adapt to results.
+                # neither session duration nor assertions adapt to results.
                 delay = start + index * .1 - time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
                 churn.open(1, "pgwt866_short")
                 handle = churn.handles[-1]
                 try:
-                    row = session_evidence(churn, handle)
+                    alignment["probes"].append(clock_probe())
+                    row = churn_statement(churn, handle)
+                    alignment["probes"].append(clock_probe())
                     row["distance"] = abs(row["backend_id"] - anchor_id)
-                    assert row["distance"] > 513, f"churn far-row prerequisite failed: {row}, anchor={anchor_id}"
                     cohort.append(row)
-                    churn.query(handle, "SELECT pg_sleep(0.05)")
+                    (trace / "churn.starts.json").write_text(json.dumps(cohort, indent=2) + "\n")
+                    (trace / "clock-alignment.json").write_text(json.dumps(alignment, indent=2) + "\n")
+                    assert row["distance"] > 513, f"churn far-row prerequisite failed: {row}, anchor={anchor_id}"
                 finally:
                     churn.close_handle(handle)
                 wait_until(daemon, lambda: not Path(f"/proc/{row['pid']}").exists(),
@@ -527,6 +570,11 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
             wait_until(daemon, lambda: metrics(trace)["sample_read_targets"] ==
                        population["sample_read_targets"] - 1, 15, "churn enrollment did not retire")
             quiet_before = metrics(trace)
+            churn_failures = (quiet_before["sampled_attr_tick_read_failures_total"] -
+                              churn_before["sampled_attr_tick_read_failures_total"])
+            (trace / "churn.metrics.json").write_text(json.dumps(
+                {"before": churn_before, "after": quiet_before, "read_failure_delta": churn_failures},
+                indent=2) + "\n")
             quiet_start = time.monotonic()
             time.sleep(5)  # the specified no-churn window
             quiet_after = metrics(trace)
@@ -534,8 +582,21 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
             quiet_ticks = quiet_after["sampler_ticks_total"] - quiet_before["sampler_ticks_total"]
             assert quiet_ticks > 0, "sampler did not advance in the quiet window"
             status = metrics(trace, "status")
+            perf_decode_attempted = True
             text, perf_errors = decode_pg13_perf(perf, tick_event, trace)
+            alignment["probes"].append(clock_probe())
+            (trace / "clock-alignment.json").write_text(json.dumps(alignment, indent=2) + "\n")
             spanning_after = metrics(trace)
+            # Persist the complete cohort before any qualification can fail.
+            # Finalization flushes raw samples, including the LAST session.
+            stop(daemon)
+            samples_read_attempted = True
+            samples = read_cohort_samples(reader, trace, cohort)
+            parsed = parse_vm_trace(text, perf_errors, tick_event)
+            tids = {tid for tid, _ in parsed["ticks"]}
+            assert len(tids) == 1, "timing evidence needs one sampler tick thread"
+            ticks = [ts for _, ts in parsed["ticks"]]
+            result = assess_pg13_timing(cohort, samples, ticks, alignment, churn_failures)
             # The pre-fix control retains lossless parsing, but no syscall gate
             # can substitute for its required first-attribution timing RED.
             syscall = pg13_vm_diagnostics(text, perf_errors) if negative else None
@@ -545,10 +606,6 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
                     ticks_inside=quiet_after["sampler_ticks_total"] - before["sampler_ticks_total"],
                     ticks_spanning=spanning_after["sampler_ticks_total"] - spanning_before["sampler_ticks_total"],
                     read_faults=spanning_after["sample_read_faults_total"] - spanning_before["sample_read_faults_total"])
-            # Finalization flushes the raw samples, including the LAST session.
-            stop(daemon)
-            samples = read_cohort_samples(reader, trace, cohort)
-            result = assess_pg13_timing(cohort, samples, 1_000_000_000 // PG13_RATE)
             quiet_failures = (quiet_after["sampled_attr_tick_read_failures_total"] -
                               quiet_before["sampled_attr_tick_read_failures_total"])
             fallback_key = "sampled_attr_pg13_scan_fallbacks_total"
@@ -576,19 +633,29 @@ def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
             return result
         finally:
             try:
-                stop(perf, signal.SIGINT)
+                # Decode once even when a workload prerequisite fails. A loss
+                # assertion may fail here too; the nested cleanup still saves
+                # the actual persisted samples after stopping the daemon.
+                if perf is not None and not perf_decode_attempted:
+                    decode_pg13_perf(perf, tick_event, trace, perf_stem)
+                else:
+                    stop(perf, signal.SIGINT)
             finally:
                 try:
                     stop(daemon)
                 finally:
                     try:
-                        churn.close()
-                        later.close()
-                        initial.close()
+                        if not samples_read_attempted and cohort:
+                            read_cohort_samples(reader, trace, cohort)
                     finally:
-                        if tick_event:
-                            subprocess.run(["perf", "probe", "--del", tick_event], check=True,
-                                           stdout=perr, stderr=subprocess.STDOUT)
+                        try:
+                            churn.close()
+                            later.close()
+                            initial.close()
+                        finally:
+                            if tick_event:
+                                subprocess.run(["perf", "probe", "--del", tick_event], check=True,
+                                               stdout=perr, stderr=subprocess.STDOUT)
 
 
 def run_escalation_arm(binary, pm_pid, directory):
@@ -814,7 +881,8 @@ def run_pg13_arms(args, pid, directory):
     else:
         print("PENDING: PG13 timing negative control; select --pg13-far-rows "
               "--master-tracer /path/to/0b1d7dd6/pg_wait_tracer --require-negative-control", flush=True)
-    print("PG13 far-row candidate: PASS (200 short sessions, <=2 tick periods, quiet failures=0)", flush=True)
+    print("PG13 far-row candidate: PASS (200 short sessions, zero extra observed ticks, "
+          "churn failures <= pre-E ticks, quiet failures=0)", flush=True)
 
 
 def main():
@@ -828,7 +896,9 @@ def main():
               "pg13": {"initial_idle": PG13_INITIAL, "retire_near_anchor": PG13_RETIRE,
                        "later_idle": PG13_LATER, "short_sessions": PG13_CHURN,
                        "sleep_s": .05, "sample_rate": PG13_RATE, "minimum_row_distance": 514,
-                       "first_attribution_bound_ns": 2_000_000_000 // PG13_RATE,
+                       "extra_observed_ticks_bound": 0,
+                       "eligibility": "statement_timestamp(); first observed tick starting at or after E",
+                       "perf_clock": "CLOCK_MONOTONIC",
                        "quiet_window_s": 5, "negative_control_revision": "0b1d7dd6",
                        "perf_pages": PG13_PERF_PAGES, "perf_events": VM_EVENTS,
                        "perf_tick_marker": "pgwt_sampler_poll symbol-entry uprobe"},
@@ -855,9 +925,11 @@ def main():
         assert args.evidence_dir != ROOT and ROOT not in args.evidence_dir.parents, \
             "evidence must stay outside the repository"
         args.evidence_dir.mkdir(parents=True, exist_ok=False)
-    evidence_context = (contextlib.nullcontext(str(args.evidence_dir)) if args.evidence_dir else
-                        tempfile.TemporaryDirectory(prefix="pgwt866-live-"))
+    # Retain every run, including failed qualifications, for reconstruction.
+    evidence_context = contextlib.nullcontext(str(args.evidence_dir) if args.evidence_dir else
+                                            tempfile.mkdtemp(prefix="pgwt866-live-"))
     with evidence_context as tmp, private_cluster(source_pid, args.require_huge_pages) as (pid, major):
+        print(f"evidence directory: {tmp}", flush=True)
         huge_pages = psql("SHOW huge_pages")
         print(f"private PG{major} pid={pid} kernel={os.uname().release} "
               f"max_connections={psql('SHOW max_connections')} huge_pages={huge_pages}", flush=True)

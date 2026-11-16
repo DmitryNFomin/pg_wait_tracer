@@ -25,11 +25,138 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sampler_batch_perf import (FILE_IO_PER_TICK_BOUND, assess_counts, file_io_reds,  # noqa: E402
                                 parse_summary, parse_vm_calls, parse_vm_trace,
-                                assess_pg13_vm_calls, pg13_vm_diagnostics)
+                                assess_pg13_vm_calls, pg13_vm_diagnostics,
+                                assess_pg13_timing, require_pg13_negative_control)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sampler_batch"
 CLEAN = {"open": 0, "openat": 6 * 210, "pread64": 2 * 210, "close": 7 * 210,
          "process_vm_readv": 3 * 210}
+
+
+def pg13_timing_inputs(ticks):
+    """Hand-placed E/sample witnesses on a supplied (possibly recorded) cadence.
+
+    These are synthetic SQL/sample witnesses, never reconstructed eligibility
+    for an old live run: old recordings have backend_start, not statement E.
+    """
+    offset = 1_790_000_000_000_000_000
+    cohort = [{"pid": 1000 + i, "statement_start_ns": ticks[1] + offset,
+               "backend_id": i + 1} for i in range(200)]
+    samples = [{"pid": row["pid"], "timestamp_ns": ticks[1] + offset + 100,
+                "monotonic_ns": ticks[1] + 100, "query_id": 42} for row in cohort]
+    alignment = {"perf_clock": "CLOCK_MONOTONIC", "probes": [
+        {"mono_before_ns": t, "wall_ns": t + offset, "mono_after_ns": t}
+        for t in (ticks[0] - 1000, ticks[-1] + 1000)]}
+    return cohort, samples, alignment
+
+
+def pg13_observed_tick_cases():
+    # Include a 31 ms gap: a nominal 20 ms deadline would wrongly fail here.
+    cadences = [("synthetic-jitter", [1_000_000_000, 1_010_000_000,
+                                      1_041_000_000, 1_051_000_000])]
+    for name, event in (("el8-4.18-file.script.txt", "pgwt866_6907_7473:tick"),
+                        ("ubuntu-6.8-ticks.script.txt", "pgwt866_dbg:tick")):
+        text = (FIXTURES / "pg13_vm" / name).read_text()
+        if name.startswith("ubuntu"):
+            # This fixture contains tick lines only. Supply recorded readv
+            # pairs for the parser's nonempty-call guard; only Ubuntu's exact
+            # event name contributes ticks to the cadence under test.
+            text += (FIXTURES / "pg13_vm" / "el8-4.18-file.script.txt").read_text()
+        parsed = parse_vm_trace(text, tick_event=event)
+        cadences.append((name, [ts for _, ts in parsed["ticks"]]))
+    for label, ticks in cadences:
+        cohort, samples, alignment = pg13_timing_inputs(ticks)
+        green = assess_pg13_timing(cohort, reversed(samples), ticks, alignment, 0)
+        assert not green["timing_errors"] and green["attributed_sessions"] == 200, green
+        assert set(green["eligible_tick"].values()) == {1}
+        assert set(green["first_attribution_tick"].values()) == {1}
+        print(f"pg13_at_T_passes [{label}]: PASS")
+        # E strictly between ticks still rounds UP to T, however long the gap.
+        between = [dict(row, statement_start_ns=row["statement_start_ns"] + 1) for row in cohort]
+        at_next = [dict(row, monotonic_ns=ticks[2] + 100) for row in samples]
+        delayed_e = assess_pg13_timing(between, at_next, ticks, alignment, 0)
+        assert not delayed_e["timing_errors"] and set(delayed_e["eligible_tick"].values()) == {2}
+        # E can fall between the marker and the sampler's timestamp read.
+        # Those observations still belong to the tick that STARTED before E.
+        pre_e_tick = assess_pg13_timing(between, samples, ticks, alignment, 200)
+        assert not pre_e_tick["timing_errors"] and pre_e_tick["cohort_pre_e_ticks"] == 200
+        # A nonzero sample even before E satisfies 'at T or earlier'.
+        early = [dict(samples[0], monotonic_ns=ticks[0] + 100)] + samples[1:]
+        assert not assess_pg13_timing(cohort, early, ticks, alignment, 1)["timing_errors"]
+        late = samples[:-1] + [dict(samples[-1], monotonic_ns=ticks[2] + 100)]
+        red = assess_pg13_timing(cohort, late, ticks, alignment, 0)
+        assert red["late_attribution_ticks"] == {1199: 1}
+        assert "first attribution late:" in require_pg13_negative_control(red)
+        print(f"pg13_at_T_plus_1_RED [{label}]: PASS")
+        # Query-id zero or a different pid cannot satisfy missing attribution.
+        missing = samples[:-1] + [dict(samples[-1], query_id=0), dict(samples[-1], pid=999)]
+        red = assess_pg13_timing(cohort, missing, ticks, alignment, 0)
+        assert red["missing_attribution_pids"] == [1199]
+        assert "first attribution missing:" in require_pg13_negative_control(red)
+        all_missing = assess_pg13_timing(cohort, [], ticks, alignment, 0)
+        assert all_missing["attributed_sessions"] == 0
+        assert "first attribution missing:" in require_pg13_negative_control(all_missing)
+        print(f"pg13_missing_attribution_RED [{label}]: PASS")
+        for clock in (None, {}, dict(alignment, perf_clock="unknown"),
+                      dict(alignment, probes=alignment["probes"][:1])):
+            red = assess_pg13_timing(cohort, samples, ticks, clock, 0)
+            assert red["evidence_errors"] and red["timing_errors"]
+            try:
+                require_pg13_negative_control(red)
+            except AssertionError as error:
+                assert "invalid timing evidence" in str(error)
+            else:
+                raise AssertionError("clock error substituted for a negative-control attribution RED")
+        # Bracket uncertainty straddles E exactly at a tick: neither endpoint
+        # may be chosen to make the result pass.
+        probes = [dict(p, mono_before_ns=p["mono_before_ns"] - 1,
+                       mono_after_ns=p["mono_after_ns"] + 1) for p in alignment["probes"]]
+        red = assess_pg13_timing(cohort, samples, ticks, dict(alignment, probes=probes), 0)
+        assert "ambiguous at statement start" in red["evidence_errors"][0]
+        print(f"pg13_alignment_unavailable_or_ambiguous_RED [{label}]: PASS")
+        # Two copies of the same pre-E pid/tick are ONE allowed failure;
+        # an unattributed pre-E point stays counted as promised.
+        pre_e = dict(samples[0], query_id=0, monotonic_ns=ticks[0] + 100)
+        with_pre_e = [pre_e, pre_e, *samples]
+        at_bound = assess_pg13_timing(cohort, with_pre_e, ticks, alignment, 1)
+        assert not at_bound["timing_errors"] and at_bound["cohort_pre_e_ticks"] == 1
+        red = assess_pg13_timing(cohort, with_pre_e, ticks, alignment, 2)
+        assert red["churn_read_failures"] == 2 and red["cohort_pre_e_ticks"] == 1
+        assert red["churn_failure_errors"] == ["churn read failures=2 > cohort pre-E ticks=1"]
+        try:
+            require_pg13_negative_control(red)
+        except AssertionError as error:
+            assert "did not redden first attribution" in str(error)
+        else:
+            raise AssertionError("failure counter substituted for a negative-control attribution RED")
+        print(f"pg13_churn_failures_above_pre_E_ticks_RED [{label}]: PASS")
+        # First observation wins; changing the wall anchor cannot hide T+1.
+        duplicates = samples + [dict(samples[0], monotonic_ns=ticks[2] + 100)]
+        assert assess_pg13_timing(cohort, duplicates, ticks, alignment, 0) == green
+        late = samples[:-1] + [dict(samples[-1], monotonic_ns=ticks[2] + 100,
+                                   timestamp_ns=samples[-1]["timestamp_ns"] - 100000000)]
+        assert assess_pg13_timing(cohort, late, ticks, alignment, 0)["late_attribution_ticks"] == {1199: 1}
+        for invalid in ([dict(samples[0], monotonic_ns=ticks[-1])],
+                        [{k: v for k, v in samples[0].items() if k != "monotonic_ns"}]):
+            assert assess_pg13_timing(cohort, invalid, ticks, alignment, 0)["evidence_errors"]
+
+
+def pg13_statement_and_clock_cases():
+    import test_sampler_batch_live as live
+    connections = mock.Mock()
+    connections.query.return_value = [["123", "1790000000000123000", "2", ""]]
+    connections.lib.PQbackendPID.return_value = 123
+    assert live.churn_statement(connections, 7) == {
+        "pid": 123, "statement_start_ns": 1790000000000123000, "backend_id": 2}
+    connections.query.assert_called_once_with(7, live.CHURN_SQL)
+    assert "statement_timestamp()" in live.CHURN_SQL and "pg_sleep(0.05)" in live.CHURN_SQL
+    assert "backend_start" not in live.CHURN_SQL and ";" not in live.CHURN_SQL
+    with mock.patch.object(live.time, "clock_gettime_ns", side_effect=[10, 1000, 12]) as clock:
+        assert live.clock_probe() == {"mono_before_ns": 10, "wall_ns": 1000, "mono_after_ns": 12}
+        assert clock.call_args_list == [mock.call(live.time.CLOCK_MONOTONIC),
+                                       mock.call(live.time.CLOCK_REALTIME),
+                                       mock.call(live.time.CLOCK_MONOTONIC)]
+    print("pg13_one_statement_identity_sleep_and_independent_clock_bracket: PASS")
 
 
 def expect_raises(label, text, extra=()):
@@ -325,6 +452,7 @@ def file_capture_cases():
             proc.wait.side_effect = wait
             def spawn(command, **kwargs):
                 assert command[:2] == ["perf", "record"]
+                assert command[command.index("--clockid") + 1] == "mono"
                 assert command[command.index("-o") + 1] == str(trace / "perf.attach.data")
                 assert command[command.index("-e") + 1] == live.VM_EVENTS + "," + event
                 assert command[command.index("-p") + 1] == "7473"
@@ -578,6 +706,8 @@ def postmaster_name_cases():
 
 
 def main():
+    pg13_observed_tick_cases()
+    pg13_statement_and_clock_cases()
     parser_cases()
     bound_cases()
     recorded_cases()

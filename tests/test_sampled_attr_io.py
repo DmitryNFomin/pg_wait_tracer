@@ -126,25 +126,18 @@ def pg13_live_pure_cases():
     """Timing truth is hand-built, never fitted to candidate output."""
     import test_sampler_batch_live as live
     from sampler_batch_perf import assess_pg13_timing, require_pg13_negative_control
-    cohort = [{"pid": 1000 + i, "backend_start_ns": 10_000_000_000_000 + i * 100_000_000}
-              for i in range(200)]
-    samples = [{"pid": row["pid"], "timestamp_ns": row["backend_start_ns"] + (i + 1) * 100_000,
-                "query_id": 42} for i, row in enumerate(cohort)]
-    green = assess_pg13_timing(cohort, reversed(samples), 10_000_000)
-    assert not green["timing_errors"] and green["attributed_sessions"] == 200
-    assert green["max_first_attribution_ns"] == 20_000_000
-    assert green["p99_first_attribution_ns"] == 19_800_000
-    # A later duplicate cannot replace the first observation. An idle sample
-    # and another pid cannot satisfy missing attribution.
-    assert assess_pg13_timing(cohort, samples + [dict(samples[0], timestamp_ns=samples[0]["timestamp_ns"] + 99_000_000)],
-                              10_000_000) == green
-    late = [*samples[:-1], dict(samples[-1], timestamp_ns=cohort[-1]["backend_start_ns"] + 20_000_001)]
-    red = assess_pg13_timing(cohort, late, 10_000_000)
+    from test_sampler_batch_summary import pg13_timing_inputs, pg13_observed_tick_cases
+    pg13_observed_tick_cases()
+    ticks = [1_000_000_000, 1_010_000_000, 1_041_000_000, 1_051_000_000]
+    cohort, samples, alignment = pg13_timing_inputs(ticks)
+    green = assess_pg13_timing(cohort, samples, ticks, alignment, 0)
+    late = [*samples[:-1], dict(samples[-1], monotonic_ns=ticks[2] + 100)]
+    red = assess_pg13_timing(cohort, late, ticks, alignment, 0)
     # The pre-fix tracer has validation status but no reason field. It must
     # pass the anchor prerequisite and reach the timing negative control.
     legacy_status = {"pgbackend_layout_validation": "validated"}
     live.require_pg13_anchor_status(legacy_status, negative=True)
-    assert "first attribution > 2 tick periods" in require_pg13_negative_control(red)
+    assert "first attribution late: extra observed ticks={1199: 1}" in require_pg13_negative_control(red)
     candidate_status = dict(legacy_status,
                             pgbackend_layout_reason="controlled backend retired before capture")
     live.require_pg13_anchor_status(candidate_status)
@@ -164,7 +157,7 @@ def pg13_live_pure_cases():
         else:
             raise AssertionError("candidate accepted without controlled-anchor reason")
     missing = assess_pg13_timing(cohort, samples[:-1] + [dict(samples[-1], query_id=0),
-                                                      dict(samples[-1], pid=999)], 10_000_000)
+                                                      dict(samples[-1], pid=999)], ticks, alignment, 0)
     assert "first attribution missing: pids=[1199]" in require_pg13_negative_control(missing)
     try:
         require_pg13_negative_control(dict(green, other_errors=["route missing", "perf failed"]))
@@ -172,13 +165,6 @@ def pg13_live_pure_cases():
         assert "did not redden first attribution" in str(error)
     else:
         raise AssertionError("unrelated failure qualified as negative control")
-    try:
-        assess_pg13_timing(cohort, [dict(samples[0], timestamp_ns=cohort[0]["backend_start_ns"] - 1)], 10_000_000)
-    except AssertionError as error:
-        assert "predates backend_start" in str(error)
-    else:
-        raise AssertionError("mixed clocks accepted")
-
     from test_sampler_batch_summary import vm_parser_cases
     vm_parser_cases()
 
@@ -201,11 +187,12 @@ def pg13_live_pure_cases():
     plan = json.loads(result.stdout)
     assert plan["arms"] == ["pg13-far-rows"] and plan["max_connections"] >= 1100
     assert plan["pg13"]["sample_rate"] == 100 and plan["pg13"]["short_sessions"] == 200
-    assert plan["pg13"]["first_attribution_bound_ns"] == 20_000_000
+    assert plan["pg13"]["extra_observed_ticks_bound"] == 0
+    assert plan["pg13"]["perf_clock"] == "CLOCK_MONOTONIC"
     assert plan["pg13"]["initial_idle"] - plan["pg13"]["retire_near_anchor"] + plan["pg13"]["later_idle"] < 1000
     result = run(["python3", "-B", "tests/test_sampler_batch_live.py", "--dry-run", "--pg-version", "13"])
     assert result.returncode == 0 and "pg13-far-rows" in json.loads(result.stdout)["arms"]
-    print("PG13 timing: every pid, max/p99, exact two-period edge, missing/late RED; syscall census and per-tick bound PASS")
+    print("PG13 timing: observed T, T+1 RED, missing RED, clock alignment RED, churn failures RED PASS")
     print("PG13 anchor status: pre-fix reason absent reaches timing RED; validation required for both, candidate reason required PASS")
     print("PG13 arguments/default selection/dry-run: PASS (no Linux, PostgreSQL or libpq loaded)")
 
@@ -227,6 +214,9 @@ def pg13_recorded_sample_case():
         assert [row["timestamp_ns"] for row in samples] == [20_000_000_000_000,
                                                              20_000_090_000_000,
                                                              20_000_290_000_000]
+        assert [row["monotonic_ns"] for row in samples] == [10_000_000_000_000,
+                                                             10_000_090_000_000,
+                                                             10_000_290_000_000]
         assert all(row["pid"] == 1000 and row["query_id"] == 100 for row in samples)
         assert live.read_cohort_samples(reader, directory, [{"pid": 999}]) == []
         (directory / "current.trace").write_bytes(b"truncated trace")
