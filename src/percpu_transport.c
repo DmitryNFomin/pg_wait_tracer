@@ -32,6 +32,7 @@ struct pgwt_percpu_transport {
      * only when a frozen target is still unreached. Never moved by traffic. */
     bool cut_taken, pass_empty;
     bool releasing;
+    bool *service_backlog;
     struct pgwt_transport_budget budget;
     uint64_t cut[2], cut_passes, cut_limit;
     uint32_t round, el_token;
@@ -116,6 +117,7 @@ void pgwt_transport_begin_pass(struct pgwt_percpu_transport *t, uint64_t limit)
 {
     if (!t) return;
     pgwt_budget_begin(&t->budget, observed(t), limit);
+    t->budget.yielded = t->service_backlog;
     if (t->io.budget) t->io.budget(t->io.ctx, &t->budget);
 }
 bool pgwt_transport_pass_expired(struct pgwt_percpu_transport *t)
@@ -127,6 +129,7 @@ static int bounded_drain(struct pgwt_percpu_transport *t)
     struct pgwt_transport_budget service = t->budget;
     uint64_t now = observed(t);
     if (pgwt_budget_expired(&service, now)) {
+        pgwt_budget_yield(&t->budget);
         ++t->stats.drain_budget_yields;
         return 0;
     }
@@ -135,7 +138,10 @@ static int bounded_drain(struct pgwt_percpu_transport *t)
         t->budget.until = now + PGWT_TRANSPORT_DRAIN_NS;
     int rc = t->io.drain(t->io.ctx);
     if (service.active && t->budget.until < service.until &&
-        pgwt_budget_expired(&t->budget, observed(t))) ++t->stats.drain_slice_yields;
+        pgwt_budget_expired(&t->budget, observed(t))) {
+        if (rc != 1) pgwt_budget_yield(&t->budget);
+        ++t->stats.drain_slice_yields;
+    }
     t->budget = service;
     return rc;
 }
@@ -339,6 +345,7 @@ static int release_queue(struct pgwt_percpu_transport *t, bool checkpoint)
     }
     while (t->release_left) {
         if (pgwt_transport_pass_expired(t)) {
+            pgwt_budget_yield(&t->budget);
             ++t->stats.release_budget_yields;
             return 1; /* retain the suffix, after delivering its checkpoint */
         }
@@ -876,9 +883,12 @@ static int receive_ring(void *ctx, void *bytes, size_t size)
                                        &r->consumed, r->limit);
     if (rc < 0 && !(rc == -EAGAIN && r->limit && r->consumed >= r->limit))
         linux_state(r->d)->callback_error = rc;
-    if (rc == -EAGAIN && r->limit && r->consumed >= r->limit)
+    if (rc == -EAGAIN && r->limit && r->consumed >= r->limit) {
+        pgwt_budget_yield(&r->d->percpu_transport->budget);
         ++r->d->percpu_transport->stats.ring_record_cap_yields;
+    }
     if (!rc && pgwt_transport_pass_expired(r->d->percpu_transport)) {
+        pgwt_budget_yield(&r->d->percpu_transport->budget);
         ++r->d->percpu_transport->stats.ring_budget_yields;
         return -EINTR;
     }
@@ -897,6 +907,7 @@ static enum bpf_perf_event_ret receive_perf(void *ctx, int cpu, struct perf_even
     } else rc = fault(l->d->percpu_transport, PGWT_MERGE_MALFORMED_ENVELOPE);
     if (rc < 0) l->callback_error = rc;
     if (pgwt_transport_pass_expired(l->d->percpu_transport)) {
+        pgwt_budget_yield(&l->d->percpu_transport->budget);
         ++l->d->percpu_transport->stats.perf_budget_yields;
         return LIBBPF_PERF_EVENT_DONE;
     }
@@ -908,6 +919,7 @@ static enum bpf_perf_event_ret receive_hint(void *ctx, int cpu, struct perf_even
     struct linux_transport *l = ctx;
     (void)cpu; (void)event;
     if (pgwt_transport_pass_expired(l->d->percpu_transport)) {
+        pgwt_budget_yield(&l->d->percpu_transport->budget);
         ++l->d->percpu_transport->stats.hint_budget_yields;
         return LIBBPF_PERF_EVENT_DONE;
     }
@@ -919,6 +931,7 @@ static int consume_all(struct linux_transport *l, bool *empty)
     size_t readers = 2 * l->ncpu + 2;
     for (size_t visited = 0; visited < readers; ++visited) {
         if (pgwt_transport_pass_expired(l->d->percpu_transport)) {
+            pgwt_budget_yield(&l->d->percpu_transport->budget);
             ++l->d->percpu_transport->stats.reader_budget_yields;
             *empty = false;
             return 0;
@@ -1186,6 +1199,7 @@ static int linux_consume_io(void *ctx, uint32_t dest, bool bounded)
     if (!l || dest < 1 || dest > 2 || !l->rings[dest-1]) return -EINVAL;
     struct ring_context *r = &l->ring_ctx[dest-1];
     if (pgwt_transport_pass_expired(d->percpu_transport)) {
+        pgwt_budget_yield(&d->percpu_transport->budget);
         ++d->percpu_transport->stats.consume_budget_yields;
         return dest == PGWT_WIRE_DEST_E ? -EAGAIN : 0;
     }
@@ -1302,7 +1316,12 @@ int pgwt_percpu_transport_poll(struct pgwt_daemon *d)
     return pgwt_transport_poll(t, pgwt_capture_waiting(d->merge_capture));
 }
 void pgwt_percpu_transport_begin_pass(struct pgwt_daemon *d, uint64_t deadline)
-{ if (d && d->exact_perf) pgwt_transport_begin_pass(d->percpu_transport, deadline); }
+{
+    if (d && d->exact_perf && d->percpu_transport) {
+        d->percpu_transport->service_backlog = &d->service_backlog;
+        pgwt_transport_begin_pass(d->percpu_transport, deadline);
+    }
+}
 int pgwt_percpu_transport_snapshot(struct pgwt_daemon *d, ma_snapshot *s, uint64_t *now)
 {
     if (!d) return -EINVAL;

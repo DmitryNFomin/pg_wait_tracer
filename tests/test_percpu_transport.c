@@ -1267,10 +1267,13 @@ static bool tb_service_deadline(void)
     TB(tb_boundary(&d,0,0,2,14)==0 && tb_boundary(&d,1,0,2,14)==0);
     d.envelope_cost_ns=UINT64_C(10000000);
     uint64_t started=d.now;
-    pgwt_transport_begin_pass(d.transport,0);
+    struct pgwt_daemon *daemon=calloc(1,sizeof(*daemon));TB(daemon);
+    daemon->exact_perf=true;daemon->percpu_transport=d.transport;
+    pgwt_percpu_transport_begin_pass(daemon,0);
     TB(pgwt_transport_poll(d.transport,false)==0);
     TB(d.now-started<=PGWT_TRANSPORT_PASS_NS); /* service pass returns within budget */
     TB(pgwt_transport_pending_records(d.transport)==1 && pgwt_transport_stats(d.transport).rounds_completed==0);
+    TB(daemon->service_backlog); /* no_sleep_release */
     unsigned reads=d.reads;
     /* Arrivals during the yield do not enter the frozen release prefix. */
     unsigned char trace[48];memcpy(trace,golden_T,48);tb_le(trace,16,8);tb_le(trace+8,30,4);
@@ -1280,7 +1283,7 @@ static bool tb_service_deadline(void)
     TB(pgwt_transport_stats(d.transport).rounds_completed==1 && d.reads==reads);
     TB(pgwt_transport_pending_records(d.transport)==1 && d.traces==1 &&
        pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
-    tb_cleanup(&d);
+    free(daemon);tb_cleanup(&d);
     puts("service deadline: 50 ms, frozen snapshot/prefix resumes; new arrival stays queued PASS");
     return true;
 }

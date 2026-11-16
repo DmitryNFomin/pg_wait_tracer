@@ -471,6 +471,7 @@ static int flush_source(struct pgwt_merge_capture *c, size_t source,
 {
     while (c->heads[source]) {
         if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) {
+            pgwt_budget_yield(&c->budget);
             ++c->source_budget_yields;
             /* A control input already delivered this observation. Otherwise
              * defer the record only after delivering its caller's vector. */
@@ -510,6 +511,7 @@ int pgwt_capture_envelope(struct pgwt_merge_capture *c, const ma_envelope *e,
         if (rc < 0) return rc;
         for (size_t visited = 0; visited < c->source_count; ++visited) {
             if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) {
+                if (c->retained_count) pgwt_budget_yield(&c->budget);
                 ++c->sweep_budget_yields;
                 break;
             }

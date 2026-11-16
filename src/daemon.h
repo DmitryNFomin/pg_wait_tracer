@@ -480,6 +480,8 @@ struct pgwt_daemon {
      * fully processed records. Zero means an intentional unbounded drain
      * (shutdown/finalization). Single-threaded: only the event callback reads
      * these while consume is active. */
+    /* Any service yield keeps the next main-loop wait from sleeping. */
+    bool        service_backlog;
     uint32_t    event_drain_callback_limit;
     uint32_t    event_drain_callbacks_current;
 

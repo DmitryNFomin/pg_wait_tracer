@@ -82,6 +82,9 @@ def deadline_gate_cases(source):
     return 'live deadline orchestration: 6/6 virtual process cases PASS (early zero exit rejected)'
 
 mutations = [
+    ('release_sleeps', 'service_deadline', 'src/percpu_transport.c',
+     [('pgwt_budget_yield(&t->budget);\n            ++t->stats.release_budget_yields;',
+       '++t->stats.release_budget_yields;')]),
     ('blanket_finish_void', 'rv_uncovered_finish', 'src/percpu_transport.c',
      [('bool releasing;', 'bool releasing, finishing;'),
       ('bool done = false;\n    unsigned pass;', 't->finishing = true;\n    bool done = false;\n    unsigned pass;'),
@@ -102,10 +105,10 @@ mutations = [
      [('if (pass_limit) ++t->stats.finish_pass_limit_reached;',
        'if (pass_limit) ++t->stats.finish_deadline_reached;')]),
     ('service_without_clock', 'service_deadline', 'src/percpu_transport.c',
-     [('if (pgwt_transport_pass_expired(t)) {\n            ++t->stats.release_budget_yields;',
+     [('if (pgwt_transport_pass_expired(t)) {\n            pgwt_budget_yield(&t->budget);\n            ++t->stats.release_budget_yields;',
        'if (false) {\n            ++t->stats.release_budget_yields;')]),
     ('merge_without_clock', 'merge_deadline', 'src/merge_capture.c',
-     [('if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) {\n            ++c->source_budget_yields;',
+     [('if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) {\n            pgwt_budget_yield(&c->budget);\n            ++c->source_budget_yields;',
        'if (c->budget.active && c->budget.until == c->budget.started) {\n            ++c->source_budget_yields;')]),
     ('finish_ignores_deadline', 'finish_deadline', 'src/percpu_transport.c',
      [('if (now < started || now >= until) break;', 'if (false && (now < started || now >= until)) break;'),
@@ -217,6 +220,7 @@ mutations += [
        '                (void)check; rc = 0;')]),
 ]
 deadline_assertions = {
+    'release_sleeps': 'daemon->service_backlog',
     'blanket_finish_void': 'pgwt_capture_report(d.capture).status==PGWT_MERGE_OK',
     'skip_final_budget_edge_check': 'd.outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE',
     'failures_as_unfinished': 'stats.unfinished_records==unread',
@@ -348,14 +352,39 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     start = transport.index('uint64_t pgwt_transport_service_interval_ns(')
     end = transport.index('static uint64_t read_le(', start)
     cadence = transport[start:end]
+    start = transport.index('void pgwt_transport_begin_pass(')
+    end = transport.index('bool pgwt_transport_pass_expired(', start)
+    begin_pass = transport[start:end]
+    start = transport.index('static int bounded_drain(')
+    end = transport.index('static int counters(', start)
+    budget_drain = transport[start:end]
+    start = transport.index('void pgwt_percpu_transport_begin_pass(')
+    end = transport.index('int pgwt_percpu_transport_snapshot(', start)
+    daemon_begin = transport[start:end]
+    start = capture.index('static int flush_source(')
+    end = capture.index('int pgwt_capture_attach(', start)
+    capture_deferral = capture[start:end]
+    # Pin the main-loop use/reset/preservation of the signal tested below.
+    for statement in ['int timeout_ms = d->service_backlog ? 0 : poll_ms;',
+                      'd->service_backlog = false;\n        pgwt_percpu_transport_begin_pass(',
+                      'if (consume_event_ring(d, "event_ring_drain", true))\n                d->service_backlog = true;']:
+        if statement not in daemon:
+            raise SystemExit('ERROR: main loop no-sleep signal disconnected: ' + statement)
+    start = daemon.index('        /* Drain event ringbuf on every iteration')
+    end = daemon.index('        if (d->debug_dump_state)', start)
+    main_drain = 'static void main_drain_under_test(struct pgwt_daemon *d) {\n' + daemon[start:end] + '}\n'
+    timeout_expression = re.search(r'int timeout_ms = ([^;]+);', daemon).group(1)
+    main_timeout = 'static int main_timeout_under_test(struct pgwt_daemon *d,int poll_ms) { return ' + timeout_expression + '; }\n'
     harness = work / 'tick.c'
     tick_binary = work / 'tick-test'
     def tick_build(tick_body, observer, drain_body=drain, poll_body=capture_poll,
-                   consume_body=consume, event_body=event_drain):
+                   consume_body=consume, event_body=event_drain,
+                   budget_body=budget_drain, deferral_body=capture_deferral, main_body=main_drain):
         instrumented = observer.replace('static int daemon_observe(', 'static int daemon_observe_under_test(')
         instrumented += 'static int daemon_observe(void *ctx, pgwt_merge_observation *o) { ++observation_reads; return daemon_observe_under_test(ctx, o); }\n'
         harness.write_text('#include "percpu_tick_harness.h"\n' + tick_body + instrumented + clock_body + ring_result +
-                           drain_body + consume_body + event_body + tick_entry + cadence + poll_body)
+                           drain_body + consume_body + event_body + tick_entry + cadence + poll_body +
+                           begin_pass + daemon_begin + budget_body + deferral_body + main_body + main_timeout)
         p = subprocess.run(cc + flags + ['-I' + str(repo / 'tests'), '-I' + str(repo / 'src'),
             str(harness), '-o', str(tick_binary)], capture_output=True, text=True, env=env)
         if p.returncode:
@@ -378,8 +407,8 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
         ('per_record_map_reads', tick, full_observe, drain, capture_poll),
         ('ignore_perf_receipts', tick, observe, drain.replace('if (l->d->percpu_transport->positions[i] != before)', 'if (n || before > l->d->percpu_transport->positions[i])'), capture_poll),
         ('perf_without_clock', tick, observe, drain.replace(
-            'if (pgwt_transport_pass_expired(l->d->percpu_transport)) {\n        ++l->d->percpu_transport->stats.perf_budget_yields;',
-            'if (false) {\n        ++l->d->percpu_transport->stats.perf_budget_yields;'), capture_poll),
+            'if (pgwt_transport_pass_expired(l->d->percpu_transport)) {\n        pgwt_budget_yield(&l->d->percpu_transport->budget);\n        ++l->d->percpu_transport->stats.perf_budget_yields;',
+            'if (false) {\n        pgwt_budget_yield(&l->d->percpu_transport->budget);\n        ++l->d->percpu_transport->stats.perf_budget_yields;'), capture_poll),
         ('ring_without_clock', tick, observe, drain.replace(
             'if (!rc && pgwt_transport_pass_expired(r->d->percpu_transport)) {',
             'if (false) {'), capture_poll),
@@ -433,7 +462,45 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
                 any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
             raise SystemExit(f'ERROR: {name}: survived or failed elsewhere\n' + p.stdout + p.stderr)
         print(f'{name}: KILLED at tick_duties ({assertion})')
-    print(f'transport + tick/publication/drain/cadence/yield mutants: {len(mutations)+13}/{len(mutations)+13} killed at intended assertions')
+    no_sleep_mutations = [
+        ('perf', 'drain', 'pgwt_budget_yield(&l->d->percpu_transport->budget);\n        ++l->d->percpu_transport->stats.perf_budget_yields;',
+         '++l->d->percpu_transport->stats.perf_budget_yields;', 'd->service_backlog && perf.records==1'),
+        ('hint', 'drain', 'pgwt_budget_yield(&l->d->percpu_transport->budget);\n        ++l->d->percpu_transport->stats.hint_budget_yields;',
+         '++l->d->percpu_transport->stats.hint_budget_yields;', 'd->service_backlog && hint.records==1'),
+        ('reader', 'drain', 'pgwt_budget_yield(&l->d->percpu_transport->budget);\n            ++l->d->percpu_transport->stats.reader_budget_yields;',
+         '++l->d->percpu_transport->stats.reader_budget_yields;', 'd->service_backlog && perf.records==1'),
+        ('slice', 'budget', 'if (rc != 1) pgwt_budget_yield(&t->budget);',
+         '(void)rc;', 'd->service_backlog && perf.records==1'),
+        ('drain_entry', 'budget', 'pgwt_budget_yield(&t->budget);\n        ++t->stats.drain_budget_yields;',
+         '++t->stats.drain_budget_yields;', 'd->service_backlog && perf.records==1'),
+        ('E', 'drain', 'pgwt_budget_yield(&r->d->percpu_transport->budget);\n        ++r->d->percpu_transport->stats.ring_budget_yields;',
+         '++r->d->percpu_transport->stats.ring_budget_yields;', 'd->service_backlog && e.records==1'),
+        ('E_cap', 'drain', 'pgwt_budget_yield(&r->d->percpu_transport->budget);\n        ++r->d->percpu_transport->stats.ring_record_cap_yields;',
+         '++r->d->percpu_transport->stats.ring_record_cap_yields;', 'd->service_backlog && e.records==904'),
+        ('consume', 'consume', 'pgwt_budget_yield(&d->percpu_transport->budget);',
+         '/* omitted signal */', 'd->service_backlog && e.records==904'),
+        ('preserve', 'main', 'if (consume_event_ring(d, \"event_ring_drain\", true))\n                d->service_backlog = true;',
+         'd->service_backlog = consume_event_ring(d, \"event_ring_drain\", true);', 'd->service_backlog'),
+        ('capture_source', 'deferral', 'pgwt_budget_yield(&c->budget);\n            ++c->source_budget_yields;',
+         '++c->source_budget_yields;', 'd->service_backlog && c.retained_count==1'),
+        ('capture_sweep', 'deferral', 'if (c->retained_count) pgwt_budget_yield(&c->budget);',
+         '/* omitted signal */', 'd->service_backlog && c.retained_count==1'),
+    ]
+    for kind, part, before, after, assertion in no_sleep_mutations:
+        bodies = dict(drain=drain, budget=budget_drain, consume=consume, deferral=capture_deferral, main=main_drain)
+        if bodies[part].count(before) != 1:
+            raise SystemExit(f'ERROR: no_sleep_{kind}: missing unique anchor')
+        bodies[part] = bodies[part].replace(before, after)
+        tick_build(tick, observe, drain_body=bodies['drain'], budget_body=bodies['budget'],
+                   consume_body=bodies['consume'], deferral_body=bodies['deferral'], main_body=bodies['main'])
+        p = subprocess.run([str(tick_binary)], capture_output=True, text=True, env=env)
+        if (p.returncode != 1 or 'REACHED tick_duties\n' not in p.stdout or
+                f'transport ASSERT tick_duties: {assertion}' not in p.stderr or
+                f'[no_sleep_{kind}]' not in p.stderr or
+                any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
+            raise SystemExit(f'ERROR: no_sleep_{kind}: survived or failed elsewhere\n' + p.stdout + p.stderr)
+        print(f'no_sleep_{kind}: KILLED at tick_duties ({assertion})')
+    print(f'transport + tick/publication/drain/cadence/yield mutants: {len(mutations)+13+len(no_sleep_mutations)}/{len(mutations)+13+len(no_sleep_mutations)} killed at intended assertions')
 
     # Run each raw budget stop through the real transport, adapter and core.
     # The Linux callbacks are copied verbatim; only libbpf iteration is fake.
@@ -532,4 +599,4 @@ except AssertionError as error:
     print('natural_exit_without_lower_bound: KILLED at early_zero_exit')
 else:
     raise SystemExit('ERROR: natural exit without lower bound survived')
-print(f'transport host mutants total: {len(mutations)+len(raw_mutations)+14}/{len(mutations)+len(raw_mutations)+14} killed at intended assertions')
+print(f'transport host mutants total: {len(mutations)+len(raw_mutations)+len(no_sleep_mutations)+14}/{len(mutations)+len(raw_mutations)+len(no_sleep_mutations)+14} killed at intended assertions')

@@ -1859,7 +1859,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
     int rb_fd = d->exact_perf ? pgwt_percpu_transport_epoll_fd(d)
                               : ring_buffer__epoll_fd(d->rb);
     int event_rb_fd = d->event_rb ? ring_buffer__epoll_fd(d->event_rb) : -1;
-    bool event_ring_backlog = false;
+    d->service_backlog = false;
 
     uint64_t deadline = 0;
     if (d->duration > 0) {
@@ -1881,7 +1881,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         /* A budget yield means records remain. Re-enter epoll without sleeping
          * so ready timer/signal/control fds run before the next event batch;
          * if none are ready, immediately continue draining the backlog. */
-        int timeout_ms = event_ring_backlog ? 0 : poll_ms;
+        int timeout_ms = d->service_backlog ? 0 : poll_ms;
         if (deadline > 0) {
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1911,6 +1911,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
             break;
         }
 
+        d->service_backlog = false;
         pgwt_percpu_transport_begin_pass(d, deadline * UINT64_C(1000000000));
         if (d->exact_perf && (pgwt_percpu_transport_poll(d) < 0 ||
                               pgwt_merge_capture_poll(d) < 0)) {
@@ -1954,8 +1955,8 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
 
         /* Drain event ringbuf on every iteration (poll-based with NO_WAKEUP) */
         if ((d->event_rb || d->exact_perf) && (!d->exact_perf || d->running)) {
-            event_ring_backlog = consume_event_ring(
-                d, "event_ring_drain", true);
+            if (consume_event_ring(d, "event_ring_drain", true))
+                d->service_backlog = true;
         }
 
         if (d->debug_dump_state) {

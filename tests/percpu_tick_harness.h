@@ -33,15 +33,23 @@ static int tick_clock_gettime(clockid_t clock, struct timespec *ts)
 }
 #define clock_gettime tick_clock_gettime
 /* Only the fields used by the verbatim capture poll body below. */
+struct retained {ma_envelope envelope;unsigned char bytes[272];struct retained *next;};
 struct pgwt_merge_capture {
     pgwt_merge_observation observation;
     uint64_t last_checkpoint_at,last_service_at;
-    bool serviced;
+    bool serviced,finished;
+    struct pgwt_transport_budget budget;
+    struct pgwt_capture_config config;
+    struct retained **heads,**tails,*free;
+    const ma_envelope **held;
+    size_t source_count,next_source,retained_count;
+    uint64_t source_budget_yields,sweep_budget_yields;
 };
 static unsigned core_checks, observation_reads;
 static bool transport_silent;
 static void called(const char *name)
 { size_t n=strlen(name);if(used+n+2>=sizeof(calls))abort();memcpy(calls+used,name,n);used+=n;calls[used++]=' ';calls[used]=0; }
+#define TICK_NAMED(name,expr) do {if(!(expr)){fprintf(stderr,"transport ASSERT tick_duties: %s [%s] (line %d)\n",#expr,name,__LINE__);return false;}}while(0)
 #define TICK(expr) do {if(!(expr)){fprintf(stderr,"transport ASSERT tick_duties: %s (line %d)\n",#expr,__LINE__);return false;}}while(0)
 uint64_t pgwt_debug_monotonic_ns(void){return 123456789;}
 void pgwt_debug_block_report(const char *op,pid_t pid,uint64_t at){(void)op;(void)pid;(void)at;}
@@ -88,8 +96,12 @@ int pgwt_percpu_transport_snapshot(struct pgwt_daemon *d,ma_snapshot *s,uint64_t
 {return pgwt_merge_capture_snapshot(d,s,now);}
 ma_snapshot pgwt_capture_last_snapshot(const struct pgwt_merge_capture *c)
 {(void)c;ma_snapshot s={.valid=true};for(size_t i=0;i<15;++i)s.component_valid[i]=true;return s;}
-int pgwt_capture_envelope(struct pgwt_merge_capture *c,const ma_envelope *e,uint64_t now,const ma_snapshot *s)
-{(void)c;(void)now;(void)s;if(e->kind!=MA_CHECK)abort();++core_checks;return 0;}
+static int mapped(struct pgwt_merge_capture *c,const ma_envelope *e,uint64_t now,ma_snapshot *s,bool *hold)
+{(void)c;(void)now;(void)s;*hold=false;if(e->kind==MA_CHECK)++core_checks;return 0;}
+pgwt_merge_report pgwt_capture_report(const struct pgwt_merge_capture *c)
+{(void)c;return (pgwt_merge_report){.status=PGWT_MERGE_OK};}
+int pgwt_capture_fault(struct pgwt_merge_capture *c,pgwt_merge_reason r,uint64_t now,const ma_snapshot *s)
+{(void)c;(void)r;(void)now;(void)s;return -EIO;}
 bool pgwt_transport_silent(const struct pgwt_percpu_transport *t,uint64_t now,uint64_t interval)
 {(void)t;(void)now;(void)interval;return transport_silent;}
 static int capture_poll_under_test(struct pgwt_daemon *);
@@ -127,7 +139,7 @@ static bool publication_counters(void)
 }
 /* Only the fields accessed by the actual Linux drain body are required.
  * libbpf's successful consume returns ZERO even after delivering samples. */
-struct pgwt_percpu_transport { uint64_t *positions; struct pgwt_transport_budget budget; struct pgwt_transport_stats stats; void *platform; };
+struct pgwt_percpu_transport { uint64_t *positions; struct pgwt_transport_budget budget; struct pgwt_transport_stats stats; void *platform; bool *service_backlog; struct pgwt_transport_io io; };
 struct perf_buffer { struct pgwt_percpu_transport *transport;size_t source,records; bool hint; };
 struct ring_context {struct pgwt_daemon *d;uint32_t dest;size_t consumed,limit;};
 struct ring_buffer {struct ring_context *ctx;size_t records;};
@@ -137,6 +149,8 @@ enum bpf_perf_event_ret {LIBBPF_PERF_EVENT_ERROR=-1,LIBBPF_PERF_EVENT_CONT=0,LIB
 struct perf_event_header {uint32_t type;uint16_t misc,size;};
 enum {PERF_RECORD_SAMPLE=9,PERF_RECORD_LOST=2};
 static uint64_t record_cost;
+static uint64_t observed(struct pgwt_percpu_transport *t){(void)t;return service_now;}
+static int bounded_drain(struct pgwt_percpu_transport *);
 bool pgwt_transport_pass_expired(struct pgwt_percpu_transport *t)
 {return pgwt_budget_expired(&t->budget,service_now);}
 static struct linux_transport *linux_state(struct pgwt_daemon *d)
@@ -234,6 +248,91 @@ static bool drain_cases(void)
     puts("actual Linux consume + daemon backlog: expired pass, timed yield and record cap keep next wait awake; errors preserved PASS");
     return true;
 }
+
+/* Each case isolates one scheduling stop, so another yield cannot mask it. */
+static int slice_result;
+static int slice_drain(void *ctx)
+{(void)ctx;service_now+=PGWT_TRANSPORT_DRAIN_NS;return slice_result;}
+static void main_drain_under_test(struct pgwt_daemon *);
+static int main_timeout_under_test(struct pgwt_daemon *,int);
+static void capture_budget(void *ctx,const struct pgwt_transport_budget *b)
+{pgwt_capture_set_budget(ctx,b);}
+static uint64_t capture_now(void *ctx){(void)ctx;return service_now;}
+static bool no_sleep_cases(void)
+{
+    struct pgwt_daemon *d=calloc(1,sizeof(*d));TICK(d);
+    uint64_t positions[1]={0};
+    struct pgwt_percpu_transport t={.positions=positions};d->percpu_transport=&t;d->exact_perf=true;d->running=true;
+    struct pgwt_merge_capture c={.config={.now=capture_now}};d->merge_capture=&c;
+    t.io=(struct pgwt_transport_io){.ctx=&c,.budget=capture_budget,.drain=slice_drain};
+    struct perf_buffer perf={.transport=&t},hint={.transport=&t,.hint=true};
+    struct perf_buffer *perfs[]={&perf},*hints[]={&hint};
+    struct linux_transport l={.d=d,.ncpu=1,.perf=perfs,.hints=hints};t.platform=&l;
+    for(size_t i=0;i<2;++i)l.ring_ctx[i]=(struct ring_context){.d=d,.dest=(uint32_t)i+1};
+    struct ring_buffer e={.ctx=&l.ring_ctx[0]},life={.ctx=&l.ring_ctx[1]};l.rings[0]=&e;l.rings[1]=&life;
+    d->transport.consume=tick_consume;
+#define NEW_PASS() do {d->service_backlog=false;pgwt_percpu_transport_begin_pass(d,0);}while(0)
+    service_now=0;record_cost=PGWT_TRANSPORT_PASS_NS;
+    NEW_PASS();perf.records=2;
+    /* Invoke only the perf reader: no reader-rotation stop can mask it. */
+    perf_buffer__consume(&perf);
+    TICK_NAMED("no_sleep_perf",d->service_backlog && perf.records==1);
+    TICK(main_timeout_under_test(d,10)==0);
+    t.budget.until=service_now+1; /* raw drain restored the longer service budget */
+    main_drain_under_test(d);
+    TICK_NAMED("no_sleep_preserve",d->service_backlog);
+    NEW_PASS();hint.records=2;service_now+=PGWT_TRANSPORT_PASS_NS;
+    perf_buffer__consume(&hint);
+    TICK_NAMED("no_sleep_hint",d->service_backlog && hint.records==1);
+    TICK(main_timeout_under_test(d,10)==0);
+    NEW_PASS();service_now+=PGWT_TRANSPORT_PASS_NS;bool empty=true;
+    TICK(consume_all(&l,&empty)==0 && !empty);
+    TICK_NAMED("no_sleep_reader",d->service_backlog && perf.records==1);
+    TICK(main_timeout_under_test(d,10)==0);
+    NEW_PASS();TICK(bounded_drain(&t)==0);
+    TICK_NAMED("no_sleep_slice",d->service_backlog && perf.records==1);
+    TICK(main_timeout_under_test(d,10)==0);
+    NEW_PASS();service_now+=PGWT_TRANSPORT_PASS_NS;TICK(bounded_drain(&t)==0);
+    TICK_NAMED("no_sleep_drain_entry",d->service_backlog && perf.records==1);
+    TICK(main_timeout_under_test(d,10)==0);
+    NEW_PASS();e.records=2;
+    TICK(consume_event_ring(d,"E",true));
+    TICK_NAMED("no_sleep_E",d->service_backlog && e.records==1);
+    TICK(main_timeout_under_test(d,10)==0);
+    NEW_PASS();e.records=5000;record_cost=0;
+    TICK(consume_event_ring(d,"E cap",true));
+    TICK_NAMED("no_sleep_E_cap",d->service_backlog && e.records==904);
+    TICK(main_timeout_under_test(d,10)==0);
+    NEW_PASS();service_now+=PGWT_TRANSPORT_PASS_NS;
+    TICK(linux_consume_io(&l,PGWT_WIRE_DEST_L,true)==0);
+    TICK_NAMED("no_sleep_consume",d->service_backlog && e.records==904);
+    TICK(main_timeout_under_test(d,10)==0);
+    struct retained node={0},*head=NULL,*tail=NULL;const ma_envelope *held=NULL;
+    c.heads=&head;c.tails=&tail;c.held=&held;c.free=&node;c.source_count=1;
+    NEW_PASS();service_now+=PGWT_TRANSPORT_PASS_NS;
+    ma_envelope trace={.version=1,.kind=MA_TRACE};ma_snapshot snap={0};
+    TICK(pgwt_capture_envelope(&c,&trace,service_now,&snap)==0);
+    TICK_NAMED("no_sleep_capture_source",d->service_backlog && c.retained_count==1);
+    TICK(main_timeout_under_test(d,10)==0);
+    NEW_PASS();service_now+=PGWT_TRANSPORT_PASS_NS;
+    ma_envelope check={.version=1,.kind=MA_CHECK};
+    TICK(pgwt_capture_envelope(&c,&check,service_now,&snap)==0);
+    TICK_NAMED("no_sleep_capture_sweep",d->service_backlog && c.retained_count==1);
+    TICK(main_timeout_under_test(d,10)==0);
+    NEW_PASS();TICK(pgwt_capture_envelope(&c,&check,service_now,&snap)==0 && !c.retained_count);
+    perf.records=hint.records=e.records=0;l.next_reader=0;
+    TICK(consume_all(&l,&empty)==0 && empty);
+    TICK(!consume_event_ring(d,"empty",true));
+    TICK_NAMED("no_sleep_empty",!d->service_backlog && main_timeout_under_test(d,10)==10);
+    NEW_PASS();slice_result=1;TICK(bounded_drain(&t)==1 && !d->service_backlog);slice_result=0;
+    /* Expiring a capture sweep with no retained records is also empty. */
+    service_now+=PGWT_TRANSPORT_PASS_NS;
+    TICK(pgwt_capture_envelope(&c,&check,service_now,&snap)==0 && !d->service_backlog);
+#undef NEW_PASS
+    free(d);puts("no-sleep guards: perf, hint, reader, slice, drain entry, E, E cap, consume, capture source/sweep, preserve, empty PASS");
+    return true;
+}
+
 static bool tick_cases(void)
 {
     for(unsigned flag=0;flag<2;++flag)for(unsigned view=0;view<6;++view){
@@ -302,7 +401,7 @@ int main(void)
 {
     puts("REACHED tick_duties");fflush(stdout);
     unsetenv("PGWT_TEST_NO_RECOVERY");unsetenv("PGWT_TEST_NO_STALE_SWEEP");
-    if(!publication_counters() || !cadence_cases() || !drain_cases() || !tick_cases())return 1;
+    if(!publication_counters() || !cadence_cases() || !drain_cases() || !no_sleep_cases() || !tick_cases())return 1;
     puts("shared tick: full duty order, 6 views, rates/count, GC, rotations/retention, lightweight/test/death guards PASS");
     return 0;
 }
