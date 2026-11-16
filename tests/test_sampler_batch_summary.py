@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sampler_batch_perf import (FILE_IO_PER_TICK_BOUND, assess_counts, file_io_reds,  # noqa: E402
-                                parse_summary)
+                                parse_summary, parse_vm_calls, assess_pg13_vm_calls, pg13_vm_diagnostics)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sampler_batch"
 CLEAN = {"open": 0, "openat": 6 * 210, "pread64": 2 * 210, "close": 7 * 210,
@@ -168,10 +168,140 @@ def parser_cases():
     print("summary parser: threads summed, events ignored, fail-closed on missing/lost/garbled PASS")
 
 
+def vm_parser_cases():
+    """Verbatim historical fragments and hand-built raw tracepoint pairs."""
+    for image, count, incomplete, postmaster, waiter in (
+            ("ubuntu", 12, 1, 14624, 14626), ("el8", 18, 2, 9190, 9193)):
+        text = (FIXTURES / "pg13_vm" / (image + ".perf.txt")).read_text()
+        records = parse_vm_calls(text)
+        assert len(records) == count and sum(r["ret"] is None for r in records) == incomplete
+        assert {r["pid"] for r in records} == {postmaster, waiter}
+        # Unresolved libc-only stacks do not affect parsing.
+        without_frames = "\n".join(line for line in text.splitlines()
+                                   if "process_vm_readv(" in line)
+        assert parse_vm_calls(without_frames) == records
+        try:
+            assess_pg13_vm_calls(text, postmaster, wait_pids={waiter})
+        except AssertionError as error:
+            assert "unfinished readv" in str(error), str(error)
+        else:
+            raise AssertionError("historical missing exits qualified as complete evidence")
+    # Different timestamps on one tid are DIFFERENT calls, even with identical
+    # arguments (Ubuntu); EL8 also has different vectors and multiple entries.
+    paired = ("1.000 (         ): 77 process_vm_readv(pid: 42, liovcnt: 1, riovcnt: 1) ...\n"
+              "1.000 ( 0.001 ms): 77 ... [continued]: process_vm_readv()) = 12\n")
+    assert parse_vm_calls(paired) == [dict(pid=42, liovcnt=1, riovcnt=1,
+                                         tid=77, timestamp_ns=1_000_000, ret=12)]
+
+    try:
+        parse_vm_calls(paired + summary((77, [("process_vm_readv", 2)])))
+    except AssertionError as error:
+        assert "census differs" in str(error)
+    else:
+        raise AssertionError("rendered event/summary census mismatch accepted")
+
+    tick_event = "pgwt866_test:tick"
+
+    def raw(rows, mark_after_wait=True):
+        """perf script --ns -F tid,time,event,trace, decimal and hex payloads."""
+        text = ""
+        previous_wait = False
+        for index, (tid, pid, iovs, remote, result) in enumerate(rows):
+            if index == 0 or (previous_wait and mark_after_wait):
+                text += f"77 1234567.{index * 3:09d}: {tick_event}: (0x1234)\n"
+            text += (f"{tid} 1234567.{index * 3 + 1:09d}: syscalls:sys_enter_process_vm_readv: "
+                     f"__syscall_nr: 310, pid: 0x{pid:x}, liovcnt: 0x{iovs:x}, riovcnt: 0x{remote:x}\n"
+                     f"{tid} 1234567.{index * 3 + 2:09d}: syscalls:sys_exit_process_vm_readv: "
+                     f"__syscall_nr: 310, ret: {result}\n")
+            previous_wait = pid == 99
+        text += f"77 1234567.{len(rows) * 3:09d}: {tick_event}: (0x1234)\n"
+        return text
+
+    discover = (77, 42, 4, 4, 48)  # also a possible four-range short status read
+    status = (77, 42, 1024, 1024, 328704)
+    wait = (77, 99, 500, 500, 2000)
+    good = raw([discover, discover, status, wait, status, wait])
+    result = assess_pg13_vm_calls(good, 42, wait_pids={99}, ticks_inside=2, ticks_spanning=3,
+                                  tick_event=tick_event)
+    assert result["max_discovery_calls_per_tick"] == 2
+    assert result["calls"]["process_vm_readv"] == 6
+    records = parse_vm_calls(good)
+    assert records[0]["timestamp_ns"] + 3 == records[1]["timestamp_ns"]
+    assert parse_vm_calls("\n".join(reversed(good.splitlines()))) == records
+    boundary = ("77 1234566.999999999: syscalls:sys_exit_process_vm_readv: ret: 12\n" + good +
+                "77 1234567.999999999: syscalls:sys_enter_process_vm_readv: pid: 42, liovcnt: 1, riovcnt: 1\n")
+    bounded = assess_pg13_vm_calls(boundary, 42, wait_pids={99}, tick_event=tick_event)
+    assert bounded["boundary_entries"] == bounded["boundary_exits"] == 1
+    assert bounded["qualified_ticks"] == 2 and bounded["max_discovery_calls_per_tick"] == 2
+    # Interleaved threads pair independently. Same entry time on another tid
+    # is not a duplicate, and a signed hexadecimal errno remains negative.
+    interleaved = ("7 1.000000001: syscalls:sys_enter_process_vm_readv: pid: 42, liovcnt: 1, riovcnt: 1\n"
+                   "8 1.000000001: syscalls:sys_enter_process_vm_readv: pid: 43, liovcnt: 2, riovcnt: 2\n"
+                   "8 1.000000002: syscalls:sys_exit_process_vm_readv: ret: 16\n"
+                   "7 1.000000003: syscalls:sys_exit_process_vm_readv: ret: 0xfffffffffffffff2\n")
+    assert [r["ret"] for r in parse_vm_calls(interleaved)] == [-14, 16]
+    invalid = [
+        (raw([discover, discover, discover, status, wait, status, wait]), "calls/tick=3"),
+        (raw([status, wait]), "need pending discovery"),
+        (raw([(77, 99, 500, 500, 6000), status, wait]), "non-postmaster"),
+        (raw([(77, 43, 4, 4, 1284), status, wait]), "non-postmaster"),
+        (raw([(77, 42, 4, 3, 1284), status, wait]), "iovec shape"),
+        (raw([discover, (77, 42, 5, 5, 1284), wait]), "status batch"),
+        (raw([discover, (78, 42, 4, 4, 1284), wait]), "sampler tid"),
+        (raw([discover, wait, discover, wait], mark_after_wait=False), "extra wait-shaped"),
+        (raw([discover, status, wait]).replace(
+             "77 1234567.000000007:", "77 1234567.000000006: pgwt866_test:tick: (0x1234)\n77 1234567.000000007:"),
+         "missing wait-word"),
+        (good + "LOST 1 events!", "lost events"),
+        (good + "PERF_RECORD_LOST id=7 lost=2", "lost events"),
+        (good.replace("77 1234567.000000002: syscalls:sys_exit_process_vm_readv: __syscall_nr: 310, ret: 48\n", ""),
+         "overlapping raw"),
+    ]
+    for text, reason in invalid:
+        try:
+            assess_pg13_vm_calls(text, 42, wait_pids={99}, tick_event=tick_event)
+        except AssertionError as error:
+            assert reason in str(error), (reason, str(error))
+        else:
+            raise AssertionError(f"bad raw evidence accepted: {reason}")
+    for kwargs, reason in (({"ticks_inside": 3}, "fewer closed tick markers"),
+                           ({"ticks_spanning": 1}, "extra tick markers"),
+                           ({"read_faults": 1}, "faults prevent"),
+                           ({"tick_event": None}, "independent sampler tick")):
+        options = dict(wait_pids={99}, tick_event=tick_event)
+        options.update(kwargs)
+        try:
+            assess_pg13_vm_calls(good, 42, **options)
+        except AssertionError as error:
+            assert reason in str(error), (reason, str(error))
+        else:
+            raise AssertionError(f"tick census/refusal accepted: {kwargs}")
+    for text, reason in ((interleaved.splitlines()[2], "exit without entry"),
+                         (interleaved.splitlines()[0] + "\n" + interleaved.splitlines()[0], "overlapping raw"),
+                         (good.replace("riovcnt: 0x4", "undecoded: 0x4"), "arguments not decoded")):
+        try:
+            parse_vm_calls(text)
+        except AssertionError as error:
+            assert reason in str(error), (reason, str(error))
+        else:
+            raise AssertionError(f"incomplete raw evidence accepted: {reason}")
+    assert "evidence_error" in pg13_vm_diagnostics(interleaved.splitlines()[2])
+    assert pg13_vm_diagnostics(raw([(77, 1234, 1, 1, 12)]))["calls"]["process_vm_readv"] == 1
+    for stream in ("LOST 195 events!", "LOST 217 events!", "LOST 16 events!", "LOST 2 events!"):
+        try:
+            pg13_vm_diagnostics(good, (stream,))
+        except AssertionError as error:
+            assert "lost events" in str(error)
+        else:
+            raise AssertionError("loss in perf stderr accepted")
+    print("PG13 readv: Ubuntu/EL8 recorded fragments; raw tid/timestamp pairs, ambiguous discovery budget, loss guards PASS")
+
+
 def main():
     parser_cases()
     bound_cases()
     recorded_cases()
+    vm_parser_cases()
     print("sampler batch summary: PASS")
 
 

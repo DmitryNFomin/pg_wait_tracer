@@ -836,7 +836,13 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
 
     /* Set group ownership and permissions for non-root access */
     if (w->trace_gid != (gid_t)-1) {
-        fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+        if (fchown(fileno(w->fp), (uid_t)-1, w->trace_gid) != 0) {
+            fprintf(stderr, "WARN: cannot set trace group on %s: %s\n",
+                    w->current_path, strerror(errno));
+            fclose(w->fp);
+            w->fp = NULL;
+            return -1;
+        }
         fchmod(fileno(w->fp), 0640);
     }
 

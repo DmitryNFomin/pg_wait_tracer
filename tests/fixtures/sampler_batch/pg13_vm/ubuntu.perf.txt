@@ -1,0 +1,37 @@
+# Recorded verbatim syscall/frame fragments from /Users/dmitryfomin/work/git/pg_wait_tracer/tests/results/session-20261116/p866-pg13-live/ubuntu/out/diag-m16384/pg13-far-candidate/perf.trace
+# Original line numbers follow each fragment; omissions contain no fixture evidence.
+# Source line 7
+     0.257 ( 0.373 ms): 15171 process_vm_readv(pid: 14624 (postgres), lvec: 0x5ee97cf2dde0, liovcnt: 1024, rvec: 0x5ee97cf358f0, riovcnt: 1024) = 328704
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)
+# Source line 9
+     0.647 ( 0.378 ms): 15171 process_vm_readv(pid: 14624 (postgres), lvec: 0x5ee97cf31de0, liovcnt: 928, rvec: 0x5ee97cf398f0, riovcnt: 928) = 297888
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)
+# Source line 11
+     1.212 ( 0.169 ms): 15171 process_vm_readv(pid: 14626 (postgres), lvec: 0x5ee97cf2a050, liovcnt: 492, rvec: 0x5ee97cf2bf20, riovcnt: 492) = 1968
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)
+# Source line 29
+    11.215 ( 0.380 ms): 15171 process_vm_readv(pid: 14624 (postgres), lvec: 0x5ee97cf2dde0, liovcnt: 1024, rvec: 0x5ee97cf358f0, riovcnt: 1024) = 328704
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)
+# Source line 31
+    11.610 ( 0.347 ms): 15171 process_vm_readv(pid: 14624 (postgres), lvec: 0x5ee97cf31de0, liovcnt: 928, rvec: 0x5ee97cf398f0, riovcnt: 928) = 297888
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)
+# Source line 33
+    12.129 ( 0.220 ms): 15171 process_vm_readv(pid: 14626 (postgres), lvec: 0x5ee97cf2a050, liovcnt: 492, rvec: 0x5ee97cf2bf20, riovcnt: 492) = 1968
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)
+# Source line 71209
+ 16513.032 (         ): 15171 process_vm_readv(pid: 14624 (postgres), lvec: 0x7ffe1aff1840, liovcnt: 1, rvec: 0x7ffe1aff5840, riovcnt: 1) ...
+# Source line 71210
+ 16513.068 ( 0.013 ms): 15171 process_vm_readv(pid: 14624 (postgres), lvec: 0x7ffe1aff1840, liovcnt: 1, rvec: 0x7ffe1aff5840, riovcnt: 1) = 8
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)
+# Source line 71212
+ 16513.422 ( 0.527 ms): 15171 process_vm_readv(pid: 14624 (postgres), lvec: 0x5ee97d4b7720, liovcnt: 1024, rvec: 0x5ee97d4c6f30, riovcnt: 1024) = 328704
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)
+# Source line 71214
+ 16513.969 ( 0.474 ms): 15171 process_vm_readv(pid: 14624 (postgres), lvec: 0x5ee97d4bb720, liovcnt: 1024, rvec: 0x5ee97d4caf30, riovcnt: 1024) = 328704
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)
+# Source line 71216
+ 16514.462 ( 0.497 ms): 15171 process_vm_readv(pid: 14624 (postgres), lvec: 0x5ee97d4bf720, liovcnt: 1024, rvec: 0x5ee97d4cef30, riovcnt: 1024) = 328704
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)
+# Source line 71218
+ 16514.978 ( 0.404 ms): 15171 process_vm_readv(pid: 14624 (postgres), lvec: 0x5ee97d4c3720, liovcnt: 880, rvec: 0x5ee97d4d2f30, riovcnt: 880) = 282480
+                                       process_vm_readv (/usr/lib/x86_64-linux-gnu/libc.so.6)

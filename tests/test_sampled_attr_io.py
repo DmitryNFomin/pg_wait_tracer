@@ -125,8 +125,7 @@ def live_setup_cases():
 def pg13_live_pure_cases():
     """Timing truth is hand-built, never fitted to candidate output."""
     import test_sampler_batch_live as live
-    from sampler_batch_perf import assess_pg13_timing, require_pg13_negative_control, assess_pg13_vm_calls
-    from test_sampler_batch_summary import summary
+    from sampler_batch_perf import assess_pg13_timing, require_pg13_negative_control
     cohort = [{"pid": 1000 + i, "backend_start_ns": 10_000_000_000_000 + i * 100_000_000}
               for i in range(200)]
     samples = [{"pid": row["pid"], "timestamp_ns": row["backend_start_ns"] + (i + 1) * 100_000,
@@ -180,41 +179,8 @@ def pg13_live_pure_cases():
     else:
         raise AssertionError("mixed clocks accepted")
 
-    def perf(kinds, bad_pid=False, unresolved=False, census_extra=0):
-        events = ""
-        frames = {"discovery": "pgwt_pgbs_resolve_pg13_batch", "status": "pgwt_pgbs_read_batch",
-                  "wait": "pgwt_sampler_read_targets"}
-        for i, kind in enumerate(kinds):
-            pid = 99 if kind == "wait" or (bad_pid and kind == "discovery") else 42
-            events += (f"{i}.000 ( 0.001 ms): 77 process_vm_readv(pid: {pid}, liovcnt: 1, riovcnt: 1) = 4\n"
-                       f"            1234 {frames[kind] if not unresolved else 'unresolved'}+0x10 (/tmp/tracer)\n")
-        return events + summary((77, [("process_vm_readv", len(kinds) + census_extra)]))
-    calls = ["discovery", "discovery", "status", "wait", "status", "wait"]
-    result = assess_pg13_vm_calls(perf(calls), 42)
-    assert result["max_discovery_calls_per_tick"] == 2 and result["wait_word_calls"] == 2
-    # Average 1.5 discovery calls/tick is still RED if one tick made three.
-    for text, reason in (
-        (perf(["discovery", "discovery", "discovery", "status", "wait", "status", "wait"]), "calls/tick=3"),
-        (perf(calls, bad_pid=True), "non-postmaster"),
-        (perf(calls, unresolved=True), "unresolved"),
-        (perf(calls, census_extra=1), "census differs"),
-        (perf(calls) + "LOST 1 events", "lost events"),
-        (perf(["status", "wait"]), "need pending discovery")):
-        try:
-            assess_pg13_vm_calls(text, 42)
-        except AssertionError as error:
-            assert reason in str(error), (reason, str(error))
-        else:
-            raise AssertionError(f"bad discovery evidence accepted: {reason}")
-    for kwargs, reason in (({"ticks_inside": 3}, "fewer wait-word"),
-                           ({"ticks_spanning": 1}, "extra wait-word"),
-                           ({"read_faults": 1}, "faults prevent")):
-        try:
-            assess_pg13_vm_calls(perf(calls), 42, **kwargs)
-        except AssertionError as error:
-            assert reason in str(error), str(error)
-        else:
-            raise AssertionError(f"ambiguous sampler tick boundaries accepted: {kwargs}")
+    from test_sampler_batch_summary import vm_parser_cases
+    vm_parser_cases()
 
     args = live.parse_args(["--pg13-far-rows", "--master-tracer", "/tmp/0b1d7dd6/pg_wait_tracer",
                             "--require-negative-control", "--dry-run", "--pg-version", "13"])
@@ -271,6 +237,56 @@ def pg13_recorded_sample_case():
         else:
             raise AssertionError("undecodable recording accepted as missing attribution")
     print("recorded samples: persisted timestamps/identity, wall-clock conversion, corrupt-trace refusal PASS")
+
+
+def writer_group_failure_case():
+    """Fortify's unused-result contract and the real counted writer error path."""
+    import sys
+    with tempfile.TemporaryDirectory(prefix="pgwt866-fchown-") as tmp:
+        directory = Path(tmp)
+        header = directory / "fchown-result.h"
+        # Darwin lacks glibc's fortify annotation; require it explicitly so
+        # this Mac check detects the original ignored-result build failure.
+        header.write_text("#include <unistd.h>\n"
+                          "extern int fchown(int, uid_t, gid_t) __attribute__((warn_unused_result));\n")
+        source = directory / "group-failure.c"
+        source.write_text(r'''#include "event_writer.h"
+#include <assert.h>
+#include <errno.h>
+#include <unistd.h>
+int pgwt_test_fchown(int fd, uid_t owner, gid_t group) {
+    (void)fd; (void)owner; (void)group; errno = EPERM; return -1;
+}
+int main(int argc, char **argv) {
+    assert(argc == 2);
+    struct pgwt_event_writer w;
+    assert(pgwt_writer_init(&w, argv[1], 13, 1, NULL) == 0);
+    w.trace_gid = getgid();
+    struct pgwt_trace_event event = {.timestamp_ns = 1000000, .pid = 1000};
+    uint64_t failures = 0;
+    assert(pgwt_writer_push_event_counted(&w, &event, &failures) == -1);
+    assert(failures == 1 && w.failed && !w.enabled && w.fp == NULL);
+    assert(pgwt_writer_push_event_counted(&w, &event, &failures) == -1);
+    assert(failures == 2 && w.fp == NULL);
+    pgwt_writer_destroy(&w);
+    return 0;
+}
+''')
+        command = shlex.split(os.environ.get("CC", "cc")) + [
+            "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-D_FORTIFY_SOURCE=2",
+            "-Werror=unused-result", "-Dfchown=pgwt_test_fchown", "-include", str(header),
+            "-I" + str(ROOT / "src"), str(source), str(ROOT / "src/event_writer.c"),
+            "-llz4", "-o", str(directory / "group-failure")]
+        if sys.platform == "darwin":
+            prefix = subprocess.check_output(["brew", "--prefix", "lz4"], text=True).strip()
+            command[1:1] = ["-I" + prefix + "/include", "-L" + prefix + "/lib",
+                             "-include", str(ROOT / "demos/replay-compat.h")]
+        result = run(command)
+        assert result.returncode == 0, result.stdout + result.stderr
+        result = run([str(directory / "group-failure"), str(directory / "trace")])
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stderr.count("WARN: cannot set trace group") == 1, result.stderr
+    print("fchown: -D_FORTIFY_SOURCE=2 -Werror=unused-result build, counted sticky writer failure PASS")
 
 
 def late_promotion_setup_case():
@@ -365,6 +381,7 @@ def main():
     perf_gate_cases()
     pg13_live_pure_cases()
     pg13_recorded_sample_case()
+    writer_group_failure_case()
     live_setup_cases()
     late_promotion_setup_case()
     unsupported_version_cases()

@@ -8,6 +8,10 @@ form that read per-event text lines and path names; they are kept unchanged
 because tests/test_sampled_attr_io.py still exercises them, and the live test
 no longer calls them.
 No product-derived expected values: the syscall bound is the accepted design.
+
+The PG13 far-row arm uses explicit readv entry/exit tracepoints and a symbol
+entry tick marker instead of perf trace's syscall pretty-printer or stacks.
+Only closed tick intervals are qualified; any loss anywhere invalidates a run.
 """
 import re
 import math
@@ -269,71 +273,210 @@ def require_pg13_negative_control(result):
     return "pre-fix PG13 negative control: RED at " + "; ".join(result["timing_errors"])
 
 
-def assess_pg13_vm_calls(text, postmaster, extra_streams=(), *, ticks_inside=0,
-                        ticks_spanning=None, read_faults=0):
-    """Qualify status/discovery readers using perf's user callchains.
+# Explicit syscall tracepoints, decoded by `perf script -F tid,time,event,trace`.
+VM_EVENTS = "syscalls:sys_enter_process_vm_readv,syscalls:sys_exit_process_vm_readv"
+VM_RAW = re.compile(r"^\s*(\d+)\s+(\d+\.\d+):\s+syscalls:sys_(enter|exit)_process_vm_readv:\s*(.*)$")
+VM_RENDERED = re.compile(r"^\s*(\d+\.\d+)\s+\([^)]*\):\s*(\d+)\s+(.*)$")
 
-    The existing wait-word reader intentionally reads through a backend.
-    Exempt ONLY a callchain naming that function, never a PID or return-size
-    guess. Its single batch also marks the end of a sampler tick, so a third
-    discovery call cannot hide in an average across quiet ticks. Require a
-    complete census matching the summary, and fail on unresolved callchains.
+
+def require_lossless(*streams):
+    for stream in streams:
+        # --show-lost-events prints PERF_RECORD_LOST (including records with
+        # a zero count); a loss record is never evidence of syscall absence.
+        if LOST.search(stream) or "PERF_RECORD_LOST" in stream:
+            raise AssertionError("perf lost events; syscall absence is unproven")
+
+
+def vm_arguments(body):
+    values = {}
+    for name in ("pid", "liovcnt", "riovcnt"):
+        match = re.search(r"\b" + name + r"\s*[:=]\s*(0x[0-9a-fA-F]+|[0-9]+)\b", body)
+        assert match, f"readv arguments not decoded: {body}"
+        values[name] = int(match[1], 0) if match[1].startswith("0x") else int(match[1])
+    return values
+
+
+def parse_vm_trace(text, extra_streams=(), tick_event=None):
+    """Keep each entry and its exit together, across threads and CPU migration.
+
+    Raw tracepoints are the live evidence: sort by timestamp, pair per tid,
+    and retain the entry timestamp as the call's identity. Rendered perf trace
+    recordings are also readable for regression fixtures. Their timestamps
+    are ENTRY times, even on a completed/continued line. An entry-only line
+    at T must never consume a complete call at a different T on the same tid
+    (the recorded EL8 failure). Unmatched entries remain visible with ret=None;
+    qualification rejects incomplete evidence within its closed tick window.
     """
-    assert read_faults == 0, "wait-word faults prevent using one wait batch as a tick delimiter"
-    counts = parse_summary(text, extra_streams)
-    events = text[:SUMMARY_HEADER.search(text).start()]
-    headers = list(re.finditer(HEADER.pattern, events, re.M))
-    pending, records = {}, []
-    for index, header in enumerate(headers):
-        _, tid, body = header.groups()
-        call = CALL.search(body)
-        if not call or call[1] != "process_vm_readv":
-            continue
-        block_end = headers[index + 1].start() if index + 1 < len(headers) else len(events)
-        frames = events[header.end():block_end]
-        if "[continued]" in body:
-            assert tid in pending, "readv continuation without entry"
-            args, earlier = pending.pop(tid)
-            frames = earlier + frames
-        else:
-            args = call[2]
-        if call[3].strip() == "...":
-            assert tid not in pending, "overlapping readv entries"
-            pending[tid] = (args, frames)
-            continue
-        assert re.match(r"\s*=\s*-?\d+", call[3]), "readv lacks a result"
-        pid = re.search(r"\bpid:\s*(\d+)", args)
-        iovs = re.search(r"\bliovcnt:\s*(\d+)", args)
-        assert pid and iovs, f"readv arguments not decoded: {body}"
-        kinds = [kind for kind, pattern in (
-            ("discovery", r"\b(?:pgwt_pgbs_resolve_pg13_batch|reader_pg13_candidate|resolve_pg13_sampled_attr)\b"),
-            ("status", r"\bpgwt_pgbs_read_batch\b"),
-            ("wait", r"\bpgwt_sampler_read_targets\b")) if re.search(pattern, frames)]
-        assert len(kinds) == 1, f"ambiguous/unresolved readv callchain: {body}\n{frames}"
-        records.append((kinds[0], int(pid[1]), int(iovs[1])))
-    assert not pending, "unfinished readv in perf evidence"
-    assert len(records) == counts["process_vm_readv"] > 0, "readv callchain/summary census differs"
-    discovery = wait = status = per_tick = maximum = 0
-    for kind, pid, iovs in records:
-        assert 0 < iovs <= 1024, f"readv exceeds IOV_MAX: {iovs}"
-        if kind == "wait":
-            wait += 1
-            maximum = max(maximum, per_tick)
-            per_tick = 0
-        else:
-            assert pid == postmaster, f"{kind} process_vm_readv on non-postmaster pid={pid}"
-            if kind == "discovery":
-                discovery += 1
-                per_tick += 1
+    require_lossless(text, *extra_streams)
+    records, raw, rendered, ticks, unmatched_exits = [], [], {}, [], []
+    marker = re.compile(r"^\s*(\d+)\s+(\d+\.\d+):\s+" + re.escape(tick_event) + r":.*$") if tick_event else None
+    for line in text.splitlines():
+        tick = marker.match(line) if marker else None
+        if tick:
+            tid, timestamp = tick.groups()
+            seconds, fraction = timestamp.split(".")
+            assert len(fraction) <= 9, f"invalid perf timestamp: {timestamp}"
+            raw.append((int(seconds) * 1_000_000_000 + int(fraction.ljust(9, "0")),
+                        int(tid), "tick", ""))
+        elif "sys_enter_process_vm_readv" in line or "sys_exit_process_vm_readv" in line:
+            match = VM_RAW.match(line)
+            assert match, f"unparseable readv tracepoint: {line}"
+            tid, timestamp, kind, body = match.groups()
+            # Integer ns: floats lose ordering at the precision of perf --ns.
+            seconds, fraction = timestamp.split(".")
+            assert len(fraction) <= 9, f"invalid perf timestamp: {timestamp}"
+            raw.append((int(seconds) * 1_000_000_000 + int(fraction.ljust(9, "0")),
+                        int(tid), kind, body))
+        elif "process_vm_readv(" in line:
+            header = VM_RENDERED.match(line)
+            assert header, f"unparseable rendered readv: {line}"
+            timestamp, tid, body = header.groups()
+            call = CALL.search(body)
+            assert call and call[1] == "process_vm_readv", f"unparseable readv: {line}"
+            key = (int(tid), timestamp)
+            previous = rendered.get(key)
+            if "[continued]" in body:
+                assert previous, "readv continuation without matching tid/timestamp entry"
+                args = {k: previous[k] for k in ("pid", "liovcnt", "riovcnt")}
             else:
-                status += 1
-    maximum = max(maximum, per_tick)
+                args = vm_arguments(call[2])
+            result = re.match(r"\s*=\s*(-?\d+)", call[3])
+            assert result or call[3].strip() == "...", f"readv lacks a result: {line}"
+            record = dict(args, tid=int(tid), timestamp_ns=int(timestamp.replace(".", "")) *
+                          10 ** (6 - len(timestamp.split(".")[1])),
+                          ret=int(result[1]) if result else None)
+            if previous:
+                assert all(previous[k] == record[k] for k in args), "readv entry/exit arguments differ"
+                assert previous["ret"] is None and record["ret"] is not None, "duplicate readv entry/exit"
+            rendered[key] = record
+    assert not (raw and rendered), "mixed raw and rendered readv evidence"
+    if raw:
+        pending, current_tick = {}, {}
+        for timestamp, tid, kind, body in sorted(raw):
+            if kind == "tick":
+                assert tid not in pending, "tick marker inside an unfinished syscall"
+                assert (tid, timestamp) not in ticks, "duplicate tick marker"
+                ticks.append((tid, timestamp))
+                current_tick[tid] = timestamp
+            elif kind == "enter":
+                assert tid not in pending, f"overlapping raw readv entries: tid={tid} timestamp={timestamp}"
+                pending[tid] = dict(vm_arguments(body), tid=tid, timestamp_ns=timestamp, ret=None)
+                if tick_event:
+                    pending[tid]["tick_ns"] = current_tick.get(tid)
+            else:
+                if tid not in pending:
+                    assert tick_event, f"readv exit without entry: tid={tid} timestamp={timestamp}"
+                    unmatched_exits.append((tid, timestamp))
+                    continue
+                result = re.search(r"\bret\s*[:=]\s*(-?0x[0-9a-fA-F]+|-?\d+)", body)
+                assert result, f"readv exit result not decoded: {body}"
+                value = int(result[1], 0) if "0x" in result[1] else int(result[1])
+                if value >= 1 << 63:
+                    value -= 1 << 64
+                record = pending.pop(tid)
+                record["ret"] = value
+                records.append(record)
+        records.extend(pending.values())
+    else:
+        records = list(rendered.values())
+        if SUMMARY_HEADER.search(text):
+            counts = parse_summary(text, extra_streams)
+            assert sum(row["ret"] is not None for row in records) == counts["process_vm_readv"], \
+                "readv entry/exit-summary census differs"
+    assert records, "perf observed no process_vm_readv entries"
+    return {"calls": sorted(records, key=lambda row: (row["timestamp_ns"], row["tid"])),
+            "ticks": ticks, "unmatched_exits": unmatched_exits}
+
+
+def parse_vm_calls(text, extra_streams=()):
+    return parse_vm_trace(text, extra_streams)["calls"]
+
+
+def pg13_vm_diagnostics(text, extra_streams=()):
+    """Non-gating syscall diagnostics for the timing negative control.
+
+    Loss still invalidates the capture, in either mode. Structural/syscall
+    assertions cannot substitute for the required far-row timing RED.
+    """
+    require_lossless(text, *extra_streams)
+    try:
+        return {"calls": {"process_vm_readv": len(parse_vm_calls(text, extra_streams))}}
+    except AssertionError as error:
+        return {"evidence_error": str(error)}
+
+
+def assess_pg13_vm_calls(text, postmaster, extra_streams=(), *, ticks_inside=0,
+                        ticks_spanning=None, read_faults=0, wait_pids=(),
+                        wait_iov_min=488, wait_iov_max=1023, tick_event=None):
+    """Qualify calls inside independently marked sampler ticks.
+
+    There is exactly one permitted non-postmaster wait-shaped call per full
+    tick: a stable independently enumerated reader, equal population-sized
+    iovec counts, and four returned bytes per iovec. Identical argument/result
+    tuples cannot identify C functions; this is an explicit shape exemption,
+    never a claim of semantic identification. A second exemption in a tick
+    fails. Every other call targets the postmaster; short transfers which could
+    be discovery count AGAINST its budget, even if they could be status retries.
+    """
+    assert read_faults == 0, "wait-word faults prevent the one-batch wait exemption"
+    trace = parse_vm_trace(text, extra_streams, tick_event)
+    captured, ticks = trace["calls"], trace["ticks"]
+    if not tick_event:
+        assert all(row["ret"] is not None for row in captured), "unfinished readv in perf evidence"
+    assert tick_event and len(ticks) >= 2, "need independent sampler tick markers"
+    # Qualify CLOSED tick intervals only. A recorder may attach within a
+    # syscall, or stop after an entry. Keep boundary evidence in diagnostics;
+    # never guess its arguments/result or claim absence outside this window.
+    start, end = ticks[0][1], ticks[-1][1]
+    assert not any(start <= timestamp < end for _, timestamp in trace["unmatched_exits"]), \
+        "readv exit without entry inside qualified ticks"
+    records = [row for row in captured if start <= row["timestamp_ns"] < end]
+    assert records and all(row["ret"] is not None for row in records), "unfinished readv in qualified ticks"
+    assert wait_pids and postmaster not in wait_pids, "need independent non-postmaster wait-reader pids"
+    discovery = wait = status = maximum = 0
+    wait_reader = None
+    sampler_tids = {tid for tid, _ in ticks}
+    assert len(sampler_tids) == 1, "tick markers outside sampler tid"
+    sampler_tid = next(iter(sampler_tids))
+    assert all(row["tid"] == sampler_tid for row in records), "readv outside sampler tid"
+    per_tick = {timestamp: {"discovery": 0, "wait": 0} for _, timestamp in ticks[:-1]}
+    for row in records:
+        pid, iovs, remote, result = (row[k] for k in ("pid", "liovcnt", "riovcnt", "ret"))
+        bucket = per_tick[row["tick_ns"]]
+        assert 0 < iovs == remote <= 1024, f"readv iovec shape: {row}"
+        if pid != postmaster:
+            assert (pid in wait_pids and wait_iov_min <= iovs <= wait_iov_max
+                    and result == 4 * iovs), f"process_vm_readv on non-postmaster outside wait exemption: {row}"
+            if wait_reader is None:
+                wait_reader = pid
+            assert (pid, row["tid"]) == (wait_reader, sampler_tid), "wait reader/tid changed"
+            wait += 1
+            bucket["wait"] += 1
+            assert bucket["wait"] <= 1, "extra wait-shaped call inside sampler tick"
+        elif result <= 12 * iovs:
+            # Includes negative/short/ambiguous status returns. Never let a
+            # third discovery hide by labelling a small transfer 'status'.
+            discovery += 1
+            bucket["discovery"] += 1
+        else:
+            assert iovs == 1024 or iovs % 4 == 0 or iovs % 3 == 0, f"status batch iovec shape: {row}"
+            status += 1
+    maximum = max(bucket["discovery"] for bucket in per_tick.values())
+    # Every closed marker interval contains exactly one wait-shaped call.
+    for _, timestamp in ticks[:-1]:
+        assert per_tick[timestamp]["wait"] == 1, f"missing wait-word batch in sampler tick {timestamp}"
     assert discovery and wait and status, "need pending discovery, status and wait-word calls"
+    assert len(ticks) - 1 >= ticks_inside, "fewer closed tick markers than observed sampler ticks"
     assert wait >= ticks_inside, "fewer wait-word batches than observed sampler ticks"
     if ticks_spanning is not None:
-        assert wait <= ticks_spanning, "extra wait-word batches prevent delimiting sampler ticks"
-    assert maximum <= 2, f"discovery calls/tick={maximum} > 2"
-    return {"discovery_calls": discovery, "max_discovery_calls_per_tick": maximum,
-            "status_calls": status, "wait_word_calls": wait, "calls": counts,
+        assert len(ticks) <= ticks_spanning, "extra tick markers compared with observed sampler ticks"
+        assert wait <= ticks_spanning, "extra wait-word batches compared with observed sampler ticks"
+    assert maximum <= 2, f"possible discovery calls/tick={maximum} > 2"
+    return {"possible_discovery_calls": discovery, "max_discovery_calls_per_tick": maximum,
+            "status_calls": status, "wait_word_calls": wait, "wait_reader_pid": wait_reader,
+            "calls": {"process_vm_readv": len(records)},
             "ticks_inside": ticks_inside, "ticks_spanning": ticks_spanning,
-            "wait_read_faults": read_faults}
+            "wait_read_faults": read_faults, "tick_markers": len(ticks),
+            "qualified_ticks": len(ticks) - 1, "qualified_start_ns": start, "qualified_end_ns": end,
+            "boundary_entries": len(captured) - len(records), "boundary_exits": len(trace["unmatched_exits"]),
+            "wait_exemption": "one stable independently enumerated pid; equal population iov counts; 4 bytes/iov"}
