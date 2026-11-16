@@ -10,6 +10,7 @@ no longer calls them.
 No product-derived expected values: the syscall bound is the accepted design.
 """
 import re
+import math
 
 CALLS = "open,openat,pread64,close,process_vm_readv"
 HEADER = re.compile(r"^\s*(\d+\.\d+)\s+\([^)]*\):\s*(?:(\d+)\s+)?(.*)$")
@@ -228,3 +229,111 @@ def assess_counts(counts, major, population, ticks_inside, ticks_spanning,
 def file_io_reds(errors):
     """The per-backend file I/O assertions among `assess_counts` errors."""
     return [e for e in errors if re.match(r"(?:openat|pread64|close)/tick=", e)]
+
+
+def assess_pg13_timing(cohort, samples, tick_ns):
+    """Same timing gate for candidate and pre-fix captures, in wall-clock ns.
+
+    `cohort` is independent SQL backend_start evidence, not sample-derived.
+    Only a persisted sample with a nonzero query ID proves attribution; an
+    idle/query-less observation cannot satisfy this gate. Nearest-rank p99
+    is descriptive; EVERY backend must meet the two-period bound.
+    """
+    assert tick_ns > 0 and len(cohort) == 200, "need 200 short-session starts"
+    starts = {row["pid"]: row["backend_start_ns"] for row in cohort}
+    assert len(starts) == 200 and all(pid > 0 and ts > 0 for pid, ts in starts.items())
+    first = {}
+    for row in samples:
+        pid, ts = row["pid"], row["timestamp_ns"]
+        if pid in starts and row["query_id"]:
+            assert ts >= starts[pid], f"sample predates backend_start: pid={pid}"
+            first[pid] = min(first.get(pid, ts), ts)
+    delays = sorted(first[pid] - starts[pid] for pid in first)
+    errors = []
+    missing = sorted(starts.keys() - first.keys())
+    if missing:
+        errors.append(f"first attribution missing: pids={missing}")
+    late = {pid: first[pid] - starts[pid] for pid in first
+            if first[pid] - starts[pid] > 2 * tick_ns}
+    if late:
+        errors.append(f"first attribution > 2 tick periods ({2 * tick_ns} ns): {late}")
+    return {"churn_sessions": len(starts), "attributed_sessions": len(first),
+            "tick_ns": tick_ns, "max_first_attribution_ns": max(delays) if delays else None,
+            "p99_first_attribution_ns": delays[math.ceil(.99 * len(delays)) - 1] if delays else None,
+            "timing_errors": errors}
+
+
+def require_pg13_negative_control(result):
+    """A setup, route or perf failure cannot stand in for the timing RED."""
+    assert result["timing_errors"], "pre-fix negative control did not redden first attribution"
+    return "pre-fix PG13 negative control: RED at " + "; ".join(result["timing_errors"])
+
+
+def assess_pg13_vm_calls(text, postmaster, extra_streams=(), *, ticks_inside=0,
+                        ticks_spanning=None, read_faults=0):
+    """Qualify status/discovery readers using perf's user callchains.
+
+    The existing wait-word reader intentionally reads through a backend.
+    Exempt ONLY a callchain naming that function, never a PID or return-size
+    guess. Its single batch also marks the end of a sampler tick, so a third
+    discovery call cannot hide in an average across quiet ticks. Require a
+    complete census matching the summary, and fail on unresolved callchains.
+    """
+    assert read_faults == 0, "wait-word faults prevent using one wait batch as a tick delimiter"
+    counts = parse_summary(text, extra_streams)
+    events = text[:SUMMARY_HEADER.search(text).start()]
+    headers = list(re.finditer(HEADER.pattern, events, re.M))
+    pending, records = {}, []
+    for index, header in enumerate(headers):
+        _, tid, body = header.groups()
+        call = CALL.search(body)
+        if not call or call[1] != "process_vm_readv":
+            continue
+        block_end = headers[index + 1].start() if index + 1 < len(headers) else len(events)
+        frames = events[header.end():block_end]
+        if "[continued]" in body:
+            assert tid in pending, "readv continuation without entry"
+            args, earlier = pending.pop(tid)
+            frames = earlier + frames
+        else:
+            args = call[2]
+        if call[3].strip() == "...":
+            assert tid not in pending, "overlapping readv entries"
+            pending[tid] = (args, frames)
+            continue
+        assert re.match(r"\s*=\s*-?\d+", call[3]), "readv lacks a result"
+        pid = re.search(r"\bpid:\s*(\d+)", args)
+        iovs = re.search(r"\bliovcnt:\s*(\d+)", args)
+        assert pid and iovs, f"readv arguments not decoded: {body}"
+        kinds = [kind for kind, pattern in (
+            ("discovery", r"\b(?:pgwt_pgbs_resolve_pg13_batch|reader_pg13_candidate|resolve_pg13_sampled_attr)\b"),
+            ("status", r"\bpgwt_pgbs_read_batch\b"),
+            ("wait", r"\bpgwt_sampler_read_targets\b")) if re.search(pattern, frames)]
+        assert len(kinds) == 1, f"ambiguous/unresolved readv callchain: {body}\n{frames}"
+        records.append((kinds[0], int(pid[1]), int(iovs[1])))
+    assert not pending, "unfinished readv in perf evidence"
+    assert len(records) == counts["process_vm_readv"] > 0, "readv callchain/summary census differs"
+    discovery = wait = status = per_tick = maximum = 0
+    for kind, pid, iovs in records:
+        assert 0 < iovs <= 1024, f"readv exceeds IOV_MAX: {iovs}"
+        if kind == "wait":
+            wait += 1
+            maximum = max(maximum, per_tick)
+            per_tick = 0
+        else:
+            assert pid == postmaster, f"{kind} process_vm_readv on non-postmaster pid={pid}"
+            if kind == "discovery":
+                discovery += 1
+                per_tick += 1
+            else:
+                status += 1
+    maximum = max(maximum, per_tick)
+    assert discovery and wait and status, "need pending discovery, status and wait-word calls"
+    assert wait >= ticks_inside, "fewer wait-word batches than observed sampler ticks"
+    if ticks_spanning is not None:
+        assert wait <= ticks_spanning, "extra wait-word batches prevent delimiting sampler ticks"
+    assert maximum <= 2, f"discovery calls/tick={maximum} > 2"
+    return {"discovery_calls": discovery, "max_discovery_calls_per_tick": maximum,
+            "status_calls": status, "wait_word_calls": wait, "calls": counts,
+            "ticks_inside": ticks_inside, "ticks_spanning": ticks_spanning,
+            "wait_read_faults": read_faults}

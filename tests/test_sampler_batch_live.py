@@ -2,7 +2,7 @@
 """Status-row syscall gate: 500 idle + 4 pgbench sessions, >=200 traced ticks.
 
 Registered in run_all.sh's live tier. Requires Linux/root, perf and libpq.
-Starts a private cluster (540 connections) using the selected runner's PG
+Starts a private cluster (PG13: 1100 connections; PG17/18: 540) using the runner's PG
 binary, leaving its provisioned cluster untouched. N=500 idle + 4 active
 proves two status batch calls on all supported versions.
 The syscall evidence is the per-syscall summary of `perf trace -S` over the
@@ -12,6 +12,19 @@ Master negative control: pass --master-tracer (or set PGWT_866_MASTER_TRACER)
 to a tracer built from master on the SAME VM; the SAME assertions must then go
 RED at the per-backend file I/O counts, and the test prints which ones.
 --require-negative-control enforces that it was supplied.
+On PG13 the far-row/short-session arm also runs by default. Select ONLY that
+arm with --pg13-far-rows: then --master-tracer accepts the pre-fix candidate-
+scan tracer 0b1d7dd6, and the SAME first-attribution assertion must go RED.
+Use --syscalls-only for the original syscall/master control in isolation.
+The PG13 arm holds 520 initial sessions, retires 32 near the observed anchor,
+then opens 500 more; 200 new 50 ms sessions reuse a measured far slot (>513).
+It uses 100 Hz, with an unchanged two-period (20 ms) timing bound, a 5 s quiet
+window, the computed route and zero scan fallbacks. Persisted trace timestamps
+are compared with SQL backend_start, never log-arrival or polling times.
+Its perf user callchains require postmaster readers for status/discovery and
+at most two discovery calls per tick. The existing wait-word reader uses a
+backend PID and is identified separately; an unresolved callchain fails closed.
+--dry-run --pg-version 13 works on the Mac without starting any process under test.
 Use --require-huge-pages for the additional huge_pages=on qualification.
 All captures/evidence go to a temporary directory outside the repository
 (or --evidence-dir). Example:
@@ -29,19 +42,117 @@ import pwd
 from pathlib import Path
 import re
 import signal
+import shlex
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 
-from sampler_batch_perf import CALLS, SUPPORTED_MAJORS, assess_counts, file_io_reds, parse_summary
+from sampler_batch_perf import (CALLS, SUPPORTED_MAJORS, assess_counts, file_io_reds,
+                                parse_summary, assess_pg13_timing, require_pg13_negative_control,
+                                assess_pg13_vm_calls)
 from testutil import find_postmaster
 
 ROOT = Path(__file__).resolve().parents[1]
 SHADOW = ("sampled_attr_shadow_total", "sampled_attr_shadow_mismatch_total",
           "sampled_attr_shadow_cmd_open_mismatch_total",
           "sampled_attr_shadow_query_id_mismatch_total")
+PG13_RATE = 100  # 50 ms sessions span five ticks; the bound stays TWO periods.
+PG13_INITIAL = 520
+PG13_RETIRE = 32
+PG13_LATER = 500
+PG13_CHURN = 200
+
+# PG13's virtualtransaction prefix is the real BackendId, unlike the compact
+# pg_stat_get_backend_idset() snapshot index. The self-query holds a virtualxid
+# lock while evaluating this expression (sinvaladt.c / lockfuncs.c, REL_13_STABLE).
+SESSION_SQL = """SELECT a.pid,
+    (extract(epoch FROM a.backend_start) * 1000000000)::bigint,
+    split_part(l.virtualtransaction, '/', 1)::int
+    FROM pg_stat_activity a JOIN pg_locks l USING (pid)
+    WHERE a.pid=pg_backend_pid() AND l.locktype='virtualxid' AND l.granted"""
+
+
+def session_evidence(connections, handle):
+    rows = connections.query(handle, SESSION_SQL)
+    assert len(rows) == 1, f"missing independent session identity: {rows}"
+    pid, start, slot = map(int, rows[0])
+    assert pid == connections.lib.PQbackendPID(handle) and start > 0 and slot > 0
+    return {"pid": pid, "backend_start_ns": start, "backend_id": slot}
+
+
+def build_sample_reader(directory):
+    """Use the existing trace decoder, never server aggregates or log arrival.
+
+    The temporary helper emits only the named cohort's persisted SAMPLES,
+    converting each point's monotonic timestamp with its own file anchors.
+    It rejects undecodable blocks and requires a nonempty sample stream.
+    """
+    source = directory / "sample-reader.c"
+    binary = directory / "sample-reader"
+    source.write_text(r'''
+#include "event_reader.h"
+#include <inttypes.h>
+#include <stdlib.h>
+static int cmp(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return (x > y) - (x < y);
+}
+int main(int argc, char **argv) {
+    uint32_t pids[200]; size_t npids = 0; uint64_t seen = 0;
+    if (argc < 3) return 2;
+    FILE *fp = fopen(argv[1], "r");
+    if (!fp) return 2;
+    while (npids < 200 && fscanf(fp, "%"SCNu32, &pids[npids]) == 1) npids++;
+    fclose(fp);
+    if (!npids) return 2;
+    qsort(pids, npids, sizeof(*pids), cmp);
+    for (int f = 2; f < argc; f++) {
+        struct pgwt_event_reader r;
+        if (pgwt_reader_open(&r, argv[f])) return 2;
+        for (int b = 0; b < r.num_blocks; b++) {
+            struct pgwt_trace_event events[PGWT_BLOCK_EVENTS];
+            struct pgwt_block_info info;
+            int n = pgwt_reader_decode_block_info(&r, b, events, PGWT_BLOCK_EVENTS, &info);
+            if (n < 0 || (uint32_t)n != info.num_events) return 2;
+            if (info.block_type != PGWT_BLOCK_SAMPLES) continue;
+            seen += (uint64_t)n;
+            for (int i = 0; i < n; i++) {
+                struct pgwt_trace_event *e = &events[i];
+                if (!bsearch(&e->pid, pids, npids, sizeof(*pids), cmp)) continue;
+                printf("{\"pid\":%u,\"timestamp_ns\":%"PRIu64",\"query_id\":%"PRIu64"}\n",
+                    e->pid, pgwt_reader_mono_to_wall(&r, e->timestamp_ns), e->query_id);
+            }
+        }
+        pgwt_reader_close(&r);
+    }
+    fprintf(stderr, "persisted sample census=%"PRIu64"\n", seen);
+    return seen ? 0 : 2;
+}
+''')
+    command = shlex.split(os.environ.get("CC", "cc")) + ["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
+                "-I" + str(ROOT / "src"), str(source), str(ROOT / "src/event_reader.c"),
+                str(ROOT / "src/event_writer.c"), "-llz4", "-o", str(binary)]
+    if sys.platform == "darwin":
+        prefix = subprocess.check_output(["brew", "--prefix", "lz4"], text=True).strip()
+        command[1:1] = ["-I" + prefix + "/include", "-L" + prefix + "/lib",
+                         "-include", str(ROOT / "demos/replay-compat.h")]
+    subprocess.run(command, check=True, capture_output=True, text=True)
+    return binary
+
+
+def read_cohort_samples(reader, trace, cohort):
+    pidfile = trace / "churn.pids"
+    pidfile.write_text("".join(f"{row['pid']}\n" for row in cohort))
+    paths = sorted(trace.glob("*.trace")) + sorted(trace.glob("*.trace.lz4"))
+    assert paths, "no persisted trace files"
+    result = subprocess.run([str(reader), str(pidfile), *map(str, paths)],
+                            check=True, capture_output=True, text=True, timeout=60)
+    (trace / "sample-reader.stderr").write_text(result.stderr)
+    samples = [json.loads(line) for line in result.stdout.splitlines()]
+    (trace / "churn.samples.json").write_text(json.dumps(samples) + "\n")
+    return samples
 
 
 def control(directory, request, timeout=5):
@@ -94,7 +205,8 @@ def private_cluster(source_pid, require_huge_pages):
                        check=True, stdout=subprocess.DEVNULL, timeout=60)
         version = subprocess.check_output([str(bindir / "postgres"), "--version"], text=True)
         major = int(re.search(r"PostgreSQL\)\s+(\d+)", version)[1])
-        settings = (f"\nmax_connections=540\nshared_buffers='32MB'\n"
+        max_connections = 1100 if major == 13 else 540
+        settings = (f"\nmax_connections={max_connections}\nshared_buffers='32MB'\n"
                     f"unix_socket_directories='{directory}'\nlisten_addresses=''\nport=55486\n"
                     f"autovacuum=off\nhuge_pages={'on' if require_huge_pages else 'try'}\n")
         if major >= 14:
@@ -113,7 +225,7 @@ def private_cluster(source_pid, require_huge_pages):
                            "-l", str(log), "-w", "-t", "60", "start"],
                            check=True, stdout=subprocess.DEVNULL, timeout=70)
             pid = int((data / "postmaster.pid").read_text().splitlines()[0])
-            assert int(psql("SHOW max_connections")) == 540
+            assert int(psql("SHOW max_connections")) == max_connections
             assert int(psql("SHOW server_version_num")) // 10000 == major
             yield pid, major
         finally:
@@ -136,14 +248,14 @@ def psql(sql):
          "-v", "ON_ERROR_STOP=1", "-c", sql], text=True, timeout=30).strip()
 
 
-def wait_until(proc, predicate, seconds, reason):
+def wait_until(proc, predicate, seconds, reason, poll_seconds=0.1):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         assert proc.poll() is None, f"{reason}: process exited {proc.returncode}"
         value = predicate()
         if value:
             return value
-        time.sleep(0.1)
+        time.sleep(poll_seconds)
     raise AssertionError(reason)
 
 
@@ -175,6 +287,14 @@ class IdleConnections:
         self.lib.PQfinish.argtypes = [ctypes.c_void_p]
         self.lib.PQbackendPID.argtypes = [ctypes.c_void_p]
         self.lib.PQbackendPID.restype = ctypes.c_int
+        self.lib.PQexec.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self.lib.PQexec.restype = ctypes.c_void_p
+        self.lib.PQresultStatus.argtypes = [ctypes.c_void_p]
+        self.lib.PQntuples.argtypes = [ctypes.c_void_p]
+        self.lib.PQnfields.argtypes = [ctypes.c_void_p]
+        self.lib.PQgetvalue.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        self.lib.PQgetvalue.restype = ctypes.c_char_p
+        self.lib.PQclear.argtypes = [ctypes.c_void_p]
 
     def open(self, count=500, application="pgwt866_idle"):
         for _ in range(count):
@@ -187,10 +307,183 @@ class IdleConnections:
     def pids(self):
         return {self.lib.PQbackendPID(handle) for handle in self.handles}
 
+    def query(self, handle, sql):
+        result = self.lib.PQexec(handle, sql.encode())
+        assert result, self.lib.PQerrorMessage(handle)
+        try:
+            assert self.lib.PQresultStatus(result) in (1, 2), self.lib.PQerrorMessage(handle)
+            return [[self.lib.PQgetvalue(result, row, col).decode()
+                     for col in range(self.lib.PQnfields(result))]
+                    for row in range(self.lib.PQntuples(result))]
+        finally:
+            self.lib.PQclear(result)
+
+    def close_handle(self, handle):
+        self.lib.PQfinish(handle)
+        self.handles.remove(handle)
+
     def close(self):
         for handle in self.handles:
             self.lib.PQfinish(handle)
         self.handles.clear()
+
+
+def run_pg13_far_arm(binary, pm_pid, directory, reader, label, negative=False):
+    """Far-row churn, with independent SQL identities and persisted timing.
+
+    Keep 520 sessions until validation records an anchor near their high end.
+    Retire 32 NEAR that anchor before opening the next 500: peak enrollment
+    stays below MAX_BACKENDS=1024. Reuse a LOW slot for each short session;
+    PostgreSQL chooses the lowest free BackendId. Assert every actual distance
+    rather than assuming this allocation policy succeeded.
+    """
+    trace = directory / label
+    trace.mkdir()
+    initial, later, churn = IdleConnections(), IdleConnections(), IdleConnections()
+    daemon = perf = None
+    cohort = []
+    with (trace / "daemon.stderr").open("w") as err, (trace / "perf.stderr").open("w") as perr:
+        try:
+            initial.open(PG13_INITIAL, "pgwt866_anchor_side")
+            initial_rows = {handle: session_evidence(initial, handle) for handle in initial.handles}
+            env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
+            daemon = spawn(
+                [str(binary), "--pid", str(pm_pid), "--mode", "tiered", "--sample-rate", str(PG13_RATE),
+                 "--escalation-budget", "0", "-i", "1", "-q", "-T", str(trace)],
+                stdout=subprocess.DEVNULL, stderr=err, env=env)
+            # Observe the ACTUAL controlled validation backend during its active
+            # phase. Its virtualxid lock is independent of daemon row arithmetic.
+            app = f"pgwt-layout-validation-{pm_pid}-{daemon.pid}"
+            def validation_anchor():
+                rows = initial.query(initial.handles[0],
+                    "SELECT a.pid, split_part(l.virtualtransaction,'/',1)::int "
+                    "FROM pg_stat_activity a JOIN pg_locks l USING(pid) "
+                    f"WHERE a.application_name='{app}' AND l.locktype='virtualxid' AND l.granted")
+                assert len(rows) <= 1, f"ambiguous validation anchor: {rows}"
+                return list(map(int, rows[0])) if rows else None
+            anchor_pid, anchor_id = wait_until(daemon, validation_anchor, 90,
+                "actual validation anchor was not observed; far-row prerequisite unproven", poll_seconds=.01)
+            wait_until(daemon, lambda: (trace / "pgwt.sock").exists(), 90, "PG13 control socket not ready")
+            wait_until(daemon, lambda: metrics(trace).get("sampler_ticks_total", 0) > 0,
+                       30, "PG13 sampler not ready")
+            status = metrics(trace, "status")
+            assert status["pgbackend_layout_validation"] == "validated", status
+            assert "controlled backend retired before capture" in status["pgbackend_layout_reason"], \
+                "observed anchor was not the successful controlled validation anchor"
+            assert metrics(trace)["exact_probe_attached_mask"] == 0, "timing arm must stay sampled"
+            # No far slot is retired here. Retire only those closest to the
+            # measured anchor, leaving the low slots available for far churn.
+            retired = sorted(initial.handles,
+                             key=lambda h: abs(initial_rows[h]["backend_id"] - anchor_id))[:PG13_RETIRE]
+            retired_pids = [initial_rows[handle]["pid"] for handle in retired]
+            for handle in retired:
+                initial.close_handle(handle)
+            wait_until(daemon, lambda: all(not Path(f"/proc/{pid}").exists() for pid in retired_pids),
+                       15, "near-anchor setup sessions did not retire")
+            spanning_before = metrics(trace)
+            perf_path = trace / "perf.trace"
+            perf = spawn(["perf", "trace", "-S", "--call-graph", "dwarf", "--max-stack", "32",
+                          "--no-comm", "-m", "1024", "-p", str(daemon.pid), "-e", CALLS,
+                          "-o", str(perf_path)], stdout=subprocess.DEVNULL, stderr=perr)
+            wait_until(perf, lambda: perf_path.exists() and perf_path.stat().st_size > 0,
+                       15, "PG13 perf produced no events")
+            before = metrics(trace)
+            later.open(PG13_LATER, "pgwt866_far_side")
+            later_rows = [session_evidence(later, h) for h in later.handles]
+            assert min(row["backend_id"] for row in initial_rows.values()) < anchor_id < \
+                   max(row["backend_id"] for row in later_rows), "anchor is not inside the row population"
+            held = len(initial.handles) + len(later.handles)
+            population = wait_until(daemon, lambda: (m if held <= (m := metrics(trace))["sample_read_targets"]
+                                                      < 1024 else None),
+                                    30, "held population not enrolled below the 1024-process cap")
+            far_handle = max(initial.handles,
+                             key=lambda h: abs(initial_rows[h]["backend_id"] - anchor_id))
+            far_row = initial_rows[far_handle]
+            assert abs(far_row["backend_id"] - anchor_id) > 513, "setup has no row farther than 513"
+            initial.close_handle(far_handle)
+            wait_until(daemon, lambda: not Path(f"/proc/{far_row['pid']}").exists(),
+                       15, "far slot did not retire before churn")
+            start = time.monotonic()
+            for index in range(PG13_CHURN):
+                # Fixed workload pacing spreads 200 connections over >=20 s;
+                # neither session duration nor timing bounds adapt to results.
+                delay = start + index * .1 - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                churn.open(1, "pgwt866_short")
+                handle = churn.handles[-1]
+                try:
+                    row = session_evidence(churn, handle)
+                    row["distance"] = abs(row["backend_id"] - anchor_id)
+                    assert row["distance"] > 513, f"churn far-row prerequisite failed: {row}, anchor={anchor_id}"
+                    cohort.append(row)
+                    churn.query(handle, "SELECT pg_sleep(0.05)")
+                finally:
+                    churn.close_handle(handle)
+                wait_until(daemon, lambda: not Path(f"/proc/{row['pid']}").exists(),
+                           15, "short session did not exit", poll_seconds=.001)
+                assert perf.poll() is None, "PG13 perf stopped during churn"
+            # Start the quiet window only after the last exit is reflected in
+            # enrollment. This never changes the already recorded churn timing.
+            wait_until(daemon, lambda: metrics(trace)["sample_read_targets"] ==
+                       population["sample_read_targets"] - 1, 15, "churn enrollment did not retire")
+            quiet_before = metrics(trace)
+            quiet_start = time.monotonic()
+            time.sleep(5)  # the specified no-churn window
+            quiet_after = metrics(trace)
+            quiet_seconds = time.monotonic() - quiet_start
+            quiet_ticks = quiet_after["sampler_ticks_total"] - quiet_before["sampler_ticks_total"]
+            assert quiet_ticks > 0, "sampler did not advance in the quiet window"
+            status = metrics(trace, "status")
+            stop(perf, signal.SIGINT)
+            assert perf.returncode in (0, -signal.SIGINT), (trace / "perf.stderr").read_text()
+            spanning_after = metrics(trace)
+            text, perf_errors = perf_path.read_text(), (trace / "perf.stderr").read_text()
+            syscall = {"calls": parse_summary(text, (perf_errors,))}
+            if not negative:
+                syscall = assess_pg13_vm_calls(text, pm_pid, (perf_errors,),
+                    ticks_inside=quiet_after["sampler_ticks_total"] - before["sampler_ticks_total"],
+                    ticks_spanning=spanning_after["sampler_ticks_total"] - spanning_before["sampler_ticks_total"],
+                    read_faults=spanning_after["sample_read_faults_total"] - spanning_before["sample_read_faults_total"])
+            # Finalization flushes the raw samples, including the LAST session.
+            stop(daemon)
+            samples = read_cohort_samples(reader, trace, cohort)
+            result = assess_pg13_timing(cohort, samples, 1_000_000_000 // PG13_RATE)
+            quiet_failures = (quiet_after["sampled_attr_tick_read_failures_total"] -
+                              quiet_before["sampled_attr_tick_read_failures_total"])
+            fallback_key = "sampled_attr_pg13_scan_fallbacks_total"
+            fallback = (quiet_after[fallback_key] - before[fallback_key]
+                        if fallback_key in quiet_after and fallback_key in before else None)
+            errors = []
+            if quiet_failures != 0:
+                errors.append(f"quiet read failures={quiet_failures} (required zero over 5 s)")
+            if status.get("sampled_attr_pg13_route") != "computed":
+                errors.append(f"PG13 route={status.get('sampled_attr_pg13_route')} (required computed)")
+            if fallback != 0:
+                errors.append(f"PG13 scan-fallback delta={fallback} (required zero)")
+            result.update(label=label, binary=str(binary),
+                          binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+                          anchor_pid=anchor_pid, anchor_backend_id=anchor_id,
+                          initial_sessions=PG13_INITIAL, near_anchor_retired=PG13_RETIRE,
+                          later_sessions=PG13_LATER, population=population["sample_read_targets"],
+                          minimum_churn_distance=min(row["distance"] for row in cohort),
+                          quiet_seconds=quiet_seconds, quiet_ticks=quiet_ticks, quiet_read_failures=quiet_failures,
+                          scan_fallback_delta=fallback, route=status.get("sampled_attr_pg13_route"),
+                          syscall=syscall, other_errors=errors)
+            (trace / "churn.starts.json").write_text(json.dumps(cohort, indent=2) + "\n")
+            (trace / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
+            print(json.dumps(result, sort_keys=True), flush=True)
+            return result
+        finally:
+            try:
+                stop(perf, signal.SIGINT)
+            finally:
+                try:
+                    stop(daemon)
+                finally:
+                    churn.close()
+                    later.close()
+                    initial.close()
 
 
 def run_escalation_arm(binary, pm_pid, directory):
@@ -382,16 +675,60 @@ def run_arm(binary, pm_pid, major, directory, label, disable_status_batch=False)
                 stop(daemon)
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pid", type=int)
-    parser.add_argument("--master-tracer", type=Path, default=os.environ.get("PGWT_866_MASTER_TRACER"))
+    parser.add_argument("--master-tracer", type=Path, default=os.environ.get("PGWT_866_MASTER_TRACER") or None)
     parser.add_argument("--require-negative-control", action="store_true")
     parser.add_argument("--require-huge-pages", action="store_true")
     parser.add_argument("--evidence-dir", type=Path, help="new directory outside the repository")
-    args = parser.parse_args()
+    arms = parser.add_mutually_exclusive_group()
+    arms.add_argument("--pg13-far-rows", action="store_true",
+                        help="select only the PG13 far-row arm; --master-tracer is the 0b1d7dd6 tracer")
+    arms.add_argument("--syscalls-only", action="store_true", help="select only the original syscall gate")
+    parser.add_argument("--dry-run", action="store_true", help="print the plan without Linux, PG or libpq")
+    parser.add_argument("--pg-version", type=int, choices=range(13, 19), help="PG major for --dry-run")
+    args = parser.parse_args(argv)
+    if args.require_negative_control and not args.master_tracer:
+        parser.error("--require-negative-control needs --master-tracer")
+    if args.pg_version is not None and not args.dry_run:
+        parser.error("--pg-version is only for --dry-run (live version comes from the runner)")
+    if args.pg13_far_rows and args.pg_version not in (None, 13):
+        parser.error("--pg13-far-rows needs PG13")
+    return args
+
+
+def run_pg13_arms(args, pid, directory):
+    reader = build_sample_reader(directory)
+    candidate = run_pg13_far_arm(ROOT / "pg_wait_tracer", pid, directory, reader, "pg13-far-candidate")
+    assert not candidate["timing_errors"] and not candidate["other_errors"], candidate
+    if args.pg13_far_rows and args.master_tracer:
+        negative = run_pg13_far_arm(args.master_tracer.resolve(), pid, directory, reader,
+                                   "pg13-far-pre-fix", negative=True)
+        print(require_pg13_negative_control(negative), flush=True)
+    else:
+        print("PENDING: PG13 timing negative control; select --pg13-far-rows "
+              "--master-tracer /path/to/0b1d7dd6/pg_wait_tracer --require-negative-control", flush=True)
+    print("PG13 far-row candidate: PASS (200 short sessions, <=2 tick periods, quiet failures=0)", flush=True)
+
+
+def main():
+    args = parse_args()
+    if args.dry_run:
+        major = args.pg_version or 13
+        print(json.dumps({"major": major, "excluded": major not in SUPPORTED_MAJORS,
+              "arms": ([] if major not in SUPPORTED_MAJORS else ["pg13-far-rows"] if args.pg13_far_rows else
+                       (["pg13-far-rows", "syscalls"] if major == 13 and not args.syscalls_only else ["syscalls"])),
+              "max_connections": 1100 if major == 13 else 540,
+              "pg13": {"initial_idle": PG13_INITIAL, "retire_near_anchor": PG13_RETIRE,
+                       "later_idle": PG13_LATER, "short_sessions": PG13_CHURN,
+                       "sleep_s": .05, "sample_rate": PG13_RATE, "minimum_row_distance": 514,
+                       "first_attribution_bound_ns": 2_000_000_000 // PG13_RATE,
+                       "quiet_window_s": 5, "negative_control_revision": "0b1d7dd6"},
+              "master_tracer": str(args.master_tracer) if args.master_tracer else None,
+              "require_negative_control": args.require_negative_control}, sort_keys=True))
+        return
     assert sys.platform == "linux" and os.geteuid() == 0, "Linux/root live test only"
-    assert not args.require_negative_control or args.master_tracer, "supply --master-tracer"
     source_pid = args.pid or find_postmaster()
     assert source_pid, "no runner postmaster from which to select the PG binary"
     version = subprocess.check_output([os.readlink(f"/proc/{source_pid}/exe"), "--version"], text=True)
@@ -399,6 +736,9 @@ def main():
     if major not in SUPPORTED_MAJORS:
         print(f"EXCLUDED: PG{major}; status batch needs PostgreSQL 13, 17 or 18")
         return
+    assert not args.pg13_far_rows or major == 13, "--pg13-far-rows needs PG13"
+    assert not (major == 13 and args.require_negative_control and not (args.pg13_far_rows or args.syscalls_only)), \
+        "select --pg13-far-rows for the required 0b1d7dd6 control; run the syscall/master control separately"
     idle = IdleConnections()
     load = None
     # Deliberately not tests/results/: no product/repository artifacts.
@@ -412,8 +752,12 @@ def main():
     with evidence_context as tmp, private_cluster(source_pid, args.require_huge_pages) as (pid, major):
         huge_pages = psql("SHOW huge_pages")
         print(f"private PG{major} pid={pid} kernel={os.uname().release} "
-              f"max_connections=540 huge_pages={huge_pages} N=504 (500 idle + 4 active)", flush=True)
+              f"max_connections={psql('SHOW max_connections')} huge_pages={huge_pages}", flush=True)
         directory = Path(tmp)
+        if major == 13 and not args.syscalls_only:
+            run_pg13_arms(args, pid, directory)
+            if args.pg13_far_rows:
+                return
         script = directory / "workload.sql"
         script.write_text("SELECT sum(i) FROM generate_series(1, 10000) AS i;\n")
         try:

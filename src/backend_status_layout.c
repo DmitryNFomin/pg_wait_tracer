@@ -1834,6 +1834,8 @@ const char *pgwt_pgbs_status_name(const struct PgBackendStatusLayout *layout)
     return pgwt_pgbs_validation_name(layout->validation);
 }
 
+static uint64_t monotonic_ms(void);
+
 int pgwt_pgbs_pg13_generation(pid_t postmaster_pid,
     struct PgBackendStatusLayout *layout)
 {
@@ -1852,10 +1854,22 @@ int pgwt_pgbs_pg13_generation(pid_t postmaster_pid,
         layout->pg13_recovery_degraded_total++;
         set_detail(layout, "PG13 shared-memory address range or postmaster changed; restart the daemon");
     } else if (!map.identity) {
-        if (layout->pg13_recovery == PGWT_PGBS_PG13_PENDING) return 0;
+        /* A relocated segment may also have a new backing name. Neither a
+         * name nor a similar size proves its role; bound the unknown state
+         * instead of leaving attribution off as "revalidating" forever. */
+        uint64_t now_ms = monotonic_ms();
+        if (layout->pg13_recovery == PGWT_PGBS_PG13_PENDING) {
+            if (now_ms - layout->pg13_recovery_pending_since_ms < 30000) return 0;
+            layout->pg13_recovery = PGWT_PGBS_PG13_DEGRADED;
+            layout->pg13_recovery_degraded_total++;
+            set_detail(layout, "PG13 shared-memory mapping absent or unreadable for 30 seconds; restart the daemon");
+            return -1;
+        }
+        layout->pg13_recovery_pending_since_ms = now_ms;
         layout->pg13_recovery = PGWT_PGBS_PG13_PENDING;
-        set_detail(layout, "PG13 shared-memory mapping absent; revalidating on daemon interval");
+        set_detail(layout, "PG13 shared-memory mapping absent or unreadable; 30-second revalidation deadline checked on daemon interval");
     } else {
+        layout->pg13_recovery_pending_since_ms = 0;
         layout->pg13_recovery = PGWT_PGBS_PG13_READY;
         set_detail(layout, "PG13 shared-memory mapping re-anchored; rows require batch identity proof");
     }

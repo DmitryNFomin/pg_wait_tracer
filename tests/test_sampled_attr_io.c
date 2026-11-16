@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 #include "pg_wait_tracer.h"
 static FILE *io_fopen(const char *, const char *);
@@ -19,6 +20,7 @@ static int io_openat(int, const char *, int, ...);
 static int io_close(int);
 static ssize_t io_pread(int, void *, size_t, off_t);
 static ssize_t io_read(int, void *, size_t);
+static int io_clock_gettime(clockid_t, struct timespec *);
 static ssize_t io_readv(pid_t, const struct iovec *, unsigned long,
                         const struct iovec *, unsigned long, unsigned long);
 #define fopen io_fopen
@@ -28,6 +30,7 @@ static ssize_t io_readv(pid_t, const struct iovec *, unsigned long,
 #define pread io_pread
 #define read io_read
 #define process_vm_readv io_readv
+#define clock_gettime io_clock_gettime
 #define PGWT_PGBS_INJECT_VM_READV 1
 #ifndef PGWT_PGBS_SOURCE
 #define PGWT_PGBS_SOURCE "../src/backend_status_layout.c"
@@ -49,6 +52,16 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *l, pid_t pid,
 #undef pread
 #undef read
 #undef process_vm_readv
+#undef clock_gettime
+
+static uint64_t mapping_clock_ms = 1000;
+static int io_clock_gettime(clockid_t id, struct timespec *ts)
+{
+    (void)id;
+    ts->tv_sec = (time_t)(mapping_clock_ms / 1000);
+    ts->tv_nsec = (long)(mapping_clock_ms % 1000) * 1000000;
+    return 0;
+}
 
 static int checks, failures, opens, openats, closes, reads, calls, fopens;
 static int own_calls, stat_reads, map_reads, stat_fail, own_short;
@@ -85,6 +98,7 @@ static void proc_identity(size_t i, uint32_t pid, uint32_t id)
 #endif
 static unsigned mapping_incarnation = 1;
 static int exclude_rows, mapping_absent;
+static const char *mapping_name = "/dev/zero (deleted)";
 static uint64_t mapping_range_shift, mapping_range_end_shift;
 static int32_t anchor_backend_id;
 static uint8_t *const storage = arena.storage;
@@ -127,9 +141,10 @@ static FILE *io_fopen(const char *path, const char *mode)
             fprintf(fp, "%llx-%llx %s 00000000 00:00 3\n",
                 (unsigned long long)(uintptr_t)arena.pgproc,
                 (unsigned long long)(uintptr_t)(arena.pgproc + 1024), perms);
-        } else if (!mapping_absent) fprintf(fp, "%llx-%llx %s 00000000 00:00 %u /dev/zero (deleted)\n",
+        } else if (!mapping_absent) fprintf(fp, "%llx-%llx %s 00000000 00:00 %u %s\n",
             (unsigned long long)(uintptr_t)&arena + mapping_range_shift,
-            (unsigned long long)(uintptr_t)(&arena + 1) + mapping_range_end_shift, perms, mapping_incarnation);
+            (unsigned long long)(uintptr_t)(&arena + 1) + mapping_range_end_shift, perms, mapping_incarnation,
+            mapping_name);
         fprintf(fp, "%llx-%llx %s 00000000 00:00 2 /dev/shm/activity\n",
             (unsigned long long)(uintptr_t)activity,
             (unsigned long long)(uintptr_t)(activity + population), perms);
@@ -262,6 +277,7 @@ static void reset_counts(void)
 }
 static void fixture(int major, size_t n)
 {
+    mapping_clock_ms = 1000; mapping_name = "/dev/zero (deleted)";
     for (size_t i = 0; i < 1024; i++) pgwt_pgbs_reader_reset(&cache[i]);
     private_target = private_reader = reader_gone = mutate_on_span = transient_tear = 0;
     incarnation = 1; stat_fail = own_short = maps_fail = maps_prefix_lines = 0;
@@ -888,13 +904,15 @@ static void test_pg13_recovery(void)
     CHECK(reader_map_reads == 1 &&
           d->backend_status_layout.pg13_recovery == PGWT_PGBS_PG13_PENDING,
           "PG13 absent mapping retries once per daemon interval");
+    mapping_clock_ms += 29999;
     mapping_absent = 0;
     reset_counts();
     CHECK(record_registry_tick(d, clock_ns + 4) == 0 && tick_failures == 1 && !map_reads,
           "PG13 mapping return waits for the daemon interval");
     interval_registry(d);
     CHECK(d->backend_status_layout.pg13_recovery == PGWT_PGBS_PG13_READY &&
-          !strcmp(pgwt_pgbs_status_name(&d->backend_status_layout), "validated"),
+          !strcmp(pgwt_pgbs_status_name(&d->backend_status_layout), "validated") &&
+          !d->backend_status_layout.pg13_recovery_pending_since_ms,
           "PG13 absent mapping recovers on the next daemon interval");
     reset_counts();
     CHECK(record_registry_tick(d, clock_ns + 5) == 1 && !tick_failures,
@@ -934,6 +952,34 @@ static void test_pg13_recovery(void)
     reset_counts();
     CHECK(record_registry_tick(d, clock_ns + 10) == 0 && tick_failures == 1 && !calls,
           "PG13 fully relocated mapping records zero attributed samples");
+    release_daemon(d);
+    d = new_daemon(13);
+    be = alloc_backend(&d->backends, 1000, true);
+    wait_addr = proc_at(0) + 684;
+    CHECK(record_registry_tick(d, clock_ns + 11) == 1,
+          "PG13 renamed mapping fixture starts attributed");
+    mapping_absent = 1; interval_registry(d);
+    mapping_absent = 0; mapping_incarnation = 2;
+    mapping_name = "/SYSV-new-segment (deleted)";
+    mapping_range_shift = mapping_range_end_shift = UINT64_C(0x1000000000);
+    mapping_clock_ms += 29999; interval_registry(d);
+    CHECK(d->backend_status_layout.pg13_recovery == PGWT_PGBS_PG13_PENDING &&
+          !d->backend_status_layout.pg13_recovery_degraded_total,
+          "PG13 renamed relocation stays pending before 30 seconds");
+    mapping_clock_ms++; interval_registry(d);
+    CHECK(d->backend_status_layout.pg13_recovery == PGWT_PGBS_PG13_DEGRADED &&
+          d->backend_status_layout.pg13_recovery_degraded_total == 1 &&
+          strstr(d->backend_status_layout.detail, "30 seconds; restart the daemon"),
+          "PG13 renamed relocation degrades at the 30-second deadline");
+    reset_counts();
+    CHECK(record_registry_tick(d, clock_ns + 12) == 0 && tick_failures == 1 && !calls,
+          "PG13 renamed relocation never attributes from the unknown mapping");
+    mapping_range_shift = mapping_range_end_shift = 0;
+    mapping_name = "/dev/zero (deleted)";
+    reset_counts(); interval_registry(d);
+    CHECK(d->backend_status_layout.pg13_recovery_degraded_total == 1 && !map_reads &&
+          d->backend_status_layout.pg13_recovery == PGWT_PGBS_PG13_DEGRADED,
+          "PG13 absent-mapping deadline degradation stays latched");
     release_daemon(d);
     puts("PG13 recovery: same-range, stale PID, absent/present timer, changed-range latch, no client PASS");
 }

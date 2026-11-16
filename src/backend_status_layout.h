@@ -76,6 +76,7 @@ struct PgBackendStatusLayout {
     uint64_t shm_start, shm_end; /* validated main segment range, retained on rebuild */
     uint64_t shm_backing; /* stable maps descriptor, used only to refuse relocation */
     enum pgwt_pgbs_pg13_recovery pg13_recovery;
+    uint64_t pg13_recovery_pending_since_ms; /* monotonic; absent mapping deadline */
     uint64_t pg13_recovery_degraded_total;
     pid_t generation_postmaster;
     bool pg13_computed;

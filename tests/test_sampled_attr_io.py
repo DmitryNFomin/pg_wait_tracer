@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Portable attribution syscall budget and mutations; all outputs stay in /tmp."""
 import os
+import contextlib
+import io
+import json
 from pathlib import Path
 import re
 import shlex
 import subprocess
+import struct
 import tempfile
 from types import SimpleNamespace
 from unittest import mock
@@ -75,6 +79,7 @@ def live_setup_cases():
     """Drive the private-cluster launcher with process boundaries faked only."""
     import test_sampler_batch_live as live
     for major in (13, 17, 18):
+        capacity = 1100 if major == 13 else 540
         commands = []
         def fake_run(command, **kwargs):
             commands.append(command)
@@ -85,7 +90,7 @@ def live_setup_cases():
                 (data / "postgresql.conf").write_text("# default max_connections=100\n")
             elif command[-1] == "start":
                 config = (data / "postgresql.conf").read_text()
-                assert "\nmax_connections=540\n" in config
+                assert f"\nmax_connections={capacity}\n" in config
                 assert "listen_addresses=''" in config and "port=55486" in config
                 assert ("compute_query_id=on" in config) == (major >= 14)
                 assert os.environ["PGHOST"] == str(data.parent)
@@ -102,7 +107,7 @@ def live_setup_cases():
              mock.patch.object(live.os, "chown"), \
              mock.patch.object(live.subprocess, "run", side_effect=fake_run), \
              mock.patch.object(live.subprocess, "check_output", return_value=f"postgres (PostgreSQL) {major}.6"), \
-             mock.patch.object(live, "psql", side_effect=lambda sql: "540" if "max_connections" in sql else str(major * 10000)):
+             mock.patch.object(live, "psql", side_effect=lambda sql: str(capacity) if "max_connections" in sql else str(major * 10000)):
             class TestFailure(Exception):
                 pass
             try:
@@ -114,7 +119,135 @@ def live_setup_cases():
         assert len(commands) == 3 and commands[-1][-1] == "stop"
         assert all(command[4].startswith(f"/runner/pg{major}/bin/") for command in commands)
         assert original == {key: os.environ.get(key) for key in original}
-    print("private cluster: PG13/17/18 default-100 runner, own 540 config, cleanup/environment restore PASS")
+    print("private cluster: PG13 own 1100 / PG17-18 own 540 config, cleanup/environment restore PASS")
+
+
+def pg13_live_pure_cases():
+    """Timing truth is hand-built, never fitted to candidate output."""
+    import test_sampler_batch_live as live
+    from sampler_batch_perf import assess_pg13_timing, require_pg13_negative_control, assess_pg13_vm_calls
+    from test_sampler_batch_summary import summary
+    cohort = [{"pid": 1000 + i, "backend_start_ns": 10_000_000_000_000 + i * 100_000_000}
+              for i in range(200)]
+    samples = [{"pid": row["pid"], "timestamp_ns": row["backend_start_ns"] + (i + 1) * 100_000,
+                "query_id": 42} for i, row in enumerate(cohort)]
+    green = assess_pg13_timing(cohort, reversed(samples), 10_000_000)
+    assert not green["timing_errors"] and green["attributed_sessions"] == 200
+    assert green["max_first_attribution_ns"] == 20_000_000
+    assert green["p99_first_attribution_ns"] == 19_800_000
+    # A later duplicate cannot replace the first observation. An idle sample
+    # and another pid cannot satisfy missing attribution.
+    assert assess_pg13_timing(cohort, samples + [dict(samples[0], timestamp_ns=samples[0]["timestamp_ns"] + 99_000_000)],
+                              10_000_000) == green
+    late = [*samples[:-1], dict(samples[-1], timestamp_ns=cohort[-1]["backend_start_ns"] + 20_000_001)]
+    red = assess_pg13_timing(cohort, late, 10_000_000)
+    assert "first attribution > 2 tick periods" in require_pg13_negative_control(red)
+    missing = assess_pg13_timing(cohort, samples[:-1] + [dict(samples[-1], query_id=0),
+                                                      dict(samples[-1], pid=999)], 10_000_000)
+    assert "first attribution missing: pids=[1199]" in require_pg13_negative_control(missing)
+    try:
+        require_pg13_negative_control(dict(green, other_errors=["route missing", "perf failed"]))
+    except AssertionError as error:
+        assert "did not redden first attribution" in str(error)
+    else:
+        raise AssertionError("unrelated failure qualified as negative control")
+    try:
+        assess_pg13_timing(cohort, [dict(samples[0], timestamp_ns=cohort[0]["backend_start_ns"] - 1)], 10_000_000)
+    except AssertionError as error:
+        assert "predates backend_start" in str(error)
+    else:
+        raise AssertionError("mixed clocks accepted")
+
+    def perf(kinds, bad_pid=False, unresolved=False, census_extra=0):
+        events = ""
+        frames = {"discovery": "pgwt_pgbs_resolve_pg13_batch", "status": "pgwt_pgbs_read_batch",
+                  "wait": "pgwt_sampler_read_targets"}
+        for i, kind in enumerate(kinds):
+            pid = 99 if kind == "wait" or (bad_pid and kind == "discovery") else 42
+            events += (f"{i}.000 ( 0.001 ms): 77 process_vm_readv(pid: {pid}, liovcnt: 1, riovcnt: 1) = 4\n"
+                       f"            1234 {frames[kind] if not unresolved else 'unresolved'}+0x10 (/tmp/tracer)\n")
+        return events + summary((77, [("process_vm_readv", len(kinds) + census_extra)]))
+    calls = ["discovery", "discovery", "status", "wait", "status", "wait"]
+    result = assess_pg13_vm_calls(perf(calls), 42)
+    assert result["max_discovery_calls_per_tick"] == 2 and result["wait_word_calls"] == 2
+    # Average 1.5 discovery calls/tick is still RED if one tick made three.
+    for text, reason in (
+        (perf(["discovery", "discovery", "discovery", "status", "wait", "status", "wait"]), "calls/tick=3"),
+        (perf(calls, bad_pid=True), "non-postmaster"),
+        (perf(calls, unresolved=True), "unresolved"),
+        (perf(calls, census_extra=1), "census differs"),
+        (perf(calls) + "LOST 1 events", "lost events"),
+        (perf(["status", "wait"]), "need pending discovery")):
+        try:
+            assess_pg13_vm_calls(text, 42)
+        except AssertionError as error:
+            assert reason in str(error), (reason, str(error))
+        else:
+            raise AssertionError(f"bad discovery evidence accepted: {reason}")
+    for kwargs, reason in (({"ticks_inside": 3}, "fewer wait-word"),
+                           ({"ticks_spanning": 1}, "extra wait-word"),
+                           ({"read_faults": 1}, "faults prevent")):
+        try:
+            assess_pg13_vm_calls(perf(calls), 42, **kwargs)
+        except AssertionError as error:
+            assert reason in str(error), str(error)
+        else:
+            raise AssertionError(f"ambiguous sampler tick boundaries accepted: {kwargs}")
+
+    args = live.parse_args(["--pg13-far-rows", "--master-tracer", "/tmp/0b1d7dd6/pg_wait_tracer",
+                            "--require-negative-control", "--dry-run", "--pg-version", "13"])
+    assert args.pg13_far_rows and args.require_negative_control and args.master_tracer.name == "pg_wait_tracer"
+    for argv in (["--require-negative-control"], ["--pg13-far-rows", "--dry-run", "--pg-version", "18"],
+                 ["--pg-version", "13"]):
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch.dict(os.environ, {"PGWT_866_MASTER_TRACER": ""}):
+            try:
+                live.parse_args(argv)
+            except SystemExit as error:
+                assert error.code == 2
+            else:
+                raise AssertionError(f"invalid arguments accepted: {argv}")
+    command = ["python3", "-B", "tests/test_sampler_batch_live.py", "--pg13-far-rows", "--dry-run",
+               "--pg-version", "13", "--master-tracer", "/tmp/0b1d7dd6/pg_wait_tracer", "--require-negative-control"]
+    result = run(command)
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan["arms"] == ["pg13-far-rows"] and plan["max_connections"] >= 1100
+    assert plan["pg13"]["sample_rate"] == 100 and plan["pg13"]["short_sessions"] == 200
+    assert plan["pg13"]["first_attribution_bound_ns"] == 20_000_000
+    assert plan["pg13"]["initial_idle"] - plan["pg13"]["retire_near_anchor"] + plan["pg13"]["later_idle"] < 1000
+    result = run(["python3", "-B", "tests/test_sampler_batch_live.py", "--dry-run", "--pg-version", "13"])
+    assert result.returncode == 0 and "pg13-far-rows" in json.loads(result.stdout)["arms"]
+    print("PG13 timing: every pid, max/p99, exact two-period edge, missing/late RED; syscall census and per-tick bound PASS")
+    print("PG13 arguments/default selection/dry-run: PASS (no Linux, PostgreSQL or libpq loaded)")
+
+
+def pg13_recorded_sample_case():
+    """The persisted v3 recording has documented, fixed point timestamps.
+
+    Shift ONLY a temporary copy's wall-clock anchor to exercise conversion;
+    never regenerate or edit the frozen recording in the repository.
+    """
+    import test_sampler_batch_live as live
+    with tempfile.TemporaryDirectory(prefix="pgwt866-recording-") as tmp:
+        directory = Path(tmp)
+        reader = live.build_sample_reader(directory)
+        data = bytearray((ROOT / "tests/fixtures/sample_weights_v3/current.trace").read_bytes())
+        struct.pack_into("<Q", data, 12, 20_000_000_000_000)
+        (directory / "current.trace").write_bytes(data)
+        samples = live.read_cohort_samples(reader, directory, [{"pid": 1000}])
+        assert [row["timestamp_ns"] for row in samples] == [20_000_000_000_000,
+                                                             20_000_090_000_000,
+                                                             20_000_290_000_000]
+        assert all(row["pid"] == 1000 and row["query_id"] == 100 for row in samples)
+        assert live.read_cohort_samples(reader, directory, [{"pid": 999}]) == []
+        (directory / "current.trace").write_bytes(b"truncated trace")
+        try:
+            live.read_cohort_samples(reader, directory, [{"pid": 1000}])
+        except subprocess.CalledProcessError as error:
+            assert error.returncode == 2
+        else:
+            raise AssertionError("undecodable recording accepted as missing attribution")
+    print("recorded samples: persisted timestamps/identity, wall-clock conversion, corrupt-trace refusal PASS")
 
 
 def late_promotion_setup_case():
@@ -207,6 +340,8 @@ def unsupported_version_cases():
 
 def main():
     perf_gate_cases()
+    pg13_live_pure_cases()
+    pg13_recorded_sample_case()
     live_setup_cases()
     late_promotion_setup_case()
     unsupported_version_cases()
@@ -414,6 +549,10 @@ static int record_registry_tick(struct pgwt_daemon *d, uint64_t tick_ts)
                 label, result.returncode, result.stdout, result.stderr)
             print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
         recovery_mutations = [
+            ("pg13_unbounded_missing_mapping", source,
+             "if (now_ms - layout->pg13_recovery_pending_since_ms < 30000) return 0;",
+             "if (now_ms - layout->pg13_recovery_pending_since_ms < UINT64_MAX) return 0;",
+             "PG13 renamed relocation degrades at the 30-second deadline"),
             ("pg13_no_interval_retry", interval,
              "pgwt_sampler_refresh_pg13_generation(d)",
              "(d->backend_status_layout.pg13_recovery == PGWT_PGBS_PG13_PENDING ? 0 : "

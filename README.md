@@ -1480,10 +1480,53 @@ attribution resumes through the coherent batch's identity checks without opening
 any validation connection. An absent mapping leaves `pgbackend_layout_validation`
 as `revalidating`; samples remain unattributed and counted in
 `sampled_attr_tick_read_failures_total` until an interval check finds it again.
+A mapping that remains absent or unreadable for 30 seconds latches `degraded`
+at the next daemon interval and requests **restart the daemon**. This also bounds
+revalidation when a relocated segment has a different backing name; mapping size
+or name alone never establishes a new status-array address.
 A changed address range latches `degraded` for this postmaster, increments
 `sampled_attr_pg13_recovery_degraded_total` once, and leaves samples unattributed.
 `pgbackend_layout_reason` explains the state; for a changed range, **restart the
 daemon**. PostgreSQL 14 and later keep their existing resolution path.
+
+The registered live status-batch test runs a PG13 far-row arm by default (PG14–16
+remain excluded). Its private cluster has `max_connections=1100`. It holds 520 idle
+sessions while the daemon validates its anchor, retires 32 sessions near that
+anchor to stay below the 1,024-process registry cap, and opens 500 more. Each of
+200 new connections runs `SELECT pg_sleep(0.05)` in a verified reused slot more
+than 513 rows from the actual validation anchor. SQL `pg_locks.virtualtransaction`
+provides the backend IDs independently of daemon address calculations. At 100 Hz,
+every churn PID must have a persisted attributed sample within two tick periods
+(20 ms) of its SQL `backend_start`; max and nearest-rank p99 are reported. Missing
+attribution fails the same timing gate. A five-second no-churn window requires
+zero read failures, and the run requires route `computed` and zero scan fallbacks.
+
+The same `perf trace -S` capture supplies syscall counts and user callchains.
+Status and discovery calls must read through the postmaster; no tick may have
+more than two discovery calls. The existing wait-word batch uses a backend PID
+and is identified separately by its callchain. Missing callchains, lost events
+or disagreement with the summary census fail evidence collection. This needs a
+perf build with DWARF user unwinding and symbols in the tracer binary.
+
+Run on each PG13 Linux gate box, from the candidate checkout after building it
+(`PG13_PID` selects that runner's PostgreSQL binary; its cluster stays untouched):
+
+```sh
+sudo python3 -B tests/test_sampler_batch_live.py --pid "$PG13_PID" \
+  --pg13-far-rows --evidence-dir /tmp/pgwt866-pg13-candidate
+sudo python3 -B tests/test_sampler_batch_live.py --pid "$PG13_PID" \
+  --pg13-far-rows --master-tracer /tmp/pgwt-0b1d7dd6/pg_wait_tracer \
+  --require-negative-control --evidence-dir /tmp/pgwt866-pg13-paired
+```
+
+The second command needs a tracer built from **0b1d7dd6 on that same box**.
+It reruns the identical workload and timing assertion and must print
+`pre-fix PG13 negative control: RED at first attribution ...`; setup, route or
+syscall errors alone cannot qualify the negative control. Evidence directories
+must be new and outside the repository. Use `--syscalls-only` for the original
+per-backend file-I/O negative control against master; that is a different binary
+and assertion. Mac-only plan inspection: `python3 -B
+tests/test_sampler_batch_live.py --pg13-far-rows --dry-run --pg-version 13`.
 
 `PGWT_SAMPLER_NICE` accepts an integer from -20 through 19 (the standard
 `nice` range) to request the daemon's own process niceness. Unset or empty
