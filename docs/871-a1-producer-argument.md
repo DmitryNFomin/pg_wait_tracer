@@ -960,10 +960,18 @@ the reader.
   and moves the whole queue for every released record. Measured on EL8, 4
   vCPU, PG18: clean at 8,000 select-only tps (32,000 released records/s);
   at 12,000 tps and unthrottled (about 17,000 tps) a round's release takes
-  from 0.5 s to 98 s, the queue fills and the run ends in
-  `VOID(allocation_fail)`. 89.6% of daemon CPU was in `pgwt_merge_feed`.
-  The transport itself completed every round it requested in those runs.
-- **PG13, short-lived backends.** On PG13 the daemon needs milliseconds of
+  from 0.5 s to 98 s. The 12,000-tps run ended in `VOID(unknown_evidence)`;
+  the unthrottled run filled the queue and ended in `VOID(allocation_fail)`
+  and `VOID(unknown_evidence)`. 89.6% of daemon CPU was in `pgwt_merge_feed`.
+  This is a measured limit of the experimental mode, tracked by issue #932.
+  In this **EL8 rate sweep**, the transport completed every round it requested
+  (342/342 at 12,000 tps; 7/7 unthrottled). That is not a claim about Ubuntu,
+  other runs, or bounded service: EL8 shutdown overran by 50–97 s before the
+  issue #931 service budgets. The registered deadline arm now checks natural
+  exit within duration + 15 s and SIGTERM to exit within 15 s under load;
+  the historical overruns are not measurements of those budgets.
+- **Short-lived backends (issue #933).** A backend whose INIT is lost VOIDs
+  the capture. On PG13 the daemon needs milliseconds of
   `/proc/<pid>/mem` reads to attach a backend. A `pgbench -S -C` backend
   lives a few milliseconds and some exit unattached. The default transport
   loses them too (15 and 20 `lifecycle_init_lost_total` in two 8 s runs at 200
@@ -978,18 +986,91 @@ the reader.
 - A backend that exits before it ever reaches `InitProcess` is also counted
   as an INIT loss under the mode, for the same reason (state already
   retired). How often that happens was not measured.
-- 0 discards and 0 transport failures occurred in any clean run, so the
-  discard and terminal-hole paths are exercised only by the host tests.
+- **0 transport failures in any clean run** is conditional: overload runs
+  are not clean, fail the clean-run assertions, and are excluded from that
+  statement. The Ubuntu PG18 unthrottled `-c16` overload runs recorded these
+  E failures and sequence-gap faults (not a certification result):
+
+  | Run | E failures | sequence-gap faults |
+  |---|---:|---:|
+  | 1 | 124,163 | 3 |
+  | 2 | 282,106 | 3 |
+  | 3 | 278,850 | 2 |
+
+  Evidence: `tests/results/session-20261114/b-integration/ubuntu/salvaged-vm/`,
+  `final-unthrottled-pg18-c16-{1,2,3}/daemon.stderr`. In the EL8 rate sweep, E failures and
+  sequence-gap faults were both 0 at 12,000 tps and unthrottled; those runs
+  still VOIDed for the reasons above. Zero transport failures does not imply
+  a clean capture.
+- **Cut and terminal discard: exercised live by the `cutdiscard` arm.**
+  This describes the arm's coverage; **the lead has not run the new arm yet,
+  and no live PASS is claimed here**. The historical clean runs had 0 discards;
+  their evidence does not establish this path. The arm and its uncounted
+  mutant are described below. The existing host tests remain the executed
+  evidence until the lead records a box result.
 - The two live mutants named in the brief as examples (a stale-round
   acknowledgement, completion without the sequence check) cannot be made to
   fail on a clean live run: a stale boundary arriving while fencing and a
-  sequence hole both need a stimulus the box does not produce. Host mutants
+  sequence hole both need a stimulus the historical clean loads did not
+  produce. The new `cutdiscard` arm supplies a terminal-hole stimulus. Host mutants
   cover them (`accept_stale_round`, `ignore_terminal_hole`,
-  `uncounted_skip_accepted`). The three live mutants are the three defects
+  `uncounted_skip_accepted`). The three original live mutants are the defects
   that kept rounds from completing. Completion without acknowledgements was
   tried as a fourth: the sequence check stops it at or before its first
   round, at one of two assertions depending on timing, so it stays a host
   mutant (`skip_cpu_ack`).
+
+### Live cut and terminal-discard arm (execution pending)
+
+Run on a built Linux gate box, as root, with the postmaster PID:
+
+```sh
+python3 tests/test_transport_daemon_live.py --pid "$POSTMASTER" --only cutdiscard --no-mutants
+python3 tests/test_transport_daemon_live.py --pid "$POSTMASTER" --only cutdiscard
+```
+
+The second command runs the counted control and then the mutant. The arm also
+runs in the default sequence; `--no-mutants` skips only the mutant. On the Mac,
+`python3 tests/test_transport_daemon_live.py --dry-run` checks source anchors,
+the live scheduler through virtual I/O, and verdict controls, without
+compiling/loading BPF or claiming the kernel schedule.
+
+`tests/transport_cutdiscard.py` builds a temporary daemon and producer object;
+the product source and build recipes do not acquire a test hook. Only the test
+build includes `tests/transport_cutdiscard.h`. It temporarily admits the main
+thread to the existing helper map for a pinned `getppid` syscall and removes it
+afterwards. The test producer uses the existing reserve/give-up shape from the
+odd-PID stimulus, counts a discard **before** releasing the reservation, and
+does not invent a delivered record or modify an accounting-map value in userspace.
+Map, rodata and skeleton member layouts remain unchanged.
+
+The schedule is causal, without added sleeps or assertion retries:
+
+1. Once pgbench is launched, real watchpoint DATA is queued, and both E/L
+   candidate boundaries are consumed,
+   before the real target read, make one final E attempt on the second online
+   CPU, which is not the E/L issuer. Reserve and discard it in the kernel.
+2. Defer **both** E/L reader paths while CPU perf readers continue. Consume
+   every CPU's higher-round acknowledgement. Completion reads real mmap
+   producer/consumer positions; require an unconsumed E prefix and a fixed cut,
+   a HOLD, and unchanged DATA, TEXT, FRONTIER and completed-round counts.
+3. Publish more real E/L boundary traffic on the issuer CPU after the cut,
+   requiring both producer positions to advance beyond it, then resume E/L
+   consumption. The cut cannot move with that traffic. The counted arm must
+   complete with `holds > 0`, `cuts > 0`, `terminal_discards > 0`, no VOID,
+   and `attempted = delivered + failures + discards` for every destination
+   (the daemon additionally reconciles every CPU/destination key).
+4. The mutant removes only the stimulus's discard-accounting call. It must
+   reach the same HOLD/cut/traffic schedule, then produce `VOID(sequence_gap)`
+   with no additional released DATA, TEXT, FRONTIER or completed round after
+   the stimulus baseline. Build/load failure,
+   another VOID reason or missing stimulus fails the test, never kills it.
+
+PostgreSQL processes belonging to the selected postmaster are temporarily
+pinned away from the second CPU so its E discard stays terminal; existing
+affinities are restored in cleanup. Other CPUs continue pgbench and helper
+traffic. This restricted schedule is a mechanism test, not an overhead screen,
+throughput qualification, attachment proof, or an Ubuntu certification claim.
 
 ### Measurements (not gates)
 

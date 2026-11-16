@@ -23,6 +23,9 @@ named assertions below against the daemon's final measurements AND against
 the qualification file it wrote.
   clean -c16:  pgbench -S -c 16 -j 4 [-R rate]
   clean -C:    pgbench -C -c 16 -j 4 [-R rate] -f hold.sql   (see below)
+  cutdiscard:  harness-only kernel discard on a non-issuer CPU; defer E/L
+    until all acknowledgements and a real cut HOLD, then resume with traffic
+    beyond the cut. The uncounted mutant must VOID(sequence_gap).
   three live mutants of src/percpu_transport.c, rebuilt here and required to
   go red at one named assertion each. They are the three defects that kept
   the daemon from ever completing a round on Linux.
@@ -72,6 +75,7 @@ import time
 from test_init_hint_recovery import ctl, stop, wait_for
 from test_transport_producers_live import Refused, checked, preemption_mode, readable
 from testutil import find_postmaster
+import transport_cutdiscard as cutdiscard
 
 ROOT = Path(__file__).resolve().parents[1]
 TRACER = ROOT / 'pg_wait_tracer'
@@ -184,7 +188,8 @@ def daemon_cpu_ticks(pid):
     return int(fields[11]) + int(fields[12])
 
 
-def run_arm(binary, pm, db, churn, seconds, rate, directory, uncertified, hold_ms=0):
+def run_arm(binary, pm, db, churn, seconds, rate, directory, uncertified, hold_ms=0,
+            cutdiscard_stimulus=False):
     trace = directory / f'trace-{binary.parent.name}-{int(churn)}-{time.monotonic_ns()}'
     trace.mkdir()
     log = trace / 'daemon.stderr'
@@ -211,7 +216,22 @@ def run_arm(binary, pm, db, churn, seconds, rate, directory, uncertified, hold_m
                      'exact-perf daemon control socket not ready')
             ticks, started = daemon_cpu_ticks(proc.pid), time.monotonic()
             print('RUN ' + ' '.join(command), flush=True)
-            load = subprocess.run(command, capture_output=True, text=True, timeout=seconds + 60)
+            if cutdiscard_stimulus:
+                # Activate the harness only once the independent load process
+                # is alive. No sleeps/retries select a favourable schedule.
+                worker = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    assert worker.poll() is None, 'cutdiscard pgbench is active before stimulus'
+                    (binary.parent / 'ready').touch()
+                    out, err = worker.communicate(timeout=seconds + 60)
+                    load = subprocess.CompletedProcess(command, worker.returncode, out, err)
+                finally:
+                    if worker.poll() is None:
+                        worker.kill()
+                    worker.wait(timeout=5)
+                    (binary.parent / 'ready').unlink(missing_ok=True)
+            else:
+                load = subprocess.run(command, capture_output=True, text=True, timeout=seconds + 60)
             wall = time.monotonic() - started
             cpu = (daemon_cpu_ticks(proc.pid) - ticks) / os.sysconf('SC_CLK_TCK')
             assert load.returncode == 0, (load.stdout, load.stderr)
@@ -351,6 +371,34 @@ def report(label, row):
           f"first_interval_uncertified={dump['first_uncertified']} forks_released={dump['forks']}", flush=True)
 
 
+def run_cutdiscard(pm, db, directory, uncertified, seconds, rate, no_mutants):
+    online = set()
+    for group in Path('/sys/devices/system/cpu/online').read_text().strip().split(','):
+        bounds = [int(item) for item in group.split('-')]
+        online.update(range(bounds[0], bounds[-1] + 1))
+    cpus = sorted(online)
+    if len(cpus) < 2 or not online <= os.sched_getaffinity(0):
+        raise Refused('cutdiscard needs at least two online CPUs, all available to daemon helpers')
+    with cutdiscard.postgres_away_from_cpu(pm, cpus[1]):
+        for uncounted in ((False,) if no_mutants else (False, True)):
+            binary = cutdiscard.build(directory, cpus[1], uncounted)
+            row = run_arm(binary, pm, db, False, seconds, rate, directory, uncertified,
+                          cutdiscard_stimulus=True)
+            label = 'cutdiscard-uncounted' if uncounted else 'cutdiscard'
+            report(label, row)
+            for line in row['stderr'].splitlines():
+                if line.startswith('CUTDISCARD '):
+                    print(line, flush=True)
+            assert row['premise'], 'cutdiscard daemon announced attachment test premise'
+            if uncounted:
+                cutdiscard.assert_mutant(row)
+                print('mutant cutdiscard-uncounted: KILLED (VOID(sequence_gap), no premature release)', flush=True)
+            else:
+                cutdiscard.assert_counted(row)
+                assert_clean(row)
+                print('CUTDISCARD LIVE PASS: holds, cuts, terminal_discards > 0; exact reconciliation', flush=True)
+
+
 def build_mutant(directory, name, edits):
     """Recompile only src/percpu_transport.c with the project's own flags and
     link it with the objects the project build already produced."""
@@ -395,10 +443,14 @@ def main():
     parser.add_argument('--rate-churn', type=int, default=200, help='pgbench -R for the -C arm; 0 = unthrottled')
     parser.add_argument('--churn-hold-ms', type=int, default=None,
                         help='-C arm: hold each connection this long before its query (default 100; 0 = plain -S -C)')
-    parser.add_argument('--only', choices=('c16', 'churn', 'deadline'), help='run one load/gate only')
+    parser.add_argument('--only', choices=('c16', 'churn', 'deadline', 'cutdiscard'), help='run one load/gate only')
     parser.add_argument('--deadline-seconds', type=int, default=18, help='unthrottled deadline stimulus (at least 18 s)')
     parser.add_argument('--no-mutants', action='store_true', help='measurement runs only')
+    parser.add_argument('--dry-run', action='store_true', help='portable cutdiscard source/oracle checks; no BPF')
     options = parser.parse_args()
+    if options.dry_run:
+        cutdiscard.dry_run()
+        return 0
     if sys.platform != 'linux' or os.geteuid() != 0:
         raise Refused('Linux root required; no BPF on the Mac')
     if options.seconds < 5:
@@ -434,8 +486,11 @@ def main():
             if not options.only or options.only == 'deadline':
                 for terminate in (False, True):
                     run_deadline_arm(pm, db, directory, uncertified, options.deadline_seconds, terminate)
+            if not options.only or options.only == 'cutdiscard':
+                run_cutdiscard(pm, db, directory, uncertified, options.seconds,
+                               options.rate_c16, options.no_mutants)
             for churn, rate in ((False, options.rate_c16), (True, options.rate_churn)):
-                if options.only == 'deadline':
+                if options.only in ('deadline', 'cutdiscard'):
                     continue
                 if options.only and (options.only == 'churn') != churn:
                     continue
@@ -448,7 +503,7 @@ def main():
                     assert row['premise'], 'the daemon announced the attachment test premise'
                     assert_clean(row)
                     print(f'CLEAN {label}: PASS', flush=True)
-            if not options.no_mutants and options.only != 'deadline':
+            if not options.no_mutants and options.only not in ('deadline', 'cutdiscard'):
                 for name, edits, assertion in MUTANTS:
                     binary = build_mutant(directory, name, edits)
                     row = run_arm(binary, pm, db, False, 5, options.rate_c16 or 2000, directory, uncertified)
