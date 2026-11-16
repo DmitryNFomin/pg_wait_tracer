@@ -30,7 +30,7 @@ struct pgwt_merge_capture {
     const ma_envelope **held;
     struct retained **heads, **tails, *storage, *free;
     size_t lifetime_count, binding_count, source_count, retained_count;
-    size_t staged;
+    size_t staged, next_source;
     uint64_t local_writer_fail, max_held, last_checkpoint_at;
     struct arrival *arrivals;
     size_t arrival_slots, oldest, newest, arrival_free;
@@ -38,6 +38,7 @@ struct pgwt_merge_capture {
     pgwt_merge_observation observation;
     bool finished, serviced;
     uint64_t last_service_at;
+    struct pgwt_transport_budget budget;
     /* Measurements only. Ages in PGWT_CAPTURE_AGE_BUCKET_NS buckets; the
      * last bucket collects everything at or beyond the range. */
     uint64_t released_data, released_text, frontiers, voids;
@@ -468,6 +469,7 @@ static int flush_source(struct pgwt_merge_capture *c, size_t source,
                          uint64_t d, ma_snapshot *s)
 {
     while (c->heads[source]) {
+        if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) return 0;
         struct retained *n = c->heads[source];
         bool hold;
         int rc = mapped(c, &n->envelope, d, s, &hold);
@@ -482,17 +484,25 @@ static int flush_source(struct pgwt_merge_capture *c, size_t source,
     }
     return 0;
 }
+void pgwt_capture_set_budget(struct pgwt_merge_capture *c, const struct pgwt_transport_budget *b)
+{ if (c && b) c->budget = *b; }
 int pgwt_capture_envelope(struct pgwt_merge_capture *c, const ma_envelope *e,
                            uint64_t d, const ma_snapshot *s)
 {
     if (!c || !e || c->finished) return -EINVAL;
     ma_snapshot current = s ? *s : (ma_snapshot){0};
+    if (e->kind == MA_CHECK && c->config.now &&
+        pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) return 0;
     if (e->kind != MA_TRACE && e->kind != MA_LIFECYCLE && e->kind != MA_TEXT && e->kind != MA_BOUNDARY) {
         bool hold;
         int rc = mapped(c, e, d, &current, &hold);
         if (rc < 0) return rc;
-        for (size_t i = 0; i < c->source_count; ++i)
+        for (size_t visited = 0; visited < c->source_count; ++visited) {
+            if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) break;
+            size_t i = c->next_source;
+            c->next_source = (i + 1) % c->source_count;
             if ((rc = flush_source(c, i, d, &current)) < 0) return rc;
+        }
         return 0;
     }
     if (e->source >= c->source_count || e->size > 272 || (e->size && !e->bytes))
@@ -701,6 +711,13 @@ static bool daemon_write(void *ctx, const void *bytes, size_t n)
 {
     return write((int)(intptr_t)ctx, bytes, n) == (ssize_t)n;
 }
+static uint64_t daemon_now(void *ctx)
+{
+    (void)ctx;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts)) return 0;
+    return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+}
 static bool daemon_flush(void *ctx)
 {
     struct pgwt_daemon *d = ctx;
@@ -778,7 +795,7 @@ int pgwt_merge_capture_open(struct pgwt_daemon *d)
     struct pgwt_capture_config cfg = {.cpu_count = ncpu, .capacity = PGWT_CAPTURE_LIFETIME_CAPACITY,
         .test_attach_premise = assumed,
         .baseline = baseline, .ctx = d, .lifecycle = daemon_lifecycle,
-        .trace = daemon_trace, .observe = daemon_observe, .writer_failed = daemon_writer_failed,
+        .trace = daemon_trace, .observe = daemon_observe, .now = daemon_now, .writer_failed = daemon_writer_failed,
         .sink = {.emit = daemon_sink, .ctx = d, .flush = daemon_flush}};
     /* Create the dump first: creation can report a VOID through the sink. */
     size_t len = strlen(d->trace_dir);
@@ -879,6 +896,10 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
     /* Measurements for the box runs, one parseable line each. Not gates. */
     struct pgwt_transport_stats ts = pgwt_transport_stats(d->percpu_transport);
     struct pgwt_capture_stats cs = pgwt_capture_stats(d->merge_capture);
+    if (ts.finish_deadline_reached || ts.unfinished_records)
+        fprintf(stderr, "exact-perf: capture ended at deadline/stop with unfinished evidence; "
+            "finish_deadline_reached=%llu unfinished_records=%llu; VOID, not complete\n",
+            (unsigned long long)ts.finish_deadline_reached, (unsigned long long)ts.unfinished_records);
 #define U(v) ((unsigned long long)(v))
     fprintf(stderr, "exact-perf: stats rounds_requested=%llu rounds_completed=%llu "
         "rounds_completed_nonempty=%llu holds=%llu cuts=%llu terminal_discards=%llu skipped=%llu "
@@ -888,7 +909,8 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
         "held_us_p50=%llu held_us_p99=%llu held_us_max=%llu "
         "event_us_p50=%llu event_us_p99=%llu event_us_max=%llu "
         "event_max_rank=%u event_max_source=%u event_max_pid=%llu "
-        "seal_violation=%llu sequence_gap=%llu unknown_evidence=%llu perf_lost=%llu status=%u\n",
+        "seal_violation=%llu sequence_gap=%llu unknown_evidence=%llu perf_lost=%llu "
+        "finish_deadline_reached=%llu unfinished_records=%llu status=%u\n",
         U(ts.rounds_requested), U(ts.rounds_completed), U(ts.rounds_completed_nonempty),
         U(ts.holds), U(ts.cuts), U(ts.terminal_discards), U(ts.skipped), U(ts.uncovered),
         U(ts.records), U(ts.queue_high),
@@ -900,7 +922,7 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
         U(cs.event_max_ns / 1000), cs.event_max_rank, cs.event_max_source, U(cs.event_max_pid),
         U(report.faults[PGWT_MERGE_SEAL_VIOLATION]),
         U(report.faults[PGWT_MERGE_SEQUENCE_GAP]), U(report.faults[PGWT_MERGE_UNKNOWN_EVIDENCE]),
-        U(lost), (unsigned)report.status);
+        U(lost), U(ts.finish_deadline_reached), U(ts.unfinished_records), (unsigned)report.status);
     static const char *const names[3] = {"CPU", "E", "L"};
     for (size_t i = 0; i < 3; ++i)
         fprintf(stderr, "exact-perf: reconcile dest=%s attempted=%llu delivered=%llu failures=%llu "

@@ -1911,6 +1911,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
             break;
         }
 
+        pgwt_percpu_transport_begin_pass(d, deadline * UINT64_C(1000000000));
         if (d->exact_perf && (pgwt_percpu_transport_poll(d) < 0 ||
                               pgwt_merge_capture_poll(d) < 0)) {
             fprintf(stderr, "FATAL: exact per-CPU transport poll failed\n");
@@ -1918,6 +1919,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         }
         pgwt_sweep_bootstrap_backends(d);
         for (int i = 0; i < n; i++) {
+            if (d->exact_perf && !d->running) break;
             if (events[i].data.fd == d->timer_fd) {
                 started_ns = pgwt_debug_block_begin(d);
                 pgwt_handle_timer(d);
@@ -1951,7 +1953,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         }
 
         /* Drain event ringbuf on every iteration (poll-based with NO_WAKEUP) */
-        if (d->event_rb || d->exact_perf) {
+        if ((d->event_rb || d->exact_perf) && (!d->exact_perf || d->running)) {
             event_ring_backlog = consume_event_ring(
                 d, "event_ring_drain", true);
         }
@@ -1967,11 +1969,11 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
     }
 
     /* Drain remaining events before cleanup */
-    if (d->event_rb || d->exact_perf) {
+    if (!d->exact_perf && d->event_rb) {
         consume_event_ring(d, "event_ring_final_drain", false);
     }
     uint64_t started_ns = pgwt_debug_block_begin(d);
-    pgwt_consume_lifecycle_ring(d);
+    if (!d->exact_perf) pgwt_consume_lifecycle_ring(d);
     pgwt_debug_block_end(d, "lifecycle_ring_final_drain", 0, started_ns);
     if (d->exact_perf && pgwt_merge_capture_finish(d) < 0)
         return -1;

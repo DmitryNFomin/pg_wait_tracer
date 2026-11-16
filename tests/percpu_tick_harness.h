@@ -127,19 +127,51 @@ static bool publication_counters(void)
 }
 /* Only the fields accessed by the actual Linux drain body are required.
  * libbpf's successful consume returns ZERO even after delivering samples. */
-struct pgwt_percpu_transport { uint64_t *positions; };
-struct perf_buffer { struct pgwt_percpu_transport *transport;size_t source,records; };
+struct pgwt_percpu_transport { uint64_t *positions; struct pgwt_transport_budget budget; void *platform; };
+struct perf_buffer { struct pgwt_percpu_transport *transport;size_t source,records; bool hint; };
 struct ring_context {struct pgwt_daemon *d;uint32_t dest;size_t consumed,limit;};
 struct ring_buffer {struct ring_context *ctx;size_t records;};
-struct linux_transport {struct pgwt_daemon *d;size_t ncpu;struct perf_buffer **perf,**hints;
+struct linux_transport {struct pgwt_daemon *d;size_t ncpu,next_reader;struct perf_buffer **perf,**hints;
     struct ring_buffer *rings[2];struct ring_context ring_ctx[2];int callback_error;};
+enum bpf_perf_event_ret {LIBBPF_PERF_EVENT_ERROR=-1,LIBBPF_PERF_EVENT_CONT=0,LIBBPF_PERF_EVENT_DONE=1};
+struct perf_event_header {uint32_t type;uint16_t misc,size;};
+enum {PERF_RECORD_SAMPLE=9,PERF_RECORD_LOST=2};
+static uint64_t record_cost;
+bool pgwt_transport_pass_expired(struct pgwt_percpu_transport *t)
+{return pgwt_budget_expired(&t->budget,service_now);}
+static struct linux_transport *linux_state(struct pgwt_daemon *d)
+{return d->percpu_transport->platform;}
+static int fault(struct pgwt_percpu_transport *t,pgwt_merge_reason r){(void)t;(void)r;return -EINVAL;}
+int pgwt_transport_perf(struct pgwt_percpu_transport *t,uint32_t cpu,const void *p,size_t n)
+{(void)p;(void)n;++t->positions[cpu];service_now+=record_cost;return 0;}
+int pgwt_transport_lost(struct pgwt_percpu_transport *t,uint32_t cpu,uint64_t n)
+{(void)t;(void)cpu;(void)n;return 0;}
+int pgwt_transport_ring_record(struct pgwt_percpu_transport *t,uint32_t dest,const void *p,size_t n,size_t *consumed,size_t limit)
+{(void)t;(void)dest;(void)p;(void)n;++*consumed;service_now+=record_cost;return limit && *consumed>=limit?-EAGAIN:0;}
+static enum bpf_perf_event_ret receive_perf(void *,int,struct perf_event_header *);
+static enum bpf_perf_event_ret receive_hint(void *,int,struct perf_event_header *);
+static int receive_ring(void *,void *,size_t);
 static int perf_buffer__consume(struct perf_buffer *p)
-{p->transport->positions[p->source]+=p->records;p->records=0;return 0;}
+{
+    while(p->records){
+        --p->records;
+        struct perf_event_header event={.type=PERF_RECORD_SAMPLE,.size=sizeof(event)};
+        enum bpf_perf_event_ret rc=p->hint?receive_hint(p->transport->platform,(int)p->source,&event):
+            receive_perf(p->transport->platform,(int)p->source,&event);
+        if(p->hint)++p->transport->positions[p->source];
+        if(rc==LIBBPF_PERF_EVENT_DONE)break;
+    }
+    return 0;
+}
 static int ring_buffer__consume(struct ring_buffer *r)
 {
-    size_t n=r->records<r->ctx->limit?r->records:r->ctx->limit;
-    r->ctx->consumed=n;r->records-=n;
-    return n==r->ctx->limit?-EAGAIN:(int)n;
+    size_t n=0;
+    while(r->records){
+        --r->records;++n;
+        int rc=receive_ring(r->ctx,NULL,0);
+        if(rc<0)return rc;
+    }
+    return (int)n;
 }
 static int consume_all(struct linux_transport *,bool *);
 static bool drain_cases(void)
@@ -151,18 +183,33 @@ static bool drain_cases(void)
     /* INIT wake-up hints are drained on the same pass but are not transport
      * records: they move no source position and never make a pass non-empty. */
     uint64_t woken[2]={0};struct pgwt_percpu_transport w={.positions=woken};
-    struct perf_buffer hint0={.transport=&w,.source=0},hint1={.transport=&w,.source=1};
+    struct perf_buffer hint0={.transport=&w,.source=0,.hint=true},hint1={.transport=&w,.source=1,.hint=true};
     struct perf_buffer *hints[]={&hint0,&hint1};
     struct linux_transport l={.d=d,.ncpu=2,.perf=perf,.hints=hints};
+    t.platform=w.platform=&l;
+    for(size_t i=0;i<2;++i){l.ring_ctx[i].d=d;l.ring_ctx[i].dest=(uint32_t)i+1;}
     struct ring_buffer e={.ctx=&l.ring_ctx[0]},life={.ctx=&l.ring_ctx[1]};l.rings[0]=&e;l.rings[1]=&life;
     bool empty=true;TICK(consume_all(&l,&empty)==0 && !empty && positions[0]==7);
     TICK(consume_all(&l,&empty)==0 && empty);
+    /* Exercise the verbatim raw perf and ring callbacks too: libbpf consumes
+     * the yielding record and leaves the suffix for the next service pass. */
+    record_cost=UINT64_C(10000000);cpu0.records=20;service_now=0;
+    pgwt_budget_begin(&t.budget,service_now,0);
+    TICK(consume_all(&l,&empty)==0 && !empty);
+    TICK(service_now<=PGWT_TRANSPORT_PASS_NS && cpu0.records==15);
+    pgwt_budget_begin(&t.budget,service_now,0);
+    TICK(consume_all(&l,&empty)==0 && !empty && cpu0.records==10);
+    cpu0.records=0;e.records=20;l.next_reader=4;
+    pgwt_budget_begin(&t.budget,service_now,0);uint64_t started=service_now;
+    TICK(consume_all(&l,&empty)==0 && !empty);
+    TICK(service_now-started<=PGWT_TRANSPORT_PASS_NS && e.records==15 && !l.callback_error);
+    record_cost=0;e.records=0;t.budget.active=false;
     hint1.records=3;TICK(consume_all(&l,&empty)==0 && empty && woken[1]==3 && !positions[1]);
     e.records=5000;TICK(consume_all(&l,&empty)==0 && !empty && e.records==904 && l.ring_ctx[0].consumed==4096);
     TICK(consume_all(&l,&empty)==0 && !empty && e.records==0 && l.ring_ctx[0].consumed==904);
     TICK(consume_all(&l,&empty)==0 && empty);
     l.callback_error=-EIO;TICK(consume_all(&l,&empty)==-EIO);free(d);
-    puts("actual Linux drain body: zero-return perf consume counted; negative ring yield bounded at 4096 PASS");
+    puts("actual Linux drain/callbacks: perf DONE and ring negative yield within 50 ms; suffix retained; 4096 record guard PASS");
     return true;
 }
 static bool tick_cases(void)

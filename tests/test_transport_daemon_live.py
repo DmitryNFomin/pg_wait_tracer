@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """#871 B integration: the DAEMON with --exact-perf completes rounds with the BPF producers.
 
+Deadline gate (issues #931 and #932): unthrottled pgbench -S -c16 -j4,
+rate 0, natural exit by duration + 15 s and SIGTERM to exit within 15 s
+while load continues. VOID/unfinished evidence is acceptable. A timeout
+fails; killing the process is cleanup only. Run alone with --only deadline.
+
 Usage (Linux root, project built):
   python3 tests/test_transport_daemon_live.py --pid POSTMASTER [--seconds 10] [--runs 1]
 
@@ -57,6 +62,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import struct
 import subprocess
 import sys
@@ -227,6 +233,81 @@ def run_arm(binary, pm, db, churn, seconds, rate, directory, uncertified, hold_m
             'premise': 'TEST PREMISE (PGWT_TEST_EXACT_ATTACH_PREMISE=1)' in text}
 
 
+def run_deadline_arm(pm, db, directory, uncertified, seconds, terminate):
+    """Issues #931/#932: exercise the overload path, including shutdown under load."""
+    label = 'sigterm' if terminate else 'duration'
+    trace = directory / f'deadline-{label}'
+    trace.mkdir()
+    log = trace / 'daemon.stderr'
+    env = {key: value for key, value in os.environ.items() if not key.startswith('PGWT_TEST_')}
+    env['PGWT_TEST_EXACT_ATTACH_PREMISE'] = '1'
+    if uncertified:
+        env['PGWT_TEST_EXACT_UNCERTIFIED_KERNEL'] = '1'
+    duration = seconds + 60 if terminate else seconds
+    command = [str(TRACER), '--mode', 'full', '--exact-perf', '--pid', str(pm),
+               '-T', str(trace), '-i', '1', '--duration', str(duration), '-q']
+    # No -R: rate 0 is unthrottled. Keep producers active through the entire
+    # exit allowance, and terminate them only in cleanup after the verdict.
+    load_command = ['pgbench', '-n', '-U', 'postgres', '-S', '-c', '16', '-j', '4',
+                    '-T', str(duration + 60), db]
+    load = None
+    with log.open('w') as error, (trace / 'pgbench.out').open('w') as load_out:
+        proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=error, env=env)
+        try:
+            wait_for(proc, lambda: (trace / 'pgwt.sock').exists(), 45,
+                     'deadline daemon control socket not ready')
+            started = time.monotonic()
+            load = subprocess.Popen(load_command, stdout=load_out, stderr=load_out)
+            print(f'RUN deadline={label} duration={duration} rate=0 clients=16 ' +
+                  ' '.join(load_command), flush=True)
+            if terminate:
+                # Waiting for the stimulus interval is not an exit timeout.
+                # An early exit cannot demonstrate signal handling under load.
+                try:
+                    proc.wait(timeout=seconds)
+                except subprocess.TimeoutExpired:
+                    pass
+                else:
+                    raise AssertionError('SIGTERM arm stayed alive through its load stimulus: ' + log.read_text())
+                assert load.poll() is None, 'unthrottled load remains active before SIGTERM'
+                signal_at = time.monotonic()
+                proc.send_signal(signal.SIGTERM)
+                allowance = 15
+            else:
+                allowance = seconds + 15 - (time.monotonic() - started)
+            try:
+                proc.wait(timeout=allowance)
+            except subprocess.TimeoutExpired:
+                raise AssertionError(f'{label}: capture exit deadline exceeded under unthrottled c16 load') from None
+            elapsed = time.monotonic() - (signal_at if terminate else started)
+            assert elapsed <= (15 if terminate else seconds + 15), f'{label}: exit within deadline'
+            assert load.poll() is None, 'unthrottled load continued until the daemon exited'
+            assert proc.returncode == 0, log.read_text()
+        finally:
+            # Timeout remains FAIL even if cleanup succeeds. Do not use stop(),
+            # whose graceful wait would extend the measured exit allowance.
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            if load is not None:
+                if load.poll() is None:
+                    load.terminate()
+                try:
+                    load.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    load.kill()
+                    load.wait(timeout=5)
+    stats, _ = measurements(log.read_text())
+    dump = qualification(trace / 'merge-qualification.bin')
+    assert stats is not None and dump['end'] is not None, 'deadline arm wrote its final capture status'
+    if stats.get('finish_deadline_reached', 0) or stats.get('unfinished_records', 0):
+        assert stats['status'] != 0 and dump['voids'] and dump['end']['status'] != 0, \
+            'unfinished deadline evidence is VOID, never complete'
+    print(f'DEADLINE {label}: PASS elapsed={elapsed:.3f}s status={stats["status"]} '
+          f'finish_deadline_reached={stats.get("finish_deadline_reached", "old-build")} '
+          f'unfinished_records={stats.get("unfinished_records", "old-build")}', flush=True)
+
+
 def report(label, row):
     stats, cells, dump = row['stats'] or {}, row['cells'], row['dump']
     wall = row['wall'] or 1.0
@@ -306,13 +387,16 @@ def main():
     parser.add_argument('--rate-churn', type=int, default=200, help='pgbench -R for the -C arm; 0 = unthrottled')
     parser.add_argument('--churn-hold-ms', type=int, default=None,
                         help='-C arm: hold each connection this long before its query (default 100; 0 = plain -S -C)')
-    parser.add_argument('--only', choices=('c16', 'churn'), help='measurement runs: one load only')
+    parser.add_argument('--only', choices=('c16', 'churn', 'deadline'), help='run one load/gate only')
+    parser.add_argument('--deadline-seconds', type=int, default=18, help='unthrottled deadline stimulus (at least 18 s)')
     parser.add_argument('--no-mutants', action='store_true', help='measurement runs only')
     options = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         raise Refused('Linux root required; no BPF on the Mac')
     if options.seconds < 5:
         raise Refused('each pgbench arm must run at least 5 seconds')
+    if options.deadline_seconds < 18:
+        raise Refused('deadline stimulus must run at least 18 seconds')
     pm = options.pid or (find_postmaster(pg_version=options.pg_version) if options.pg_version else
                          find_postmaster(pg_version=13) or find_postmaster())
     if not pm:
@@ -339,7 +423,12 @@ def main():
         checked(['createdb', '-U', 'postgres', db])
         try:
             checked(['pgbench', '-U', 'postgres', '-i', '-s', '1', db])
+            if not options.only or options.only == 'deadline':
+                for terminate in (False, True):
+                    run_deadline_arm(pm, db, directory, uncertified, options.deadline_seconds, terminate)
             for churn, rate in ((False, options.rate_c16), (True, options.rate_churn)):
+                if options.only == 'deadline':
+                    continue
                 if options.only and (options.only == 'churn') != churn:
                     continue
                 for run in range(1, options.runs + 1):
@@ -351,7 +440,7 @@ def main():
                     assert row['premise'], 'the daemon announced the attachment test premise'
                     assert_clean(row)
                     print(f'CLEAN {label}: PASS', flush=True)
-            if not options.no_mutants:
+            if not options.no_mutants and options.only != 'deadline':
                 for name, edits, assertion in MUTANTS:
                     binary = build_mutant(directory, name, edits)
                     row = run_arm(binary, pm, db, False, 5, options.rate_c16 or 2000, directory, uncertified)
@@ -367,6 +456,9 @@ def main():
                         raise AssertionError(f'live mutant {name} survived')
         finally:
             checked(['dropdb', '-U', 'postgres', '--if-exists', db])
+    if options.only == 'deadline':
+        print('TRANSPORT DEADLINE LIVE PASS: natural exit and SIGTERM under unthrottled c16 load; certification=false')
+        return 0
     if mode in ('full', 'unknown'):
         raise Refused(f'preemption mode {mode}: the completion fence is not argued for it; mechanism results above only')
     print('B INTEGRATION LIVE PASS: daemon and producers complete rounds together; helper registration, '

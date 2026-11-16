@@ -18,7 +18,7 @@ struct pgwt_percpu_transport {
     void *platform;
     struct pgwt_transport_io io;
     uint32_t *cpus;
-    size_t ncpu, capacity, count;
+    size_t ncpu, capacity, count, queue_head, release_left;
     uint64_t *positions, *seq, *targets;
     /* Per (CPU,destination), cpu-major like seq: records consumed, sequence
      * numbers skipped inside the consumed prefix, and two scratch reads. */
@@ -31,6 +31,8 @@ struct pgwt_percpu_transport {
     /* Producer positions of E and L read once after every ack of this round,
      * only when a frozen target is still unreached. Never moved by traffic. */
     bool cut_taken, pass_empty;
+    bool releasing, finishing;
+    struct pgwt_transport_budget budget;
     uint64_t cut[2], cut_passes, cut_limit;
     uint32_t round, el_token;
     ma_snapshot snapshot;
@@ -110,6 +112,28 @@ int pgwt_transport_decode(const uint32_t *cpus, size_t ncpu, uint32_t dest,
     return 0;
 }
 static uint64_t observed(struct pgwt_percpu_transport *t) { return t->io.now(t->io.ctx); }
+void pgwt_transport_begin_pass(struct pgwt_percpu_transport *t, uint64_t limit)
+{
+    if (!t) return;
+    pgwt_budget_begin(&t->budget, observed(t), limit);
+    if (t->io.budget) t->io.budget(t->io.ctx, &t->budget);
+}
+bool pgwt_transport_pass_expired(struct pgwt_percpu_transport *t)
+{ return t && pgwt_budget_expired(&t->budget, observed(t)); }
+static int bounded_drain(struct pgwt_percpu_transport *t)
+{
+    /* Reserve most of the service pass for completion/merge work. A busy
+     * perf source must not spend every iteration's entire admission budget. */
+    struct pgwt_transport_budget service = t->budget;
+    uint64_t now = observed(t);
+    if (pgwt_budget_expired(&service, now)) return 0;
+    if (service.active && UINT64_MAX - now >= PGWT_TRANSPORT_DRAIN_NS &&
+        now + PGWT_TRANSPORT_DRAIN_NS < t->budget.until)
+        t->budget.until = now + PGWT_TRANSPORT_DRAIN_NS;
+    int rc = t->io.drain(t->io.ctx);
+    t->budget = service;
+    return rc;
+}
 static int counters(struct pgwt_percpu_transport *t)
 {
     memset(&t->snapshot, 0, sizeof(t->snapshot));
@@ -214,6 +238,12 @@ int pgwt_transport_record(struct pgwt_percpu_transport *t, uint32_t dest,
     }
     uint64_t now = observed(t);
     t->last_record_at = now;
+    /* Shutdown closes admission. Still account raw records and consume helper
+     * boundaries, but never grow the capture with another DATA/lifecycle batch. */
+    if (t->finishing && r.envelope.kind != MA_BOUNDARY) {
+        ++t->stats.unfinished_records;
+        return 0;
+    }
     if (t->io.received) {
         int rc = t->io.received(t->io.ctx, &r.envelope, now);
         if (rc < 0) return fault(t, rc == -ENOMEM ? PGWT_MERGE_ALLOCATION_FAIL :
@@ -240,7 +270,7 @@ int pgwt_transport_record(struct pgwt_percpu_transport *t, uint32_t dest,
                                                       r.round != t->round)) return 0;
     }
     if (t->count == t->capacity) return fault(t, PGWT_MERGE_ALLOCATION_FAIL);
-    struct queued_wire *q = &t->queue[t->count++];
+    struct queued_wire *q = &t->queue[(t->queue_head + t->count++) % t->capacity];
     if (t->count > t->stats.queue_high) t->stats.queue_high = t->count;
     q->record = r; q->arrived = now;
     if (r.envelope.size) {
@@ -301,19 +331,26 @@ static int request(struct pgwt_percpu_transport *t, bool fence)
 }
 static int release_queue(struct pgwt_percpu_transport *t, bool checkpoint)
 {
-    ma_envelope check = {.version = 1, .kind = MA_CHECK};
-    int rc = checkpoint ? t->io.envelope(t->io.ctx, &check, observed(t), &t->snapshot) : 0;
-    if (rc < 0) return rc;
-    size_t n = t->count;
-    for (size_t j = 0; j < n; ++j) {
-        uint64_t now = observed(t);
-        if (now >= t->queue[j].arrived && now - t->queue[j].arrived > t->max_held)
-            t->max_held = now - t->queue[j].arrived;
-        rc = t->io.envelope(t->io.ctx, &t->queue[j].record.envelope, now, &t->snapshot);
+    if (!t->releasing) {
+        t->releasing = true;
+        t->release_left = t->count;
+        ma_envelope check = {.version = 1, .kind = MA_CHECK};
+        int rc = checkpoint ? t->io.envelope(t->io.ctx, &check, observed(t), &t->snapshot) : 0;
         if (rc < 0) return rc;
     }
+    while (t->release_left) {
+        if (pgwt_transport_pass_expired(t)) return 1; /* retain the suffix */
+        struct queued_wire *q = &t->queue[t->queue_head];
+        uint64_t now = observed(t);
+        if (now >= q->arrived && now - q->arrived > t->max_held)
+            t->max_held = now - q->arrived;
+        int rc = t->io.envelope(t->io.ctx, &q->record.envelope, now, &t->snapshot);
+        if (rc < 0) return rc;
+        t->queue_head = (t->queue_head + 1) % t->capacity;
+        --t->count; --t->release_left;
+    }
     /* Callbacks cannot reenter the transport reader. */
-    t->count = 0;
+    t->releasing = false;
     return 0;
 }
 /* Fence: once the round's E and L boundaries are consumed, freeze the
@@ -355,6 +392,7 @@ static int complete_round(struct pgwt_percpu_transport *t)
         return 0;
     }
     if (!t->fencing) return 0;
+    if (t->releasing) goto resume_release;
     for (size_t i = 0; i < t->ncpu; ++i) if (!t->acks[i]) return 0;
     /* After every ack: a failed attempt of this round's window is counted
      * (the completion fence), so one read diagnoses it. No pass is needed. */
@@ -406,8 +444,10 @@ static int complete_round(struct pgwt_percpu_transport *t)
     }
     /* Completion fence: this reread MUST follow every CPU's consumed ack. */
     counters(t);
+resume_release:
     rc = release_queue(t, true);
     if (rc < 0) return rc;
+    if (rc == 1) return 0;
     uint64_t now = observed(t);
     if (now >= t->requested_at) {
         uint64_t took = now - t->requested_at;
@@ -430,9 +470,10 @@ int pgwt_transport_poll(struct pgwt_percpu_transport *t, bool waiting)
     if (!t->suspended && t->io.cpu_set_unchanged(t->io.ctx) != 1) return fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
     if (t->draining) return 0;
     uint64_t now = observed(t);
-    for (size_t j = 0; j < t->count; ++j)
-        if (now >= t->queue[j].arrived && now - t->queue[j].arrived > t->max_held)
-            t->max_held = now - t->queue[j].arrived;
+    if (t->count) {
+        uint64_t arrived = t->queue[t->queue_head].arrived;
+        if (now >= arrived && now - arrived > t->max_held) t->max_held = now - arrived;
+    }
     if (t->suspended) {
         counters(t);
         ma_envelope e = {.version = 1, .kind = MA_CHECK};
@@ -467,9 +508,14 @@ int pgwt_transport_finish(struct pgwt_percpu_transport *t)
      * any unfinished suffix is explicitly VOID, including unread raw data. */
     int rc = 0;
     uint64_t started = observed(t);
+    uint64_t until = UINT64_MAX - started < PGWT_TRANSPORT_FINISH_NS ? UINT64_MAX : started + PGWT_TRANSPORT_FINISH_NS;
+    t->finishing = true;
     bool done = false;
     for (unsigned pass = 0; pass < 256; ++pass) {
-        int drained = t->io.drain(t->io.ctx);
+        uint64_t now = observed(t);
+        if (now < started || now >= until) break;
+        pgwt_transport_begin_pass(t, until);
+        int drained = bounded_drain(t);
         if (drained < 0) { rc = fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE); done = true; break; }
         t->pass_empty = drained == 1;
         if (!t->suspended) {
@@ -478,11 +524,17 @@ int pgwt_transport_finish(struct pgwt_percpu_transport *t)
         }
         if (drained && (t->suspended || (!t->count && !t->requested &&
             !(t->io.waiting && t->io.waiting(t->io.ctx))))) { done = true; break; }
-        uint64_t now = observed(t);
-        if (now < started || now - started >= UINT64_C(100000000)) break;
+        now = observed(t);
+        if (now < started || now >= until) break;
         if (t->io.wait && t->io.wait(t->io.ctx) < 0) break;
     }
-    if (!done && rc >= 0) rc = fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
+    t->stats.unfinished_records += t->count + (t->io.pending ? t->io.pending(t->io.ctx) : 0);
+    if (!done && rc >= 0) {
+        ++t->stats.finish_deadline_reached;
+        rc = fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
+    } else if (t->stats.unfinished_records && rc >= 0 && !t->suspended) {
+        rc = fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
+    }
     /* Terminal reconciliation, per (CPU,destination), after an empty pass:
      * attempts = delivered + failures + discards, with no failure. It also
      * accounts for a missing final attempt that no later record reveals. */
@@ -497,6 +549,8 @@ int pgwt_transport_finish(struct pgwt_percpu_transport *t)
         t->stats.final_delivered[dest] += t->delivered[k];
         t->stats.final_failures[dest] += t->failures[k];
         t->stats.final_discards[dest] += t->discards[k];
+        if (t->targets[k] > t->delivered[k] && t->targets[k] - t->delivered[k] > t->discards[k])
+            t->stats.unfinished_records += t->targets[k] - t->delivered[k] - t->discards[k];
         if (t->failures[k] || t->targets[k] < t->delivered[k] ||
             t->targets[k] - t->delivered[k] != t->discards[k])
             t->stats.final_reconciled = false;
@@ -586,7 +640,7 @@ struct linux_transport {
     struct ring_context ring_ctx[2];
     struct pinned_helper *helpers;
     struct bpf_link *helper_link;
-    size_t ncpu;
+    size_t ncpu, next_reader;
     int possible, epoll_fd, attempts_fd, failures_fd, discards_fd, ctl_fd, callback_error;
     bool topology_reported;
 };
@@ -710,6 +764,10 @@ static bool linux_suspended(void *ctx)
 { return pgwt_capture_report(((struct linux_transport *)ctx)->d->merge_capture).status != PGWT_MERGE_OK; }
 static bool linux_waiting(void *ctx)
 { return pgwt_capture_waiting(((struct linux_transport *)ctx)->d->merge_capture); }
+static size_t linux_pending(void *ctx)
+{ return pgwt_capture_pending_records(((struct linux_transport *)ctx)->d->merge_capture); }
+static void linux_budget(void *ctx, const struct pgwt_transport_budget *b)
+{ pgwt_capture_set_budget(((struct linux_transport *)ctx)->d->merge_capture, b); }
 static int linux_wait(void *ctx)
 {
     struct epoll_event events[1];
@@ -771,6 +829,7 @@ static int receive_ring(void *ctx, void *bytes, size_t size)
                                        &r->consumed, r->limit);
     if (rc < 0 && !(rc == -EAGAIN && r->limit && r->consumed >= r->limit))
         linux_state(r->d)->callback_error = rc;
+    if (!rc && pgwt_transport_pass_expired(r->d->percpu_transport)) return -EINTR;
     return rc;
 }
 static enum bpf_perf_event_ret receive_perf(void *ctx, int cpu, struct perf_event_header *event)
@@ -785,35 +844,45 @@ static enum bpf_perf_event_ret receive_perf(void *ctx, int cpu, struct perf_even
         rc = pgwt_transport_lost(l->d->percpu_transport, (uint32_t)cpu, n);
     } else rc = fault(l->d->percpu_transport, PGWT_MERGE_MALFORMED_ENVELOPE);
     if (rc < 0) l->callback_error = rc;
-    return LIBBPF_PERF_EVENT_CONT;
+    return pgwt_transport_pass_expired(l->d->percpu_transport) ? LIBBPF_PERF_EVENT_DONE : LIBBPF_PERF_EVENT_CONT;
 }
 static enum bpf_perf_event_ret receive_hint(void *ctx, int cpu, struct perf_event_header *event)
 {
     /* A wake-up, not a record: the caller's loop pass runs the INIT sweep. */
-    (void)ctx; (void)cpu; (void)event;
-    return LIBBPF_PERF_EVENT_CONT;
+    struct linux_transport *l = ctx;
+    (void)cpu; (void)event;
+    return pgwt_transport_pass_expired(l->d->percpu_transport) ? LIBBPF_PERF_EVENT_DONE : LIBBPF_PERF_EVENT_CONT;
 }
 static int consume_all(struct linux_transport *l, bool *empty)
 {
     *empty = true;
-    for (size_t i = 0; i < l->ncpu; ++i) {
-        int hint = perf_buffer__consume(l->hints[i]);
-        if (hint < 0) return hint;
-        uint64_t before = l->d->percpu_transport->positions[i];
-        int n = perf_buffer__consume(l->perf[i]);
-        if (n < 0) return n;
-        /* libbpf consume returns 0 on success, not a record count. Use the
-         * reader's existing source position, without another per-DATA
-         * increment. libbpf v1.5.0 src/libbpf.c:12812-12828. */
-        if (l->d->percpu_transport->positions[i] != before) *empty = false;
-    }
-    for (uint32_t dest = 1; dest <= 2; ++dest) {
-        struct ring_context *r = &l->ring_ctx[dest-1];
-        r->consumed = 0; r->limit = 4096;
-        int n = ring_buffer__consume(l->rings[dest-1]);
-        n = pgwt_transport_ring_result(n, r->consumed, r->limit);
-        if (n < 0) return n;
-        if (r->consumed) *empty = false;
+    size_t readers = 2 * l->ncpu + 2;
+    for (size_t visited = 0; visited < readers; ++visited) {
+        if (pgwt_transport_pass_expired(l->d->percpu_transport)) { *empty = false; return 0; }
+        size_t reader = l->next_reader;
+        l->next_reader = (reader + 1) % readers;
+        if (reader < 2 * l->ncpu) {
+            size_t i = reader / 2;
+            if (!(reader % 2)) {
+                int hint = perf_buffer__consume(l->hints[i]);
+                if (hint < 0) return hint;
+                continue;
+            }
+            uint64_t before = l->d->percpu_transport->positions[i];
+            int n = perf_buffer__consume(l->perf[i]);
+            if (n < 0) return n;
+            /* libbpf consume returns 0 on success, not a record count. */
+            if (l->d->percpu_transport->positions[i] != before) *empty = false;
+        } else {
+            size_t dest = reader - 2 * l->ncpu;
+            struct ring_context *r = &l->ring_ctx[dest];
+            r->consumed = 0; r->limit = 4096;
+            int n = ring_buffer__consume(l->rings[dest]);
+            if (n == -EINTR) n = (int)r->consumed;
+            n = pgwt_transport_ring_result(n, r->consumed, r->limit);
+            if (n < 0) return n;
+            if (r->consumed) *empty = false;
+        }
     }
     return l->callback_error;
 }
@@ -864,8 +933,8 @@ static int linux_bind(struct pgwt_daemon *d)
         .helper_tgid = linux_tgid_io, .consume = linux_consume_io, .close = linux_close_io, .now = linux_now, .cpu_set_unchanged = linux_topology,
         .control = linux_control, .wake = linux_wake, .attempts = linux_attempts,
         .failures = linux_failures, .discards = linux_discards, .positions = linux_positions,
-        .counters = linux_counters, .drain = linux_drain, .received = linux_received,
-        .envelope = linux_envelope, .suspended = linux_suspended, .waiting = linux_waiting,
+        .counters = linux_counters, .drain = linux_drain, .budget = linux_budget, .received = linux_received,
+        .envelope = linux_envelope, .suspended = linux_suspended, .waiting = linux_waiting, .pending = linux_pending,
         .wait = linux_wait, .fault = linux_fault};
     d->percpu_transport = pgwt_transport_create(ids, l->ncpu, 262144, &io);
     free(ids);
@@ -1052,8 +1121,10 @@ static int linux_consume_io(void *ctx, uint32_t dest, bool bounded)
     struct linux_transport *l = linux_state(d);
     if (!l || dest < 1 || dest > 2 || !l->rings[dest-1]) return -EINVAL;
     struct ring_context *r = &l->ring_ctx[dest-1];
+    if (pgwt_transport_pass_expired(d->percpu_transport)) return 0;
     r->consumed = 0; r->limit = bounded ? 4096 : 65536;
     int rc = ring_buffer__consume(l->rings[dest-1]);
+    if (rc == -EINTR) rc = (int)r->consumed;
     rc = pgwt_transport_ring_result(rc, r->consumed, r->limit);
     return l->callback_error < 0 ? l->callback_error : rc;
 }
@@ -1145,10 +1216,12 @@ int pgwt_percpu_transport_poll(struct pgwt_daemon *d)
     if (!d->exact_perf) return 0;
     struct pgwt_percpu_transport *t = d->percpu_transport;
     if (!t || !t->opened) return -EINVAL;
-    int rc = t->io.drain(t->io.ctx);
+    if (pgwt_transport_pass_expired(t)) return 0;
+    int rc = bounded_drain(t);
     if (rc < 0) return rc;
     /* Recorded for the non-empty-completion count only; never a condition. */
     t->pass_empty = rc == 1;
+    if (pgwt_transport_pass_expired(t)) return 0;
     uint64_t now = observed(t);
     if (!pgwt_transport_service_due(now, t->last_service_at, t->serviced)) {
         rc = fence_round(t);
@@ -1158,6 +1231,8 @@ int pgwt_percpu_transport_poll(struct pgwt_daemon *d)
     t->last_service_at = now; t->serviced = true;
     return pgwt_transport_poll(t, pgwt_capture_waiting(d->merge_capture));
 }
+void pgwt_percpu_transport_begin_pass(struct pgwt_daemon *d, uint64_t deadline)
+{ if (d && d->exact_perf) pgwt_transport_begin_pass(d->percpu_transport, deadline); }
 int pgwt_percpu_transport_snapshot(struct pgwt_daemon *d, ma_snapshot *s, uint64_t *now)
 {
     if (!d) return -EINVAL;

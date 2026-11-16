@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "pgwt_transport_wire.h"
+#include "transport_budget.h"
 #include "core/pgwt_merge_adapter.h"
 
 struct pgwt_daemon;
@@ -35,10 +36,11 @@ struct pgwt_transport_perf_attributes pgwt_transport_perf_attributes(size_t buff
  * A target not reached is a HOLD, not a fault, while its records can still
  * arrive. It is decided in a bounded number of passes even if no pass is
  * ever empty: the E/L producer positions are read once after every ack (the
- * cut); the reader reaches it in at most backlog/(4096 records) + 1 passes,
- * not counting passes that stop at an unfinished reservation (never
- * skipped; those end when that producer does, and after
- * PGWT_TRANSPORT_CUT_STALL_PASSES of them the round VOIDs unknown_evidence).
+ * cut); each pass reads up to 4096 records per ring and yields at its time
+ * budget. Passes that stop early count toward the existing stall limit.
+ * Unfinished reservations are never skipped. After the calculated backlog
+ * allowance plus PGWT_TRANSPORT_CUT_STALL_PASSES the round fails closed with
+ * VOID(unknown_evidence), including when time yields delay the cut.
  * Past the cut, a still-missing attempt must be a counted discard, else
  * VOID(sequence_gap). A failed attempt is diagnosed without any pass, from
  * the failure counters read after the acks and on every service slot.
@@ -47,8 +49,13 @@ struct pgwt_transport_perf_attributes pgwt_transport_perf_attributes(size_t buff
  * own bounds; there is no unconditional 70 ms/100 ms guarantee: the box
  * measures held age and event-to-release age, and the daemon reports both.
  * The daemon suspends with VOID(allocation_fail) if the 262144-entry queue
- * fills. Shutdown bounds the unfinished drain to 256 passes/100 ms, then
- * VOIDs unknown_evidence.
+ * fills. Each main-loop iteration shares a 50 ms cooperative service budget,
+ * with at most 10 ms for raw draining before completion/merge work. Callbacks
+ * consume the yielding record; unread and unadmitted suffixes stay queued.
+ * Shutdown closes DATA/lifecycle admission, allows 256 passes/100 ms of
+ * finishing work, then VOIDs unknown_evidence and counts unfinished evidence.
+ * An individual core feed or OS call is synchronous; these budgets apply
+ * between those calls (issue 932 tracks the core's quadratic work).
  * Time is NEVER completeness evidence or permission to release DATA. */
 #define PGWT_TRANSPORT_MIN_RING_RECORD 56U   /* 48-byte boundary + 8-byte ring header */
 #define PGWT_TRANSPORT_CUT_STALL_PASSES 4096U
@@ -81,6 +88,10 @@ uint32_t pgwt_percpu_transport_cpu_id(const struct pgwt_daemon *, size_t);
 int pgwt_percpu_transport_open(struct pgwt_daemon *d);
 int pgwt_percpu_transport_epoll_fd(const struct pgwt_daemon *d);
 int pgwt_percpu_transport_poll(struct pgwt_daemon *d);
+/* One deadline shared by every service call in this main-loop iteration. */
+void pgwt_percpu_transport_begin_pass(struct pgwt_daemon *, uint64_t capture_deadline_ns);
+void pgwt_transport_begin_pass(struct pgwt_percpu_transport *, uint64_t limit_ns);
+bool pgwt_transport_pass_expired(struct pgwt_percpu_transport *);
 /* Full counter checkpoint through the same injectable I/O as the reader.
  * Available after prepare/load, including before the buffers are opened. */
 int pgwt_percpu_transport_snapshot(struct pgwt_daemon *, ma_snapshot *, uint64_t *now);
@@ -120,6 +131,7 @@ struct pgwt_transport_io {
     int (*consume)(void *, uint32_t dest, bool bounded);
     void (*close)(void *);
     uint64_t (*now)(void *);
+    void (*budget)(void *, const struct pgwt_transport_budget *);
     int (*cpu_set_unchanged)(void *);
     int (*control)(void *, const struct pgwt_transport_ctl *);
     int (*wake)(void *, uint32_t cpu);
@@ -145,6 +157,7 @@ struct pgwt_transport_io {
      * wait returns negative errno on failure; production waits at most 1 ms. */
     int (*wait)(void *);
     bool (*waiting)(void *);
+    size_t (*pending)(void *);
     /* Legacy side effects at wire consumption. Returns 1 when the record is
      * outside the covered population (no lifetime cookie): it was consumed
      * and accounted but is not merge input. */
@@ -196,6 +209,7 @@ struct pgwt_transport_stats {
     uint64_t skipped;            /* skipped sequence numbers explained by discards */
     uint64_t uncovered;          /* cookie-less records consumed, not merge input */
     uint64_t records, queue_high, round_ns_total, round_ns_max;
+    uint64_t finish_deadline_reached, unfinished_records;
     uint64_t acks_at_completion; /* CPUs whose higher-round boundary was consumed, summed over completed rounds */
     uint64_t acks_before_fence;  /* accepted acks whose cutoff precedes their fence request */
     uint64_t final_attempts[3], final_delivered[3], final_failures[3], final_discards[3];

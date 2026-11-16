@@ -11,6 +11,17 @@ import tempfile
 
 repo = Path(__file__).resolve().parent.parent
 mutations = [
+    ('service_without_clock', 'service_deadline', 'src/percpu_transport.c',
+     [('if (pgwt_transport_pass_expired(t)) return 1; /* retain the suffix */',
+       'if (false) return 1; /* retain the suffix */')]),
+    ('merge_without_clock', 'merge_deadline', 'src/merge_capture.c',
+     [('if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) return 0;',
+       'if (c->budget.active && c->budget.until == c->budget.started) return 0;')]),
+    ('finish_ignores_deadline', 'finish_deadline', 'src/percpu_transport.c',
+     [('if (now < started || now >= until) break;', 'if (false && (now < started || now >= until)) break;'),
+      ('pgwt_transport_begin_pass(t, until);', 'pgwt_transport_begin_pass(t, 0);')]),
+    ('finish_counter_dropped', 'finish_deadline', 'src/percpu_transport.c',
+     [('++t->stats.finish_deadline_reached;', '/* omitted finish deadline counter */')]),
     ('synthetic_daemon', 'admission', 'src/merge_capture.c',
      [('.synthetic_premises = false', '.synthetic_premises = true')]),
     ('skip_cpu_ack', 'missing_ack', 'src/percpu_transport.c',
@@ -30,7 +41,7 @@ mutations = [
     ('positive_ring_limit', 'bounded_ring', 'src/percpu_transport.c',
      [('return limit && *consumed >= limit ? -EAGAIN : 0;', 'return limit && *consumed >= limit ? 1 : 0;')]),
     ('skip_shutdown_drain', 'shutdown_raw', 'src/percpu_transport.c',
-     [('for (unsigned pass = 0; pass < 256; ++pass) {\n        int drained = t->io.drain(t->io.ctx);', 'for (unsigned pass = 0; pass < 256; ++pass) {\n        int drained = 1;')]),
+     [('int drained = bounded_drain(t);', 'int drained = 1;')]),
     ('forget_historical_proof', 'lifetime_history', 'src/merge_capture.c',
      [('if (!c->lifetime_index[slot]) {',
        'if (c->lifetime_index[slot]) c->lifetimes[c->lifetime_index[slot]-1].proof = MA_NOT_ATTEMPTED;\n        if (!c->lifetime_index[slot]) {')]),
@@ -85,6 +96,12 @@ mutations = [
     ('omit_adapter_backlog', 'pending', 'src/merge_capture.c',
      [('return c ? c->retained_count + c->staged : 0;', 'return c ? c->staged : 0;')]),
 ]
+deadline_assertions = {
+    'service_without_clock': 'd.now-started<=PGWT_TRANSPORT_PASS_NS',
+    'merge_without_clock': 'd.now-started<=PGWT_TRANSPORT_PASS_NS',
+    'finish_ignores_deadline': 'd.now-started<=PGWT_TRANSPORT_FINISH_NS',
+    'finish_counter_dropped': 'pgwt_transport_stats(d.transport).finish_deadline_reached==1',
+}
 flags = ['-std=c11', '-Wall', '-Wextra', '-Werror', '-DPGWT_TRANSPORT_HOST_TEST']
 flags += shlex.split(os.environ.get('CFLAGS', ''))
 cc = shlex.split(os.environ.get('CC', 'cc'))
@@ -125,7 +142,8 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
         original = (work / path).read_text()
         changed = original
         for before, after in edits:
-            if changed.count(before) != 1:
+            expected = 2 if name == 'finish_ignores_deadline' and before.startswith('if (now') else 1
+            if changed.count(before) != expected:
                 raise SystemExit(f'ERROR: {name}: mutation anchor is not unique')
             changed = changed.replace(before, after)
         (work / path).write_text(changed)
@@ -135,9 +153,11 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
         (work / path).write_text(original)
         if (p.returncode != 1 or f'REACHED {guard}\n' not in p.stdout or
                 f'transport ASSERT {guard}:' not in p.stderr or
+                (name in deadline_assertions and deadline_assertions[name] not in p.stderr) or
                 any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
             raise SystemExit(f'ERROR: {name}: survived or failed elsewhere\n' + p.stdout + p.stderr)
-        print(f'{name}: KILLED at {guard}')
+        print(f'{name}: KILLED at {guard}' +
+              (f' ({deadline_assertions[name]})' if name in deadline_assertions else ''))
     print(f'transport mutants: {len(mutations)}/{len(mutations)} killed at intended assertions')
 
     # The daemon TU requires Linux/BPF loader headers. Compile ONLY the real
@@ -175,7 +195,7 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
         raise SystemExit('ERROR: tautological rodata support check returned')
     print('default tick: fe519c9e lines 443-677 byte-identical after substituting default drain; order/logs PASS')
     transport = (repo / 'src/percpu_transport.c').read_text()
-    start = transport.index('static int consume_all(')
+    start = transport.index('static int receive_ring(')
     end = transport.index('static int linux_drain(', start)
     drain = transport[start:end]
     start = transport.index('int pgwt_transport_ring_result(')
@@ -215,6 +235,12 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
         ('skip_tick_count', tick.replace('d->tick++;', '/* skip tick */'), observe, drain, capture_poll),
         ('per_record_map_reads', tick, full_observe, drain, capture_poll),
         ('ignore_perf_receipts', tick, observe, drain.replace('if (l->d->percpu_transport->positions[i] != before)', 'if (n || before > l->d->percpu_transport->positions[i])'), capture_poll),
+        ('perf_without_clock', tick, observe, drain.replace(
+            'return pgwt_transport_pass_expired(l->d->percpu_transport) ? LIBBPF_PERF_EVENT_DONE : LIBBPF_PERF_EVENT_CONT;',
+            '(void)l; return LIBBPF_PERF_EVENT_CONT;'), capture_poll),
+        ('ring_without_clock', tick, observe, drain.replace(
+            'if (!rc && pgwt_transport_pass_expired(r->d->percpu_transport)) return -EINTR;',
+            'if (false) return -EINTR;'), capture_poll),
         ('continue_failed_tick_drain', tick.replace(
             'd->running = false;\n            return;\n        }\n        d->counters.tick_drain_pending_records',
             '/* continue after failure */\n            return;\n        }\n        d->counters.tick_drain_pending_records'), observe, drain, capture_poll),
@@ -233,7 +259,11 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
         p = subprocess.run([str(tick_binary)], capture_output=True, text=True, env=env)
         if (p.returncode != 1 or 'REACHED tick_duties\n' not in p.stdout or
             'transport ASSERT tick_duties:' not in p.stderr or
+            (name == 'perf_without_clock' and
+             'service_now<=PGWT_TRANSPORT_PASS_NS && cpu0.records==15' not in p.stderr) or
+            (name == 'ring_without_clock' and
+             'service_now-started<=PGWT_TRANSPORT_PASS_NS && e.records==15' not in p.stderr) or
             any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
             raise SystemExit(f'ERROR: {name}: survived or failed elsewhere\n' + p.stdout + p.stderr)
         print(f'{name}: KILLED at tick_duties')
-    print(f'transport + tick/publication/drain/cadence mutants: {len(mutations)+7}/{len(mutations)+7} killed at intended assertions')
+    print(f'transport + tick/publication/drain/cadence mutants: {len(mutations)+9}/{len(mutations)+9} killed at intended assertions')

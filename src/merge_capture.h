@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "core/pgwt_merge_adapter.h"
+#include "transport_budget.h"
 
 struct pgwt_daemon;
 struct pgwt_merge_capture;
@@ -92,6 +93,7 @@ struct pgwt_capture_config {
      * detection time. Preserve components 0-13 and their known state from
      * the latest completed-round/silence checkpoint. Never read BPF here. */
     int (*observe)(void *, pgwt_merge_observation *);
+    uint64_t (*now)(void *);
     void (*writer_failed)(void *);
     /* TEST ONLY (daemon: PGWT_TEST_EXACT_ATTACH_PREMISE=1). Assume the
      * attachment proof of every fork-seeded lifetime at FORK consumption.
@@ -105,6 +107,7 @@ struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config 
 int pgwt_capture_received(struct pgwt_merge_capture *, const ma_envelope *, uint64_t);
 int pgwt_capture_envelope(struct pgwt_merge_capture *, const ma_envelope *,
                            uint64_t, const ma_snapshot *);
+void pgwt_capture_set_budget(struct pgwt_merge_capture *, const struct pgwt_transport_budget *);
 int pgwt_capture_fault(struct pgwt_merge_capture *, pgwt_merge_reason,
                         uint64_t, const ma_snapshot *);
 int pgwt_capture_attach(struct pgwt_merge_capture *, const struct pgwt_attach_report *,

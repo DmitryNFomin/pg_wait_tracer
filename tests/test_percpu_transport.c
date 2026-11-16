@@ -56,6 +56,7 @@ struct tb_driver {
     bool count_maps;
     size_t map_lookups, first_data_lookups, last_data_lookups, data_outputs, observes;
     unsigned shutdown_phase;
+    uint64_t envelope_cost_ns, feed_cost_ns, drain_cost_ns;
 };
 static struct {struct pgwt_percpu_transport *transport;struct pgwt_merge_capture *capture;} tb_live[64];
 static int tb_prepare(void *ctx){++((struct tb_driver *)ctx)->prepared;return 0;}
@@ -110,7 +111,7 @@ static int tb_emit(struct tb_driver *,unsigned,unsigned,unsigned,uint64_t,const 
 static int tb_boundary(struct tb_driver *,unsigned,unsigned,unsigned,uint64_t);
 static int tb_drain(void *ctx)
 {
-    struct tb_driver *d=ctx;++d->drains;
+    struct tb_driver *d=ctx;++d->drains;d->now+=d->drain_cost_ns;
     if(d->shutdown_phase==1){
         /* These bytes have not reached userspace when finish() is called.
          * Model a held perf buffer plus its lifecycle ring. */
@@ -138,9 +139,15 @@ static int tb_received(void *ctx,const ma_envelope *e,uint64_t now)
 }
 static int tb_envelope(void *ctx,const ma_envelope *e,uint64_t now,ma_snapshot *s)
 {
-    struct pgwt_merge_capture *c=((struct tb_driver *)ctx)->capture;
-    int rc=pgwt_capture_envelope(c,e,now,s);*s=pgwt_capture_last_snapshot(c);return rc;
+    struct tb_driver *d=ctx;
+    int rc=pgwt_capture_envelope(d->capture,e,now,s);*s=pgwt_capture_last_snapshot(d->capture);
+    if(e->kind!=MA_CHECK)d->now+=d->envelope_cost_ns;
+    return rc;
 }
+static void tb_budget(void *ctx,const struct pgwt_transport_budget *b)
+{pgwt_capture_set_budget(((struct tb_driver *)ctx)->capture,b);}
+static size_t tb_pending_count(void *ctx)
+{return pgwt_capture_pending_records(((struct tb_driver *)ctx)->capture);}
 static int tb_fault(void *ctx,pgwt_merge_reason reason,uint64_t now,const ma_snapshot *s)
 { return pgwt_capture_fault(((struct tb_driver *)ctx)->capture,reason,now,s); }
 static bool tb_sink(void *ctx,const pgwt_merge_output *out,pgwt_merge_observation *post)
@@ -173,6 +180,7 @@ static int tb_post_observe(void *ctx,pgwt_merge_observation *o)
     return 0;
 }
 static void tb_writer_failed(void *ctx){++((struct tb_driver *)ctx)->snapshot.value[14];}
+static bool tb_flush(void *ctx){struct tb_driver *d=ctx;d->now+=d->feed_cost_ns;return true;}
 static int tb_lifecycle(void *ctx,const void *bytes,size_t n)
 {
     struct tb_driver *d=ctx; const unsigned char *p=bytes; ++d->lifecycle;
@@ -190,14 +198,15 @@ static bool tb_setup(struct tb_driver *d)
     memset(d,0,sizeof(*d));d->snapshot=readable();d->topology=d->drained=d->prove=d->support=true;d->now=20;d->trace_t=12;
     struct pgwt_capture_config cfg={.cpu_count=2,.capacity=128,.ctx=d,
         .baseline={.counters={.known=true}},.lifecycle=tb_lifecycle,.trace=tb_trace,
-        .observe=tb_post_observe,.writer_failed=tb_writer_failed,
-        .sink={.emit=tb_sink,.ctx=d}};
+        .observe=tb_post_observe,.now=tb_now,.writer_failed=tb_writer_failed,
+        .sink={.emit=tb_sink,.ctx=d,.flush=tb_flush}};
     d->capture=pgwt_capture_create(&cfg);TB(d->capture);
     struct pgwt_transport_io io={.ctx=d,.prepare=tb_prepare,.configure=tb_configure,.open=tb_open,
         .epoll_fd=tb_epoll,.helper_tgid=tb_tgid,.close=tb_close,.consume=tb_consume,.now=tb_now,.cpu_set_unchanged=tb_topology,
         .control=tb_control,.wake=tb_wake,.attempts=tb_attempts,.failures=tb_failures,
         .discards=tb_discards,.positions=tb_positions,.counters=tb_counters,
-        .drain=tb_drain,.received=tb_received,.envelope=tb_envelope,.fault=tb_fault};
+        .drain=tb_drain,.budget=tb_budget,.pending=tb_pending_count,
+        .received=tb_received,.envelope=tb_envelope,.fault=tb_fault};
     uint32_t cpus[]={0,1};
     d->transport=pgwt_transport_create(cpus,2,128,&io);
     for(size_t i=0;i<64;++i)if(!tb_live[i].capture){tb_live[i].capture=d->capture;tb_live[i].transport=d->transport;break;}
@@ -452,9 +461,12 @@ static bool tb_shutdown_raw(void)
     struct tb_driver d;TB(tb_setup(&d));d.shutdown_phase=1;
     TB(!d.traces && !d.count && !d.controls);
     TB(pgwt_transport_finish(d.transport)==0);
-    TB(d.shutdown_phase==4 && d.drains>=4 && d.traces==1 && d.count==3 && d.controls==2);
-    TB(d.outputs[1].kind==PGWT_MERGE_OUT_DATA && d.outputs[2].kind==PGWT_MERGE_OUT_FRONTIER &&
-        pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
+    /* Shutdown closes admission: unread DATA and lifecycle evidence is
+     * accounted and VOID, rather than extending the capture indefinitely. */
+    TB(d.shutdown_phase==2 && d.drains==2 && !d.traces && d.count==1 && !d.controls);
+    TB(d.outputs[0].kind==PGWT_MERGE_OUT_VOID &&
+        pgwt_capture_report(d.capture).status==PGWT_MERGE_SUSPENDED);
+    TB(pgwt_transport_stats(d.transport).unfinished_records==2);
     unsigned drains=d.drains;
     TB(pgwt_transport_finish(d.transport)==0 && d.drains==drains);
     tb_cleanup(&d);
@@ -466,7 +478,7 @@ static bool tb_shutdown_raw(void)
     TB(pgwt_capture_finish(d.capture,40,&d.snapshot)==0 && d.count==1 &&
         d.outputs[0].kind==PGWT_MERGE_OUT_VOID && d.outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE);
     tb_cleanup(&d);
-    printf("shutdown: unread perf DATA drained and released; nonempty/BUSY suffix explicitly VOID; final counters checked\n");
+    printf("shutdown: admission closed; unread perf DATA counted and VOID; nonempty/BUSY suffix VOID; final counters checked\n");
     return true;
 }
 static bool tb_off(void)
@@ -1234,7 +1246,73 @@ static bool tb_bound(void)
     TB(pgwt_transport_ring_result(-EIO,1,4096)==-EIO && pgwt_transport_ring_result(-EAGAIN,1,4096)==-EAGAIN);
     tb_cleanup(&d);return true;
 }
+static bool tb_service_deadline(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_begin(&d));
+    TB(tb_boundary(&d,0,0,2,14)==0 && tb_boundary(&d,1,0,2,14)==0);
+    d.envelope_cost_ns=UINT64_C(10000000);
+    uint64_t started=d.now;
+    pgwt_transport_begin_pass(d.transport,0);
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.now-started<=PGWT_TRANSPORT_PASS_NS); /* service pass returns within budget */
+    TB(pgwt_transport_pending_records(d.transport)==1 && pgwt_transport_stats(d.transport).rounds_completed==0);
+    unsigned reads=d.reads;
+    /* Arrivals during the yield do not enter the frozen release prefix. */
+    unsigned char trace[48];memcpy(trace,golden_T,48);tb_le(trace,16,8);tb_le(trace+8,30,4);
+    TB(tb_emit(&d,0,0,PGWT_WIRE_TRACE,123,trace,48)==0);
+    pgwt_transport_begin_pass(d.transport,0);
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(pgwt_transport_stats(d.transport).rounds_completed==1 && d.reads==reads);
+    TB(pgwt_transport_pending_records(d.transport)==1 && d.traces==1 &&
+       pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
+    tb_cleanup(&d);
+    puts("service deadline: 50 ms, frozen snapshot/prefix resumes; new arrival stays queued PASS");
+    return true;
+}
+static bool tb_merge_deadline(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));
+    struct pgwt_transport_budget budget;
+    pgwt_budget_begin(&budget,d.now,d.now); /* expire before admission */
+    pgwt_capture_set_budget(d.capture,&budget);
+    for(unsigned i=0;i<10;++i){
+        ma_envelope e={.version=1,.kind=MA_BOUNDARY,.origin=MA_EXACT,.source=0,
+            .position=i+1,.w=13,.boundary=MA_IDLE_PERF};
+        TB(pgwt_capture_envelope(d.capture,&e,d.now,&d.snapshot)==0);
+    }
+    TB(pgwt_capture_pending_records(d.capture)==10);
+    d.feed_cost_ns=UINT64_C(10000000);
+    uint64_t started=d.now;
+    pgwt_transport_begin_pass(d.transport,0);
+    ma_envelope check={.version=1,.kind=MA_CHECK};
+    TB(pgwt_capture_envelope(d.capture,&check,d.now,&d.snapshot)==0);
+    TB(d.now-started<=PGWT_TRANSPORT_PASS_NS); /* merge admission returns within budget */
+    TB(pgwt_capture_pending_records(d.capture)==6);
+    for(unsigned pass=0;pass<2;++pass){
+        pgwt_transport_begin_pass(d.transport,0);
+        TB(pgwt_capture_envelope(d.capture,&check,d.now,&d.snapshot)==0);
+    }
+    TB(!pgwt_capture_pending_records(d.capture) && pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
+    tb_cleanup(&d);puts("merge deadline: slow feed yields within 50 ms, queued suffix resumes PASS");return true;
+}
+static bool tb_finish_deadline(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_begin(&d));
+    d.drained=false;d.drain_cost_ns=UINT64_C(25000000);
+    uint64_t started=d.now;
+    TB(pgwt_transport_finish(d.transport)==0);
+    TB(d.now-started<=PGWT_TRANSPORT_FINISH_NS); /* finishing respects absolute deadline */
+    TB(d.drains==4 && d.count==1 && d.outputs[0].kind==PGWT_MERGE_OUT_VOID &&
+       d.outputs[0].reason==PGWT_MERGE_UNKNOWN_EVIDENCE);
+    TB(pgwt_transport_stats(d.transport).finish_deadline_reached==1); /* finish deadline counted */
+    TB(pgwt_transport_stats(d.transport).unfinished_records>0);
+    unsigned drains=d.drains;
+    TB(pgwt_transport_finish(d.transport)==0 && d.drains==drains &&
+       pgwt_transport_stats(d.transport).finish_deadline_reached==1);
+    tb_cleanup(&d);puts("finish deadline: 100 ms absolute bound, unfinished evidence VOID and counted once PASS");return true;
+}
 static const struct {const char *name;bool(*run)(void);} tb_guards[]={
+    {"service_deadline",tb_service_deadline},{"merge_deadline",tb_merge_deadline},{"finish_deadline",tb_finish_deadline},
     {"admission",tb_admission},{"all_acks",tb_all_acks},{"missing_ack",tb_missing_ack},
     {"stale_ack",tb_stale_ack},{"counter_timing",tb_counter_timing},{"post_snapshot",tb_post_snapshot},{"core_held_age",tb_core_held_age},
     {"attempt_window",tb_attempt_window},{"late_fork",tb_late_fork},{"unknown_init",tb_unknown_init},{"unknown",tb_unknown},
