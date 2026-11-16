@@ -119,6 +119,7 @@ uint64_t pgwt_capture_max_held_ns(const struct pgwt_merge_capture *, uint64_t no
  * upper edges, 100 us resolution, saturating at 2 s. */
 struct pgwt_capture_stats {
     uint64_t released_data, released_text, frontiers, voids;
+    uint64_t source_budget_yields, sweep_budget_yields, unfinished_records;
     uint64_t held_p50_ns, held_p99_ns, held_max_ns;
     uint64_t event_p50_ns, event_p99_ns, event_max_ns;
     /* The record with the largest event age: merge rank (0 FORK, 1 INIT,

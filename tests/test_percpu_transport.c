@@ -56,7 +56,8 @@ struct tb_driver {
     bool count_maps;
     size_t map_lookups, first_data_lookups, last_data_lookups, data_outputs, observes;
     unsigned shutdown_phase;
-    uint64_t envelope_cost_ns, feed_cost_ns, drain_cost_ns;
+    uint64_t envelope_cost_ns, feed_cost_ns, drain_cost_ns, received_cost_ns;
+    unsigned clock_reads, clock_jump_at;
 };
 static struct {struct pgwt_percpu_transport *transport;struct pgwt_merge_capture *capture;} tb_live[64];
 static int tb_prepare(void *ctx){++((struct tb_driver *)ctx)->prepared;return 0;}
@@ -68,7 +69,12 @@ static uint32_t tb_tgid(void *ctx){(void)ctx;return 1234;}
 static void tb_close(void *ctx){++((struct tb_driver *)ctx)->closed;}
 static int tb_consume(void *ctx,uint32_t dest,bool bounded)
 {(void)bounded;if(dest>2)return -EINVAL;++((struct tb_driver *)ctx)->consumed;return 0;}
-static uint64_t tb_now(void *ctx) { return ((struct tb_driver *)ctx)->now; }
+static uint64_t tb_now(void *ctx)
+{
+    struct tb_driver *d=ctx;
+    if(++d->clock_reads==d->clock_jump_at)d->now+=PGWT_TRANSPORT_FINISH_NS;
+    return d->now;
+}
 static int tb_topology(void *ctx)
 { struct tb_driver *d=ctx;++d->topology_reads;return d->topology ? 1:0; }
 static int tb_control(void *ctx,const struct pgwt_transport_ctl *c)
@@ -139,7 +145,7 @@ static int tb_drain(void *ctx)
 }
 static int tb_received(void *ctx,const ma_envelope *e,uint64_t now)
 {
-    struct tb_driver *d=ctx;
+    struct tb_driver *d=ctx;d->now+=d->received_cost_ns;
     return d->received_error ? d->received_error : pgwt_capture_received(d->capture,e,now);
 }
 static int tb_envelope(void *ctx,const ma_envelope *e,uint64_t now,ma_snapshot *s)
@@ -151,6 +157,10 @@ static int tb_envelope(void *ctx,const ma_envelope *e,uint64_t now,ma_snapshot *
 }
 static void tb_budget(void *ctx,const struct pgwt_transport_budget *b)
 {pgwt_capture_set_budget(((struct tb_driver *)ctx)->capture,b);}
+static bool tb_suspended(void *ctx)
+{return pgwt_capture_report(((struct tb_driver *)ctx)->capture).status!=PGWT_MERGE_OK;}
+static bool tb_waiting(void *ctx)
+{return pgwt_capture_waiting(((struct tb_driver *)ctx)->capture);}
 static size_t tb_pending_count(void *ctx)
 {return pgwt_capture_pending_records(((struct tb_driver *)ctx)->capture);}
 static int tb_fault(void *ctx,pgwt_merge_reason reason,uint64_t now,const ma_snapshot *s)
@@ -211,7 +221,7 @@ static bool tb_setup(struct tb_driver *d)
         .control=tb_control,.wake=tb_wake,.attempts=tb_attempts,.failures=tb_failures,
         .discards=tb_discards,.positions=tb_positions,.counters=tb_counters,
         .drain=tb_drain,.budget=tb_budget,.pending=tb_pending_count,
-        .received=tb_received,.envelope=tb_envelope,.fault=tb_fault};
+        .received=tb_received,.envelope=tb_envelope,.fault=tb_fault,.suspended=tb_suspended,.waiting=tb_waiting};
     uint32_t cpus[]={0,1};
     d->transport=pgwt_transport_create(cpus,2,128,&io);
     for(size_t i=0;i<64;++i)if(!tb_live[i].capture){tb_live[i].capture=d->capture;tb_live[i].transport=d->transport;break;}
@@ -1341,6 +1351,131 @@ static bool rv_final_check(void)
     TB(d.count==1 && d.outputs[0].kind==PGWT_MERGE_OUT_VOID && d.outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE);
     tb_cleanup(&d);return true;
 }
+/* Reviewer reproduction: the last CPU ack arrives with a changed vector,
+ * exactly when the pass expires. No later pass may certify the old vector. */
+static bool tb_counter_void(struct tb_driver *d)
+{
+    TB(d->count==1 && d->outputs[0].kind==PGWT_MERGE_OUT_VOID &&
+       d->outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE);
+    TB(pgwt_capture_report(d->capture).status==PGWT_MERGE_SUSPENDED &&
+       !pgwt_capture_report(d->capture).has_frontier && d->traces==0);
+    return true;
+}
+static bool rv_fence_edge(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_begin(&d));
+    TB(tb_boundary(&d,0,0,2,14)==0);
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    d.snapshot.value[11]=1;
+    TB(tb_boundary(&d,1,0,2,14)==0);
+    pgwt_transport_begin_pass(d.transport,0);d.now+=PGWT_TRANSPORT_PASS_NS;
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    for(unsigned p=0;p<3;++p){
+        pgwt_transport_begin_pass(d.transport,0);
+        TB(pgwt_transport_poll(d.transport,false)==0);
+    }
+    TB(tb_counter_void(&d));
+    tb_cleanup(&d);puts("RV-C fence edge: fresh vector delivered before yielded release; VOID counter_change PASS");return true;
+}
+static bool tb_periodic_edge(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));
+    pgwt_transport_begin_pass(d.transport,d.now);
+    /* This is the full-vector silence checkpoint's actual capture entry. */
+    d.snapshot.value[11]=1;
+    struct pgwt_daemon *daemon=calloc(1,sizeof(*daemon));TB(daemon);
+    daemon->exact_perf=true;daemon->percpu_transport=d.transport;daemon->merge_capture=d.capture;
+    unsigned reads=d.reads;
+    TB(pgwt_merge_capture_poll(daemon)==0 && d.reads==reads+1);
+    free(daemon);
+    TB(tb_counter_void(&d));
+    TB(pgwt_capture_stats(d.capture).sweep_budget_yields==1);
+    tb_cleanup(&d);return true;
+}
+static bool tb_source_edge(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));
+    pgwt_transport_begin_pass(d.transport,d.now);
+    ma_envelope boundary={.version=1,.kind=MA_BOUNDARY,.source=0,
+        .position=1,.w=13,.boundary=MA_IDLE_PERF};
+    d.snapshot.value[11]=1;
+    TB(pgwt_capture_envelope(d.capture,&boundary,d.now,&d.snapshot)==0);
+    TB(pgwt_capture_stats(d.capture).source_budget_yields==1);
+    TB(tb_counter_void(&d));
+    tb_cleanup(&d);return true;
+}
+static bool tb_release_edge(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_begin(&d));
+    TB(tb_boundary(&d,0,0,2,14)==0 && tb_boundary(&d,1,0,2,14)==0);
+    pgwt_transport_begin_pass(d.transport,0);
+    d.envelope_cost_ns=UINT64_C(10000000);
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(pgwt_transport_stats(d.transport).release_budget_yields==1 && !d.count);
+    /* A periodic fresh read during the yield must precede the suffix. */
+    d.snapshot.value[11]=1;
+    ma_envelope check={.version=1,.kind=MA_CHECK};
+    TB(pgwt_capture_envelope(d.capture,&check,d.now,&d.snapshot)==0);
+    pgwt_transport_begin_pass(d.transport,0);
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(tb_counter_void(&d));
+    tb_cleanup(&d);return true;
+}
+static bool tb_sweep_edge(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));
+    pgwt_transport_begin_pass(d.transport,d.now);
+    for(unsigned source=0;source<2;++source)for(unsigned pos=1;pos<=6;++pos){
+        ma_envelope e={.version=1,.kind=MA_BOUNDARY,.source=source,
+            .position=pos,.w=13,.boundary=MA_IDLE_PERF};
+        TB(pgwt_capture_envelope(d.capture,&e,d.now,&d.snapshot)==0);
+    }
+    pgwt_transport_begin_pass(d.transport,0);d.feed_cost_ns=UINT64_C(10000000);
+    ma_envelope check={.version=1,.kind=MA_CHECK};
+    TB(pgwt_capture_envelope(d.capture,&check,d.now,&d.snapshot)==0);
+    TB(pgwt_capture_pending_records(d.capture)==8 && pgwt_capture_stats(d.capture).sweep_budget_yields==1);
+    d.snapshot.value[11]=1;d.feed_cost_ns=0;
+    TB(pgwt_capture_envelope(d.capture,&check,d.now,&d.snapshot)==0);
+    TB(tb_counter_void(&d));
+    tb_cleanup(&d);return true;
+}
+static bool tb_cut_cap_check(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_open_round(&d));
+    d.attempts[4]=1;d.ring_produced[0]=88;
+    TB(pgwt_transport_poll(d.transport,false)==0);TB(tb_acks(&d,2,14));
+    const unsigned limit=1+PGWT_TRANSPORT_CUT_STALL_PASSES;
+    for(unsigned pass=0;pass<limit;++pass)TB(pgwt_transport_poll(d.transport,false)==0 && !d.count);
+    d.snapshot.value[11]=1;
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(pgwt_transport_stats(d.transport).cut_pass_limit_reached==1 &&
+       pgwt_transport_stats(d.transport).cut_pass_limit_records==7);
+    TB(tb_counter_void(&d));
+    tb_cleanup(&d);return true;
+}
+static bool tb_finish_counter_edge(bool pass_cap)
+{
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_begin(&d));
+    d.drained=false;d.snapshot.value[11]=1;
+    d.drain_cost_ns=pass_cap?0:UINT64_C(25000000);
+    TB(pgwt_transport_finish(d.transport)==0);
+    TB(tb_counter_void(&d));
+    struct pgwt_transport_stats stats=pgwt_transport_stats(d.transport);
+    TB(pass_cap ? stats.finish_pass_limit_reached==1 : stats.finish_deadline_reached==1);
+    TB(stats.unfinished_transport_records==4 && stats.unfinished_records==4);
+    tb_cleanup(&d);return true;
+}
+static bool tb_finish_entry_check(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));
+    d.snapshot.value[11]=1;d.clock_reads=0;d.clock_jump_at=2;
+    TB(pgwt_transport_finish(d.transport)==0 && !d.drains);
+    TB(pgwt_transport_stats(d.transport).finish_deadline_reached==1);
+    TB(tb_counter_void(&d));
+    tb_cleanup(&d);return true;
+}
+static bool tb_finish_time_check(void){return tb_finish_counter_edge(false);}
+static bool tb_finish_cap_check(void){return tb_finish_counter_edge(true);}
 static bool tb_finish_failures(void)
 {
     for(size_t slot=0;slot<6;++slot)for(unsigned unread=0;unread<2;++unread){
@@ -1358,6 +1493,10 @@ static bool tb_finish_failures(void)
     return true;
 }
 static const struct {const char *name;bool(*run)(void);} tb_guards[]={
+    {"rv_fence_edge",rv_fence_edge},{"periodic_edge",tb_periodic_edge},
+    {"source_edge",tb_source_edge},{"sweep_edge",tb_sweep_edge},
+    {"release_edge",tb_release_edge},{"cut_cap_check",tb_cut_cap_check},
+    {"finish_entry_check",tb_finish_entry_check},{"finish_time_check",tb_finish_time_check},{"finish_cap_check",tb_finish_cap_check},
     {"rv_uncovered_finish",rv_uncovered_finish},{"rv_final_check",rv_final_check},
     {"finish_failures",tb_finish_failures},
     {"service_deadline",tb_service_deadline},{"merge_deadline",tb_merge_deadline},{"finish_deadline",tb_finish_deadline},

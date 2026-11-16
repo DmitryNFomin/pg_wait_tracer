@@ -42,6 +42,7 @@ struct pgwt_merge_capture {
     /* Measurements only. Ages in PGWT_CAPTURE_AGE_BUCKET_NS buckets; the
      * last bucket collects everything at or beyond the range. */
     uint64_t released_data, released_text, frontiers, voids;
+    uint64_t source_budget_yields, sweep_budget_yields, unfinished_records;
     uint64_t held_max, event_max, event_max_pid;
     unsigned event_max_rank, event_max_source;
     uint32_t *held_hist, *event_hist;
@@ -466,14 +467,23 @@ static int mapped(struct pgwt_merge_capture *c, const ma_envelope *e,
     return 0;
 }
 static int flush_source(struct pgwt_merge_capture *c, size_t source,
-                         uint64_t d, ma_snapshot *s)
+                         uint64_t d, ma_snapshot *s, bool observation_delivered)
 {
     while (c->heads[source]) {
-        if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) return 0;
+        if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) {
+            ++c->source_budget_yields;
+            /* A control input already delivered this observation. Otherwise
+             * defer the record only after delivering its caller's vector. */
+            if (observation_delivered) return 0;
+            ma_envelope check = {.version = 1, .kind = MA_CHECK};
+            bool hold;
+            return mapped(c, &check, d, s, &hold);
+        }
         struct retained *n = c->heads[source];
         bool hold;
         int rc = mapped(c, &n->envelope, d, s, &hold);
         if (rc < 0) return rc;
+        observation_delivered = true;
         if (hold && pgwt_capture_report(c).status == PGWT_MERGE_OK) {
             c->held[source] = &n->envelope; return 0;
         }
@@ -491,17 +501,21 @@ int pgwt_capture_envelope(struct pgwt_merge_capture *c, const ma_envelope *e,
 {
     if (!c || !e || c->finished) return -EINVAL;
     ma_snapshot current = s ? *s : (ma_snapshot){0};
-    if (e->kind == MA_CHECK && c->config.now &&
-        pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) return 0;
+    /* Control inputs carry observations: deliver them before yielding any
+     * retained work. In particular a fresh CHECK must never disappear at
+     * a completion fence or periodic checkpoint. */
     if (e->kind != MA_TRACE && e->kind != MA_LIFECYCLE && e->kind != MA_TEXT && e->kind != MA_BOUNDARY) {
         bool hold;
         int rc = mapped(c, e, d, &current, &hold);
         if (rc < 0) return rc;
         for (size_t visited = 0; visited < c->source_count; ++visited) {
-            if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) break;
+            if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) {
+                ++c->sweep_budget_yields;
+                break;
+            }
             size_t i = c->next_source;
             c->next_source = (i + 1) % c->source_count;
-            if ((rc = flush_source(c, i, d, &current)) < 0) return rc;
+            if ((rc = flush_source(c, i, d, &current, true)) < 0) return rc;
         }
         return 0;
     }
@@ -514,7 +528,7 @@ int pgwt_capture_envelope(struct pgwt_merge_capture *c, const ma_envelope *e,
     if (c->tails[e->source]) c->tails[e->source]->next = n;
     else c->heads[e->source] = n;
     c->tails[e->source] = n; ++c->retained_count;
-    return flush_source(c, e->source, d, &current);
+    return flush_source(c, e->source, d, &current, false);
 }
 int pgwt_capture_attach(struct pgwt_merge_capture *c, const struct pgwt_attach_report *r,
                          uint64_t d, const ma_snapshot *s)
@@ -548,6 +562,7 @@ static int finish_capture(struct pgwt_merge_capture *c, uint64_t d, const ma_sna
     /* The final vector is mandatory even at the last pass's budget edge.
      * Feed it directly; any retained suffix is unfinished evidence below,
      * rather than another potentially unbounded drain at shutdown. */
+    c->unfinished_records = pgwt_capture_pending_records(c);
     ma_snapshot current = s ? *s : (ma_snapshot){0};
     bool hold;
     int rc = mapped(c, &check, d, &current, &hold);
@@ -574,6 +589,9 @@ struct pgwt_capture_stats pgwt_capture_stats(const struct pgwt_merge_capture *c)
 {
     struct pgwt_capture_stats s = {0};
     if (!c) return s;
+    s.source_budget_yields = c->source_budget_yields;
+    s.sweep_budget_yields = c->sweep_budget_yields;
+    s.unfinished_records = c->unfinished_records;
     s.released_data = c->released_data; s.released_text = c->released_text;
     s.frontiers = c->frontiers; s.voids = c->voids;
     s.held_max_ns = c->held_max; s.event_max_ns = c->event_max;
@@ -838,12 +856,15 @@ int pgwt_merge_capture_poll(struct pgwt_daemon *d)
     if (!d) return -EINVAL;
     if (!d->exact_perf) return 0;
     if (!d->merge_capture) return -EINVAL;
+    /* Decide cadence before reading any counter component. An observation
+     * already taken must always reach CHECK, even when the pass expired. */
+    uint64_t now = daemon_now(d);
+    if (now && !pgwt_transport_service_due(now, d->merge_capture->last_service_at,
+                                         d->merge_capture->serviced)) return 0;
     ma_snapshot s = pgwt_capture_last_snapshot(d->merge_capture);
     pgwt_merge_observation o = d->merge_capture->observation;
     int rc = daemon_observe(d, &o);
-    uint64_t now = o.d;
-    if (rc >= 0 && !pgwt_transport_service_due(now, d->merge_capture->last_service_at,
-                                             d->merge_capture->serviced)) return 0;
+    now = o.d;
     d->merge_capture->last_service_at = now; d->merge_capture->serviced = true;
     s.value[PGWT_C_WRITER_PUSH_FAIL] = o.counters.value[PGWT_C_WRITER_PUSH_FAIL];
     if (rc < 0) s.valid = false;
@@ -929,6 +950,16 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
         U(report.faults[PGWT_MERGE_SEAL_VIOLATION]),
         U(report.faults[PGWT_MERGE_SEQUENCE_GAP]), U(report.faults[PGWT_MERGE_UNKNOWN_EVIDENCE]),
         U(lost), U(ts.finish_deadline_reached), U(ts.finish_pass_limit_reached), U(ts.unfinished_records), (unsigned)report.status);
+    fprintf(stderr, "exact-perf: budgets drain_budget_yields=%llu drain_slice_yields=%llu release_budget_yields=%llu "
+        "reader_budget_yields=%llu ring_budget_yields=%llu perf_budget_yields=%llu hint_budget_yields=%llu "
+        "consume_budget_yields=%llu wait_budget_yields=%llu ring_record_cap_yields=%llu cut_pass_limit_reached=%llu cut_pass_limit_records=%llu "
+        "source_budget_yields=%llu sweep_budget_yields=%llu unfinished_transport_records=%llu "
+        "unfinished_capture_records=%llu unfinished_unread_records=%llu capture_final_unfinished_records=%llu\n",
+        U(ts.drain_budget_yields), U(ts.drain_slice_yields), U(ts.release_budget_yields), U(ts.reader_budget_yields),
+        U(ts.ring_budget_yields), U(ts.perf_budget_yields), U(ts.hint_budget_yields),
+        U(ts.consume_budget_yields), U(ts.wait_budget_yields), U(ts.ring_record_cap_yields), U(ts.cut_pass_limit_reached), U(ts.cut_pass_limit_records),
+        U(cs.source_budget_yields), U(cs.sweep_budget_yields), U(ts.unfinished_transport_records),
+        U(ts.unfinished_capture_records), U(ts.unfinished_unread_records), U(cs.unfinished_records));
     static const char *const names[3] = {"CPU", "E", "L"};
     for (size_t i = 0; i < 3; ++i)
         fprintf(stderr, "exact-perf: reconcile dest=%s attempted=%llu delivered=%llu failures=%llu "

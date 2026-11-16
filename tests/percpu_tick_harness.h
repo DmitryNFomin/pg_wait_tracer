@@ -38,7 +38,7 @@ struct pgwt_merge_capture {
     uint64_t last_checkpoint_at,last_service_at;
     bool serviced;
 };
-static unsigned core_checks;
+static unsigned core_checks, observation_reads;
 static bool transport_silent;
 static void called(const char *name)
 { size_t n=strlen(name);if(used+n+2>=sizeof(calls))abort();memcpy(calls+used,name,n);used+=n;calls[used++]=' ';calls[used]=0; }
@@ -97,11 +97,11 @@ static bool cadence_cases(void)
 {
     struct pgwt_daemon *d=calloc(1,sizeof(*d));TICK(d);
     struct pgwt_merge_capture c={.observation={.counters={.known=true}}};
-    d->exact_perf=true;d->merge_capture=&c;core_checks=publication_lookups=0;
+    d->exact_perf=true;d->merge_capture=&c;core_checks=publication_lookups=observation_reads=0;
     /* Continuous DATA/watermark readiness: standalone core CHECK is once
      * per clock slot, with full counter reads reserved for silence. */
     for(unsigned pass=0;pass<100000;++pass){service_now=pass*100;TICK(capture_poll_under_test(d)==0);}
-    TICK(core_checks==1 && publication_lookups==0);
+    TICK(core_checks==1 && publication_lookups==0 && observation_reads==1);
     service_now=10000000;TICK(capture_poll_under_test(d)==0 && core_checks==2 && publication_lookups==0);
     transport_silent=true;service_now=20000000;
     TICK(capture_poll_under_test(d)==0 && core_checks==3 && publication_lookups==13 && c.last_checkpoint_at==service_now);
@@ -127,7 +127,7 @@ static bool publication_counters(void)
 }
 /* Only the fields accessed by the actual Linux drain body are required.
  * libbpf's successful consume returns ZERO even after delivering samples. */
-struct pgwt_percpu_transport { uint64_t *positions; struct pgwt_transport_budget budget; void *platform; };
+struct pgwt_percpu_transport { uint64_t *positions; struct pgwt_transport_budget budget; struct pgwt_transport_stats stats; void *platform; };
 struct perf_buffer { struct pgwt_percpu_transport *transport;size_t source,records; bool hint; };
 struct ring_context {struct pgwt_daemon *d;uint32_t dest;size_t consumed,limit;};
 struct ring_buffer {struct ring_context *ctx;size_t records;};

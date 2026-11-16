@@ -95,18 +95,18 @@ mutations = [
     ('skip_final_budget_edge_check', 'rv_final_check', 'src/merge_capture.c',
      [('    ma_snapshot current = s ? *s : (ma_snapshot){0};\n    bool hold;\n'
        '    int rc = mapped(c, &check, d, &current, &hold);',
-       '    int rc = pgwt_capture_envelope(c, &check, d, s);')]),
+       '    ma_snapshot current = s ? *s : (ma_snapshot){0};\n    bool hold;\n    int rc = c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx)) ? 0 : mapped(c, &check, d, &current, &hold);')]),
     ('failures_as_unfinished', 'finish_failures', 'src/percpu_transport.c',
      [('        unread = unread > t->failures[k] ? unread - t->failures[k] : 0;\n', '')]),
     ('pass_cap_as_deadline', 'shutdown_raw', 'src/percpu_transport.c',
      [('if (pass_limit) ++t->stats.finish_pass_limit_reached;',
        'if (pass_limit) ++t->stats.finish_deadline_reached;')]),
     ('service_without_clock', 'service_deadline', 'src/percpu_transport.c',
-     [('if (pgwt_transport_pass_expired(t)) return 1; /* retain the suffix */',
-       'if (false) return 1; /* retain the suffix */')]),
+     [('if (pgwt_transport_pass_expired(t)) {\n            ++t->stats.release_budget_yields;',
+       'if (false) {\n            ++t->stats.release_budget_yields;')]),
     ('merge_without_clock', 'merge_deadline', 'src/merge_capture.c',
-     [('if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) return 0;',
-       'if (c->budget.active && c->budget.until == c->budget.started) return 0;')]),
+     [('if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) {\n            ++c->source_budget_yields;',
+       'if (c->budget.active && c->budget.until == c->budget.started) {\n            ++c->source_budget_yields;')]),
     ('finish_ignores_deadline', 'finish_deadline', 'src/percpu_transport.c',
      [('if (now < started || now >= until) break;', 'if (false && (now < started || now >= until)) break;'),
       ('pgwt_transport_begin_pass(t, until);', 'pgwt_transport_begin_pass(t, 0);')]),
@@ -172,7 +172,7 @@ mutations = [
     ('ignore_terminal_hole', 'terminal_discard', 'src/percpu_transport.c',
      [('                return fault(t, PGWT_MERGE_SEQUENCE_GAP); /* terminal hole */', '                continue; /* terminal hole */')]),
     ('unbounded_cut_wait', 'terminal_discard', 'src/percpu_transport.c',
-     [('            if (++t->cut_passes > t->cut_limit) return fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);', '            ++t->cut_passes;')]),
+     [('if (++t->cut_passes > t->cut_limit) {', 'if (false && ++t->cut_passes > t->cut_limit) {')]),
     ('terminal_discard_is_delivered', 'terminal_discard', 'src/percpu_transport.c',
      [('            t->stats.terminal_discards += missing;', '            t->stats.terminal_discards += missing; t->seq[k] = t->targets[k];')]),
     ('uncovered_into_merge', 'uncovered', 'src/merge_capture.c',
@@ -186,6 +186,36 @@ mutations = [
     ('omit_adapter_backlog', 'pending', 'src/merge_capture.c',
      [('return c ? c->retained_count + c->staged : 0;', 'return c ? c->staged : 0;')]),
 ]
+# Each observation-bearing stop has its own skip mutant and assertion.
+mutations += [
+    ('skip_fence_edge_check', 'rv_fence_edge', 'src/merge_capture.c',
+     [('    /* Control inputs carry observations:',
+       '    if (e->kind == MA_CHECK && c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) return 0;\n    /* Control inputs carry observations:')]),
+    ('skip_periodic_edge_check', 'periodic_edge', 'src/merge_capture.c',
+     [('        int rc = mapped(c, e, d, &current, &hold);',
+       '        int rc = e->kind == MA_CHECK && c->budget.active && d >= c->budget.until ? 0 : mapped(c, e, d, &current, &hold);')]),
+    ('skip_source_edge_observation', 'source_edge', 'src/merge_capture.c',
+     [('            return mapped(c, &check, d, s, &hold);',
+       '            (void)check; (void)hold; return 0;')]),
+    ('skip_sweep_edge_check', 'sweep_edge', 'src/merge_capture.c',
+     [('        int rc = mapped(c, e, d, &current, &hold);',
+       '        int rc = c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx)) ? 0 : mapped(c, e, d, &current, &hold);')]),
+    ('skip_release_resume_check', 'release_edge', 'src/merge_capture.c',
+     [('    /* Control inputs carry observations:',
+       '    if (e->kind == MA_CHECK && c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) return 0;\n    /* Control inputs carry observations:')]),
+    ('skip_finish_entry_check', 'finish_entry_check', 'src/percpu_transport.c',
+     [('        rc = t->io.envelope(t->io.ctx, &check, observed(t), &t->snapshot);\n        if (rc >= 0) {',
+       '        rc = timed_out ? 0 : t->io.envelope(t->io.ctx, &check, observed(t), &t->snapshot);\n        if (rc >= 0) {')]),
+    ('skip_finish_time_check', 'finish_time_check', 'src/percpu_transport.c',
+     [('        rc = t->io.envelope(t->io.ctx, &check, observed(t), &t->snapshot);\n        if (rc >= 0) {',
+       '        rc = timed_out ? 0 : t->io.envelope(t->io.ctx, &check, observed(t), &t->snapshot);\n        if (rc >= 0) {')]),
+    ('skip_finish_cap_check', 'finish_cap_check', 'src/percpu_transport.c',
+     [('        rc = t->io.envelope(t->io.ctx, &check, observed(t), &t->snapshot);\n        if (rc >= 0) {',
+       '        rc = pass_limit ? 0 : t->io.envelope(t->io.ctx, &check, observed(t), &t->snapshot);\n        if (rc >= 0) {')]),
+    ('skip_cut_cap_check', 'cut_cap_check', 'src/percpu_transport.c',
+     [('                rc = t->io.envelope(t->io.ctx, &check, observed(t), &t->snapshot);',
+       '                (void)check; rc = 0;')]),
+]
 deadline_assertions = {
     'blanket_finish_void': 'pgwt_capture_report(d.capture).status==PGWT_MERGE_OK',
     'skip_final_budget_edge_check': 'd.outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE',
@@ -196,6 +226,11 @@ deadline_assertions = {
     'finish_ignores_deadline': 'd.now-started<=PGWT_TRANSPORT_FINISH_NS',
     'finish_counter_dropped': 'pgwt_transport_stats(d.transport).finish_deadline_reached==1',
 }
+for name, guard, _, _ in mutations:
+    if name.startswith('skip_') and guard in {'rv_fence_edge','periodic_edge','source_edge',
+                                             'sweep_edge','release_edge','finish_entry_check','finish_time_check',
+                                             'finish_cap_check','cut_cap_check'}:
+        deadline_assertions[name] = 'd->outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE'
 flags = ['-std=c11', '-Wall', '-Wextra', '-Werror', '-DPGWT_TRANSPORT_HOST_TEST']
 flags += shlex.split(os.environ.get('CFLAGS', ''))
 cc = shlex.split(os.environ.get('CC', 'cc'))
@@ -267,6 +302,7 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     start = capture.index('static int daemon_observe(')
     end = capture.index('static bool daemon_write(', start)
     observe = capture[start:end]
+    clock_body = capture[capture.index('static uint64_t daemon_now('):capture.index('static bool daemon_flush(')]
     normalized = tick[tick.index('    /* Health check:'):]
     # Match only for the migration comparison. Mutants below are compiled
     # and must fail behavior; these anchors do not classify a mutant kill.
@@ -316,7 +352,9 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     tick_binary = work / 'tick-test'
     def tick_build(tick_body, observer, drain_body=drain, poll_body=capture_poll,
                    consume_body=consume, event_body=event_drain):
-        harness.write_text('#include "percpu_tick_harness.h"\n' + tick_body + observer + ring_result +
+        instrumented = observer.replace('static int daemon_observe(', 'static int daemon_observe_under_test(')
+        instrumented += 'static int daemon_observe(void *ctx, pgwt_merge_observation *o) { ++observation_reads; return daemon_observe_under_test(ctx, o); }\n'
+        harness.write_text('#include "percpu_tick_harness.h"\n' + tick_body + instrumented + clock_body + ring_result +
                            drain_body + consume_body + event_body + tick_entry + cadence + poll_body)
         p = subprocess.run(cc + flags + ['-I' + str(repo / 'tests'), '-I' + str(repo / 'src'),
             str(harness), '-o', str(tick_binary)], capture_output=True, text=True, env=env)
@@ -340,11 +378,11 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
         ('per_record_map_reads', tick, full_observe, drain, capture_poll),
         ('ignore_perf_receipts', tick, observe, drain.replace('if (l->d->percpu_transport->positions[i] != before)', 'if (n || before > l->d->percpu_transport->positions[i])'), capture_poll),
         ('perf_without_clock', tick, observe, drain.replace(
-            'return pgwt_transport_pass_expired(l->d->percpu_transport) ? LIBBPF_PERF_EVENT_DONE : LIBBPF_PERF_EVENT_CONT;',
-            '(void)l; return LIBBPF_PERF_EVENT_CONT;'), capture_poll),
+            'if (pgwt_transport_pass_expired(l->d->percpu_transport)) {\n        ++l->d->percpu_transport->stats.perf_budget_yields;',
+            'if (false) {\n        ++l->d->percpu_transport->stats.perf_budget_yields;'), capture_poll),
         ('ring_without_clock', tick, observe, drain.replace(
-            'if (!rc && pgwt_transport_pass_expired(r->d->percpu_transport)) return -EINTR;',
-            'if (false) return -EINTR;'), capture_poll),
+            'if (!rc && pgwt_transport_pass_expired(r->d->percpu_transport)) {',
+            'if (false) {'), capture_poll),
         ('continue_failed_tick_drain', tick.replace(
             'd->running = false;\n            return;\n        }\n        d->counters.tick_drain_pending_records',
             '/* continue after failure */\n            return;\n        }\n        d->counters.tick_drain_pending_records'), observe, drain, capture_poll),
@@ -352,8 +390,11 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
             'd->counters.tick_drain_pending_records = pgwt_merge_capture_pending_records(d);',
             'd->counters.tick_drain_pending_records = 0;'), observe, drain, capture_poll),
         ('per_pass_core_checks', tick, observe, drain, capture_poll.replace(
-            'if (rc >= 0 && !pgwt_transport_service_due(',
-            'if (false && rc >= 0 && !pgwt_transport_service_due(')),
+            'if (now && !pgwt_transport_service_due(',
+            'if (false && now && !pgwt_transport_service_due(')),
+        ('cadence_reads_before_gate', tick, observe, drain, capture_poll.replace(
+            'uint64_t now = daemon_now(d);',
+            'pgwt_merge_observation skipped = d->merge_capture->observation; (void)daemon_observe(d, &skipped);\n    uint64_t now = daemon_now(d);')),
         ('repeat_backlog_warning', tick.replace('if (!d->tick_drain_truncated_logged)',
                                                 'if (true || !d->tick_drain_truncated_logged)'), observe, drain, capture_poll),
     ]:
@@ -367,9 +408,11 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
              'service_now<=PGWT_TRANSPORT_PASS_NS && cpu0.records==15' not in p.stderr) or
             (name == 'ring_without_clock' and
              'service_now-started<=PGWT_TRANSPORT_PASS_NS && e.records==15' not in p.stderr) or
+            (name == 'cadence_reads_before_gate' and 'observation_reads==1' not in p.stderr) or
             any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
             raise SystemExit(f'ERROR: {name}: survived or failed elsewhere\n' + p.stdout + p.stderr)
-        print(f'{name}: KILLED at tick_duties')
+        print(f'{name}: KILLED at tick_duties' +
+              (' (observation_reads==1)' if name == 'cadence_reads_before_gate' else ''))
     for name, consume_body, event_body, assertion in [
         ('expired_consume_sleeps', consume.replace('return dest == PGWT_WIRE_DEST_E ? -EAGAIN : 0;',
                                                   'return 0;'), event_drain,
@@ -390,7 +433,93 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
                 any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
             raise SystemExit(f'ERROR: {name}: survived or failed elsewhere\n' + p.stdout + p.stderr)
         print(f'{name}: KILLED at tick_duties ({assertion})')
-    print(f'transport + tick/publication/drain/cadence/yield mutants: {len(mutations)+12}/{len(mutations)+12} killed at intended assertions')
+    print(f'transport + tick/publication/drain/cadence/yield mutants: {len(mutations)+13}/{len(mutations)+13} killed at intended assertions')
+
+    # Run each raw budget stop through the real transport, adapter and core.
+    # The Linux callbacks are copied verbatim; only libbpf iteration is fake.
+    shutil.copy2(repo / 'tests/percpu_budget_harness.h', work / 'tests/percpu_budget_harness.h')
+    raw_binary = work / 'raw-test'
+    raw_harness = work / 'tests/raw.c'
+    def raw_build(body):
+        callbacks = body[body.index('static int receive_ring('):body.index('static int linux_helpers_start(void *);')]
+        consumer = body[body.index('static int linux_consume_io(void *ctx,'):body.index('static void linux_close_io(void *ctx)')]
+        waiter = body[body.index('static int linux_wait(void *ctx)'):body.index('static int linux_envelope(', body.index('static int linux_wait(void *ctx)'))]
+        base = (work / 'tests/test_percpu_transport.c').read_text().replace(
+            'int main(int argc,char **argv)', 'int transport_original_main(int argc,char **argv)')
+        # Avoid the fixture parser's unrelated static counters() helper.
+        portable = re.sub(r'(?<![.\w])counters\(', 'transport_counters(', body)
+        raw_harness.write_text(base + '\n' + portable + '\n#include "percpu_budget_harness.h"\n' + callbacks + consumer + waiter)
+        p = subprocess.run(cc + flags + ['-I' + str(work / 'src'), str(raw_harness),
+            'src/merge_capture.c', 'src/core/merge_adapter.c', 'src/core/merge.c', '-o', str(raw_binary)],
+            cwd=work, capture_output=True, text=True, env=env)
+        if p.returncode:
+            raise SystemExit('ERROR: raw budget compilation is not a kill\n' + p.stdout + p.stderr)
+    raw_build(transport)
+    p = subprocess.run([str(raw_binary)], capture_output=True, text=True, env=env)
+    if p.returncode or 'raw budget guards: 9/9 PASS' not in p.stdout:
+        raise SystemExit('ERROR: raw budget baseline failed\n' + p.stdout + p.stderr)
+    print(p.stdout, end='')
+    raw_mutations = [
+        ('drain_entry_false_empty', 'drain_entry_edge',
+         '++t->stats.drain_budget_yields;\n        return 0;',
+         '++t->stats.drain_budget_yields;\n        return 1;',
+         'bounded_drain(d.transport)==0'),
+        ('drain_slice_unbounded', 'drain_slice_edge',
+         't->budget.until = now + PGWT_TRANSPORT_DRAIN_NS;',
+         't->budget.until = service.until;', 'bounded_drain(d.transport)==0 && p0.left==1'),
+        ('reader_false_empty', 'reader_edge',
+         '++l->d->percpu_transport->stats.reader_budget_yields;\n            *empty = false;',
+         '++l->d->percpu_transport->stats.reader_budget_yields;\n            *empty = true;',
+         'consume_all(&l,&empty)==0 && !empty'),
+        ('perf_unbounded', 'perf_edge',
+         '++l->d->percpu_transport->stats.perf_budget_yields;\n        return LIBBPF_PERF_EVENT_DONE;',
+         '++l->d->percpu_transport->stats.perf_budget_yields;\n        return LIBBPF_PERF_EVENT_CONT;',
+         'consume_all(&l,&empty)==0 && !empty && p0.left==2'),
+        ('hint_unbounded', 'hint_edge',
+         '++l->d->percpu_transport->stats.hint_budget_yields;\n        return LIBBPF_PERF_EVENT_DONE;',
+         '++l->d->percpu_transport->stats.hint_budget_yields;\n        return LIBBPF_PERF_EVENT_CONT;',
+         'consume_all(&l,&empty)==0 && !empty && h0.left==2'),
+        ('ring_unbounded', 'ring_edge',
+         '++r->d->percpu_transport->stats.ring_budget_yields;\n        return -EINTR;',
+         '++r->d->percpu_transport->stats.ring_budget_yields;\n        return 0;',
+         'consume_all(&l,&empty)==0 && !empty && e.left==1'),
+        ('consume_false_empty', 'consume_edge',
+         'return dest == PGWT_WIRE_DEST_E ? -EAGAIN : 0;', 'return 0;',
+         'linux_consume_io(&l,PGWT_WIRE_DEST_E,true)==-EAGAIN && e.left==2'),
+        ('wait_rounds_up_deadline', 'wait_edge',
+         'epoll_wait(l->epoll_fd, events, 1, timeout);',
+         'epoll_wait(l->epoll_fd, events, 1, 1);',
+         'linux_wait(&l)==0 && raw_wait_timeout==0'),
+        ('ring_cap_positive', 'ring_cap_edge',
+         'return limit && *consumed >= limit ? -EAGAIN : 0;',
+         'return limit && *consumed >= limit ? 1 : 0;',
+         'linux_consume_io(&l,PGWT_WIRE_DEST_E,true)==-EAGAIN && e.left==1'),
+    ]
+    # Raw stops carry no vector. Their resumption must still execute the
+    # completion checkpoint. Mutate that hand-off separately for each stop;
+    # each must reach VOID(counter_change), never DATA/FRONTIER/OK.
+    fence = "/* Completion fence: this reread MUST follow every CPU's consumed ack. */\n    counters(t);"
+    for guard, field in [
+        ('drain_entry_edge', 'drain_budget_yields'), ('drain_slice_edge', 'drain_slice_yields'),
+        ('reader_edge', 'reader_budget_yields'), ('perf_edge', 'perf_budget_yields'),
+        ('hint_edge', 'hint_budget_yields'), ('ring_edge', 'ring_budget_yields'),
+        ('consume_edge', 'consume_budget_yields'), ('ring_cap_edge', 'ring_record_cap_yields'),
+        ('wait_edge', 'wait_budget_yields'),
+    ]:
+        raw_mutations.append(('skip_' + guard + '_checkpoint', guard, fence,
+            fence.replace('counters(t);', f'if (!t->stats.{field}) counters(t);'),
+            'd->outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE'))
+    for name, guard, before, after, assertion in raw_mutations:
+        if transport.count(before) != 1:
+            raise SystemExit(f'ERROR: {name}: raw budget mutation anchor is not unique')
+        raw_build(transport.replace(before, after))
+        p = subprocess.run([str(raw_binary), '--guard', guard], capture_output=True, text=True, env=env)
+        if (p.returncode != 1 or f'REACHED {guard}\n' not in p.stdout or
+                f'transport ASSERT {guard}:' not in p.stderr or assertion not in p.stderr or
+                any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
+            raise SystemExit(f'ERROR: {name}: survived or failed elsewhere\n' + p.stdout + p.stderr)
+        print(f'{name}: KILLED at {guard} ({assertion})')
+    print(f'raw budget mutants: {len(raw_mutations)}/{len(raw_mutations)} killed at intended assertions')
 
 live_source = (repo / 'tests/test_transport_daemon_live.py').read_text()
 print(deadline_gate_cases(live_source))
@@ -403,4 +532,4 @@ except AssertionError as error:
     print('natural_exit_without_lower_bound: KILLED at early_zero_exit')
 else:
     raise SystemExit('ERROR: natural exit without lower bound survived')
-print(f'transport host mutants total: {len(mutations)+13}/{len(mutations)+13} killed at intended assertions')
+print(f'transport host mutants total: {len(mutations)+len(raw_mutations)+14}/{len(mutations)+len(raw_mutations)+14} killed at intended assertions')

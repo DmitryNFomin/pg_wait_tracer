@@ -156,7 +156,8 @@ struct pgwt_transport_io {
      * a completion condition. */
     int (*drain)(void *);
     /* Shutdown only: allow a requested helper to run between bounded passes.
-     * wait returns negative errno on failure; production waits at most 1 ms. */
+     * wait returns negative errno on failure; production waits at most 1 ms,
+     * rounded down to fit the current pass and absolute finishing deadline. */
     int (*wait)(void *);
     bool (*waiting)(void *);
     size_t (*pending)(void *);
@@ -212,6 +213,13 @@ struct pgwt_transport_stats {
     uint64_t uncovered;          /* cookie-less records consumed, not merge input */
     uint64_t records, queue_high, round_ns_total, round_ns_max;
     uint64_t finish_deadline_reached, finish_pass_limit_reached, unfinished_records;
+    uint64_t unfinished_transport_records, unfinished_capture_records, unfinished_unread_records;
+    /* Scheduling deferrals count yields (a suffix may be deferred again).
+     * Terminal counters above count the actual remaining items once. */
+    uint64_t drain_budget_yields, drain_slice_yields, release_budget_yields, reader_budget_yields;
+    uint64_t ring_budget_yields, perf_budget_yields, hint_budget_yields;
+    uint64_t consume_budget_yields, wait_budget_yields, ring_record_cap_yields, cut_pass_limit_reached;
+    uint64_t cut_pass_limit_records; /* queued and unaccounted frozen-target items at the cap */
     uint64_t acks_at_completion; /* CPUs whose higher-round boundary was consumed, summed over completed rounds */
     uint64_t acks_before_fence;  /* accepted acks whose cutoff precedes their fence request */
     uint64_t final_attempts[3], final_delivered[3], final_failures[3], final_discards[3];
