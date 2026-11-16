@@ -15,6 +15,7 @@ import sys
 import tempfile
 
 from server_harness import ServerHarness
+from server_build import server_objects
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS = ROOT / "tests"
@@ -43,6 +44,16 @@ def checked(args):
 def replace(source, old, new):
     assert source.count(old) == 1, (old, source.count(old))
     return source.replace(old, new)
+
+
+def build_server(label, changes, obj, tmp):
+    objects = server_objects(ROOT / "build")
+    for name, source in changes.items():
+        index = objects.index(ROOT / "build" / f"server_{name}.o")
+        objects[index] = obj(label, name, source)
+    binary = tmp / f"server-{label}"
+    checked(CC + FLAGS + objects + ["-llz4", "-lz", "-lm", "-o", binary])
+    return binary
 
 
 def main():
@@ -133,18 +144,8 @@ def main():
         for label, changes, names in cases:
             reject(label, [weight(label, changes)], names)
 
-        server_objects = [ROOT / "build" / f"server_{name}.o" for name in (
-            "server", "compute", "backend_span", "open_overlay", "block_agg",
-            "event_reader", "event_writer", "summary_writer", "summary_reader",
-            "wait_event", "idle_rule", "spawn", "cmdline", "backend_meta", "cJSON")]
-
         def server_test(label, changes, names):
-            objects = list(server_objects)
-            for name, source in changes.items():
-                index = objects.index(ROOT / "build" / f"server_{name}.o")
-                objects[index] = obj(label, name, source)
-            binary = tmp / f"server-{label}"
-            checked(CC + FLAGS + objects + ["-llz4", "-lz", "-lm", "-o", binary])
+            binary = build_server(label, changes, obj, tmp)
             # Module overrides stay inside the child; fixture writer is an
             # isolated binary too. The harness launches only this server.
             fixture = weight(label + "-fixture", changes)

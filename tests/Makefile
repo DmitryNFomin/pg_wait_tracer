@@ -931,14 +931,30 @@ test_block_agg: test_block_agg.c ../src/block_agg.c ../src/compute.c \
 
 # Exercise the actual server gate/loader/response against reader-decoded
 # block aggregates from the same two-block file (command state crosses blocks).
-# backend_span.o is in this list because src/server.c calls pgwt_span_* since
-# #455: EVERY target that includes ../src/server.c links it, so leaving it out
-# breaks test_transitions_loader / test_top_wait_backfill / test_window_overlap
-# / test_semantics_wire / test_backend_span at link time, not at run time.
-TRANSITIONS_LOADER_OBJS = $(addprefix $(BUILD)/server_,compute.o block_agg.o \
-    backend_span.o \
-    event_reader.o event_writer.o summary_writer.o summary_reader.o \
-    wait_event.o idle_rule.o spawn.o cmdline.o backend_meta.o cJSON.o)
+# EVERY target including server.c needs the product's complete link closure.
+# Keep this plain list in sync with SERVER_SRCS, excluding server.c itself
+# (already included in the test). check_server_test_links.py compares every
+# expanded link recipe with the product list in the Mac gate. Parsing this
+# Makefile must also work when it is copied alone, including without Python.
+TRANSITIONS_LOADER_OBJS = $(BUILD)/server_core/evidence_query.o \
+                          $(BUILD)/server_core/evidence_codec.o \
+                          $(BUILD)/server_core/evidence_replay.o \
+                          $(BUILD)/server_core/wait_metrics.o \
+                          $(BUILD)/server_phase_capability.o \
+                          $(BUILD)/server_compute.o \
+                          $(BUILD)/server_backend_span.o \
+                          $(BUILD)/server_open_overlay.o \
+                          $(BUILD)/server_block_agg.o \
+                          $(BUILD)/server_event_reader.o \
+                          $(BUILD)/server_event_writer.o \
+                          $(BUILD)/server_summary_writer.o \
+                          $(BUILD)/server_summary_reader.o \
+                          $(BUILD)/server_wait_event.o \
+                          $(BUILD)/server_idle_rule.o \
+                          $(BUILD)/server_spawn.o \
+                          $(BUILD)/server_cmdline.o \
+                          $(BUILD)/server_backend_meta.o \
+                          $(BUILD)/server_cJSON.o
 test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
@@ -1214,3 +1230,9 @@ test_counter_vector: test_counter_vector.c ../src/counter_vector.c ../src/counte
 
 test_writer_failure: test_writer_failure.c $(BUILD)/event_writer.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4
+
+# Pilot helpers are built in an external temporary directory by the registered
+# Python route test; no generated fixtures or helper binaries enter the tree.
+.PHONY: pilot-route
+pilot-route:
+	python3 -B test_pilot_route.py

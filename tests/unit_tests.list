@@ -1101,3 +1101,7 @@ test_counter_failures.py
 test_counter_vector_portable.py
 test_core_merge_queue.py
 core_merge_queue_mutants.py
+
+# Stateless evidence-v1 fixture-to-screen pilot and consumer boundary.
+test_pilot_route.py
+test_consumer_boundary.sh

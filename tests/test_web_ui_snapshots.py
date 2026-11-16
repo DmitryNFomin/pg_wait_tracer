@@ -49,12 +49,14 @@ No root, no PG, no SSH — uses mock_server.py, exactly like test_web_ui.py.
 """
 import collections
 import fnmatch
+import json
 import os
 import socket
 import sys
 import subprocess
 import time
 import signal
+import urllib.parse
 
 try:
     from playwright.sync_api import sync_playwright
@@ -104,6 +106,11 @@ SAMPLED_URL = app_url(SAMPLED_PORT)
 # U1 fixture gallery — static page under the mock's HTTP root (no WebSocket;
 # the fixtures are fully deterministic, see web/static/dev/fixtures/).
 GALLERY_URL = f"http://127.0.0.1:{MOCK_PORT}/dev/gallery.html"
+
+# App-panel gallery cells use the real Events mount and mock WebSocket route.
+# These registrations share request/response fixtures with mock_server.py.
+with open(os.path.join(os.path.dirname(__file__), "fixtures", "pilot-responses.json")) as _pilot_file:
+    PILOT_CELLS = json.load(_pilot_file)
 
 # Gallery cells snapshotted at the tight GALLERY_* tolerance. Cell DOM ids are
 # the manifest's stable 'gallery-<builder>-<state>' contract
@@ -606,6 +613,33 @@ def snap_exact_suite(page):
         capture_failure(page, "session_timeline", "no session row to drill")
 
 
+def snap_pilot_suite(page):
+    """Opt-in Events pilot cells, using frozen scenarios 01 and 05."""
+    for cell in PILOT_CELLS:
+        if not selected(cell["name"]):
+            continue
+        params = {"pilot": "1"}
+        for fields in cell["request"].values():
+            params.update({"pilot_" + key: "" if value is None else str(value)
+                           for key, value in fields.items()})
+        page.goto(MOCK_URL + "&" + urllib.parse.urlencode(params))
+        page.locator('[data-tab="events"]').click()
+        panel = page.locator('#events-pilot')
+        panel.locator('[data-metric="wait_time"] [data-value]').wait_for()
+        for name in ("wait_time", "completed_waits"):
+            metric = panel.locator(f'[data-metric="{name}"]')
+            expected = cell["response"][name]
+            assert metric.locator('[data-value]').inner_text() == (
+                'unavailable' if expected['value'] is None else expected['value'])
+            assert metric.locator('[data-completeness]').inner_text() == expected['completeness']
+            assert metric.locator('[data-reason-token]').all_inner_texts() == expected['reasons']
+        rendered = panel.locator('.pilot-result').inner_text()
+        assert [line for line in rendered.splitlines() if line] == cell['rendered_result_lines'], repr(rendered)
+        snapshot(page, cell["name"], "#events-pilot",
+                 pixel_threshold=GALLERY_PIXEL_THRESHOLD,
+                 max_diff_ratio=GALLERY_MAX_DIFF_RATIO)
+
+
 def snap_fidelity_suite(page):
     """B5 fidelity-state snapshots against the sampled + daemon mock."""
     print("--- Snapshots: sampled/daemon mock (B5 fidelity states) ---")
@@ -897,6 +931,7 @@ def main():
             exact_page = exact_ctx.new_page()
             attach_console_tail(exact_page)
             snap_exact_suite(exact_page)
+            snap_pilot_suite(exact_page)
             exact_ctx.close()
 
             sampled_ctx = browser.new_context(**ctx_kw)
