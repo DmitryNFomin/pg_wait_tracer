@@ -174,6 +174,12 @@ static int ring_buffer__consume(struct ring_buffer *r)
     return (int)n;
 }
 static int consume_all(struct linux_transport *,bool *);
+static int linux_consume_io(void *,uint32_t,bool);
+static bool consume_event_ring(struct pgwt_daemon *,const char *,bool);
+#define PGWT_DEBUG_BLOCK_NS (50ULL * 1000ULL * 1000ULL)
+#define PGWT_EVENT_DRAIN_CALLBACK_BUDGET 64U
+static int tick_consume(struct pgwt_daemon *d,uint32_t dest,bool bounded)
+{return linux_consume_io(linux_state(d),dest,bounded);}
 static bool drain_cases(void)
 {
     struct pgwt_daemon *d=calloc(1,sizeof(*d));TICK(d);
@@ -203,6 +209,21 @@ static bool drain_cases(void)
     pgwt_budget_begin(&t.budget,service_now,0);uint64_t started=service_now;
     TICK(consume_all(&l,&empty)==0 && !empty);
     TICK(service_now-started<=PGWT_TRANSPORT_PASS_NS && e.records==15 && !l.callback_error);
+    d->exact_perf=true;d->transport.consume=tick_consume;
+    /* The main-loop drain at the end of an already exhausted pass must
+     * report backlog without consuming; the next wait uses timeout zero. */
+    TICK(consume_event_ring(d,"test",true) && e.records==15);
+    pgwt_budget_begin(&t.budget,service_now,0);
+    TICK(consume_event_ring(d,"test",true) && e.records==10);
+    pgwt_budget_begin(&t.budget,service_now,0);
+    TICK(linux_consume_io(&l,PGWT_WIRE_DEST_L,true)==0);
+    record_cost=0;t.budget.active=false;e.records=5000;
+    TICK(consume_event_ring(d,"test",true) && e.records==904);
+    TICK(!consume_event_ring(d,"test",true) && e.records==0);
+    TICK(!consume_event_ring(d,"test",true));
+    l.callback_error=-EIO;e.records=5000;
+    TICK(linux_consume_io(&l,PGWT_WIRE_DEST_E,true)==-EIO);
+    l.callback_error=0;
     record_cost=0;e.records=0;t.budget.active=false;
     hint1.records=3;TICK(consume_all(&l,&empty)==0 && empty && woken[1]==3 && !positions[1]);
     e.records=5000;TICK(consume_all(&l,&empty)==0 && !empty && e.records==904 && l.ring_ctx[0].consumed==4096);
@@ -210,6 +231,7 @@ static bool drain_cases(void)
     TICK(consume_all(&l,&empty)==0 && empty);
     l.callback_error=-EIO;TICK(consume_all(&l,&empty)==-EIO);free(d);
     puts("actual Linux drain/callbacks: perf DONE and ring negative yield within 50 ms; suffix retained; 4096 record guard PASS");
+    puts("actual Linux consume + daemon backlog: expired pass, timed yield and record cap keep next wait awake; errors preserved PASS");
     return true;
 }
 static bool tick_cases(void)

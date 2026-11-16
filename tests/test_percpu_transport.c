@@ -112,6 +112,11 @@ static int tb_boundary(struct tb_driver *,unsigned,unsigned,unsigned,uint64_t);
 static int tb_drain(void *ctx)
 {
     struct tb_driver *d=ctx;++d->drains;d->now+=d->drain_cost_ns;
+    if(d->shutdown_phase==9){
+        unsigned char trace[48];memcpy(trace,golden_T,48);tb_le(trace,11,8);tb_le(trace+8,77,4);
+        if(tb_emit(d,1,0,PGWT_WIRE_TRACE,0,trace,48)<0)return -EIO;
+        d->shutdown_phase=10;return 0;
+    }
     if(d->shutdown_phase==1){
         /* These bytes have not reached userspace when finish() is called.
          * Model a held perf buffer plus its lifecycle ring. */
@@ -461,24 +466,24 @@ static bool tb_shutdown_raw(void)
     struct tb_driver d;TB(tb_setup(&d));d.shutdown_phase=1;
     TB(!d.traces && !d.count && !d.controls);
     TB(pgwt_transport_finish(d.transport)==0);
-    /* Shutdown closes admission: unread DATA and lifecycle evidence is
-     * accounted and VOID, rather than extending the capture indefinitely. */
-    TB(d.shutdown_phase==2 && d.drains==2 && !d.traces && d.count==1 && !d.controls);
-    TB(d.outputs[0].kind==PGWT_MERGE_OUT_VOID &&
-        pgwt_capture_report(d.capture).status==PGWT_MERGE_SUSPENDED);
-    TB(pgwt_transport_stats(d.transport).unfinished_records==2);
+    TB(d.shutdown_phase==4 && d.drains>=4 && d.traces==1 && d.count==3 && d.controls==2);
+    TB(d.outputs[1].kind==PGWT_MERGE_OUT_DATA && d.outputs[2].kind==PGWT_MERGE_OUT_FRONTIER &&
+        pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
+    TB(pgwt_transport_stats(d.transport).unfinished_records==0);
     unsigned drains=d.drains;
     TB(pgwt_transport_finish(d.transport)==0 && d.drains==drains);
     tb_cleanup(&d);
     TB(tb_setup(&d));d.drained=false;
     TB(pgwt_transport_finish(d.transport)==0 && d.drains==256 && d.count==1 &&
         d.outputs[0].kind==PGWT_MERGE_OUT_VOID && d.outputs[0].reason==PGWT_MERGE_UNKNOWN_EVIDENCE);
+    TB(pgwt_transport_stats(d.transport).finish_pass_limit_reached==1 &&
+       pgwt_transport_stats(d.transport).finish_deadline_reached==0);
     tb_cleanup(&d);
     TB(tb_setup(&d));d.snapshot.value[11]=1;
     TB(pgwt_capture_finish(d.capture,40,&d.snapshot)==0 && d.count==1 &&
         d.outputs[0].kind==PGWT_MERGE_OUT_VOID && d.outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE);
     tb_cleanup(&d);
-    printf("shutdown: admission closed; unread perf DATA counted and VOID; nonempty/BUSY suffix VOID; final counters checked\n");
+    printf("shutdown: unread perf DATA drained and released with FRONTIER + OK; nonempty/BUSY suffix VOID; pass cap distinct from deadline; final counters checked\n");
     return true;
 }
 static bool tb_off(void)
@@ -1311,7 +1316,50 @@ static bool tb_finish_deadline(void)
        pgwt_transport_stats(d.transport).finish_deadline_reached==1);
     tb_cleanup(&d);puts("finish deadline: 100 ms absolute bound, unfinished evidence VOID and counted once PASS");return true;
 }
+
+static bool rv_uncovered_finish(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));d.shutdown_phase=9;d.drained=true;
+    int rc=pgwt_transport_finish(d.transport);
+    printf("RV-A rc=%d phase=%u count=%zu out0kind=%d reason=%d status=%d uncovered=%llu\n",rc,d.shutdown_phase,(size_t)d.count,
+      d.count?(int)d.outputs[0].kind:-1,d.count?(int)d.outputs[0].reason:-1,(int)pgwt_capture_report(d.capture).status,
+      (unsigned long long)pgwt_transport_stats(d.transport).uncovered);
+    TB(pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
+    TB(pgwt_transport_stats(d.transport).uncovered==1 &&
+       pgwt_transport_stats(d.transport).unfinished_records==0 && !d.count);
+    tb_cleanup(&d);return true;
+}
+static bool rv_final_check(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));d.drained=true;
+    d.drain_cost_ns=UINT64_C(50000000);
+    TB(pgwt_transport_finish(d.transport)==0);
+    d.snapshot.value[11]=1; /* a counter-vector component rose after the last checkpoint */
+    int rc=pgwt_capture_finish(d.capture,d.now,&d.snapshot);
+    printf("RV-B rc=%d count=%zu out0kind=%d reason=%d status=%d\n",rc,(size_t)d.count,
+      d.count?(int)d.outputs[0].kind:-1,d.count?(int)d.outputs[0].reason:-1,(int)pgwt_capture_report(d.capture).status);
+    TB(d.count==1 && d.outputs[0].kind==PGWT_MERGE_OUT_VOID && d.outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE);
+    tb_cleanup(&d);return true;
+}
+static bool tb_finish_failures(void)
+{
+    for(size_t slot=0;slot<6;++slot)for(unsigned unread=0;unread<2;++unread){
+        struct tb_driver d;TB(tb_setup(&d));
+        d.drained=false;d.drain_cost_ns=UINT64_C(25000000);
+        d.attempts[slot]=2+unread;d.failures[slot]=1;d.discards[slot]=1;
+        TB(pgwt_transport_finish(d.transport)==0);
+        struct pgwt_transport_stats stats=pgwt_transport_stats(d.transport);
+        TB(stats.finish_deadline_reached==1 && stats.finish_pass_limit_reached==0);
+        TB(stats.final_failures[slot%3]==1 && stats.unfinished_records==unread);
+        TB(d.count==1 && d.outputs[0].kind==PGWT_MERGE_OUT_VOID);
+        tb_cleanup(&d);
+    }
+    puts("finish accounting: failures and discards excluded from unfinished; unread attempts counted across CPU/E/L PASS");
+    return true;
+}
 static const struct {const char *name;bool(*run)(void);} tb_guards[]={
+    {"rv_uncovered_finish",rv_uncovered_finish},{"rv_final_check",rv_final_check},
+    {"finish_failures",tb_finish_failures},
     {"service_deadline",tb_service_deadline},{"merge_deadline",tb_merge_deadline},{"finish_deadline",tb_finish_deadline},
     {"admission",tb_admission},{"all_acks",tb_all_acks},{"missing_ack",tb_missing_ack},
     {"stale_ack",tb_stale_ack},{"counter_timing",tb_counter_timing},{"post_snapshot",tb_post_snapshot},{"core_held_age",tb_core_held_age},

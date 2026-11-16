@@ -31,7 +31,7 @@ struct pgwt_percpu_transport {
     /* Producer positions of E and L read once after every ack of this round,
      * only when a frozen target is still unreached. Never moved by traffic. */
     bool cut_taken, pass_empty;
-    bool releasing, finishing;
+    bool releasing;
     struct pgwt_transport_budget budget;
     uint64_t cut[2], cut_passes, cut_limit;
     uint32_t round, el_token;
@@ -238,12 +238,6 @@ int pgwt_transport_record(struct pgwt_percpu_transport *t, uint32_t dest,
     }
     uint64_t now = observed(t);
     t->last_record_at = now;
-    /* Shutdown closes admission. Still account raw records and consume helper
-     * boundaries, but never grow the capture with another DATA/lifecycle batch. */
-    if (t->finishing && r.envelope.kind != MA_BOUNDARY) {
-        ++t->stats.unfinished_records;
-        return 0;
-    }
     if (t->io.received) {
         int rc = t->io.received(t->io.ctx, &r.envelope, now);
         if (rc < 0) return fault(t, rc == -ENOMEM ? PGWT_MERGE_ALLOCATION_FAIL :
@@ -509,9 +503,9 @@ int pgwt_transport_finish(struct pgwt_percpu_transport *t)
     int rc = 0;
     uint64_t started = observed(t);
     uint64_t until = UINT64_MAX - started < PGWT_TRANSPORT_FINISH_NS ? UINT64_MAX : started + PGWT_TRANSPORT_FINISH_NS;
-    t->finishing = true;
     bool done = false;
-    for (unsigned pass = 0; pass < 256; ++pass) {
+    unsigned pass;
+    for (pass = 0; pass < 256; ++pass) {
         uint64_t now = observed(t);
         if (now < started || now >= until) break;
         pgwt_transport_begin_pass(t, until);
@@ -528,11 +522,15 @@ int pgwt_transport_finish(struct pgwt_percpu_transport *t)
         if (now < started || now >= until) break;
         if (t->io.wait && t->io.wait(t->io.ctx) < 0) break;
     }
-    t->stats.unfinished_records += t->count + (t->io.pending ? t->io.pending(t->io.ctx) : 0);
+    uint64_t stopped = observed(t);
+    bool timed_out = !done && (stopped < started || stopped >= until);
+    bool pass_limit = !done && !timed_out && pass == 256;
+    bool unfinished = timed_out || pass_limit;
+    if (unfinished)
+        t->stats.unfinished_records = t->count + (t->io.pending ? t->io.pending(t->io.ctx) : 0);
     if (!done && rc >= 0) {
-        ++t->stats.finish_deadline_reached;
-        rc = fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
-    } else if (t->stats.unfinished_records && rc >= 0 && !t->suspended) {
+        if (timed_out) ++t->stats.finish_deadline_reached;
+        if (pass_limit) ++t->stats.finish_pass_limit_reached;
         rc = fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
     }
     /* Terminal reconciliation, per (CPU,destination), after an empty pass:
@@ -549,8 +547,12 @@ int pgwt_transport_finish(struct pgwt_percpu_transport *t)
         t->stats.final_delivered[dest] += t->delivered[k];
         t->stats.final_failures[dest] += t->failures[k];
         t->stats.final_discards[dest] += t->discards[k];
-        if (t->targets[k] > t->delivered[k] && t->targets[k] - t->delivered[k] > t->discards[k])
-            t->stats.unfinished_records += t->targets[k] - t->delivered[k] - t->discards[k];
+        /* Only undelivered, nonfailed, nondiscarded attempts can still be
+         * unread. Subtract separately to avoid overflowing a counter sum. */
+        uint64_t unread = t->targets[k] > t->delivered[k] ? t->targets[k] - t->delivered[k] : 0;
+        unread = unread > t->failures[k] ? unread - t->failures[k] : 0;
+        unread = unread > t->discards[k] ? unread - t->discards[k] : 0;
+        if (unfinished) t->stats.unfinished_records += unread;
         if (t->failures[k] || t->targets[k] < t->delivered[k] ||
             t->targets[k] - t->delivered[k] != t->discards[k])
             t->stats.final_reconciled = false;
@@ -1121,12 +1123,18 @@ static int linux_consume_io(void *ctx, uint32_t dest, bool bounded)
     struct linux_transport *l = linux_state(d);
     if (!l || dest < 1 || dest > 2 || !l->rings[dest-1]) return -EINVAL;
     struct ring_context *r = &l->ring_ctx[dest-1];
-    if (pgwt_transport_pass_expired(d->percpu_transport)) return 0;
+    if (pgwt_transport_pass_expired(d->percpu_transport))
+        return dest == PGWT_WIRE_DEST_E ? -EAGAIN : 0;
     r->consumed = 0; r->limit = bounded ? 4096 : 65536;
     int rc = ring_buffer__consume(l->rings[dest-1]);
+    bool yielded = rc == -EINTR || (rc == -EAGAIN && r->consumed >= r->limit);
     if (rc == -EINTR) rc = (int)r->consumed;
     rc = pgwt_transport_ring_result(rc, r->consumed, r->limit);
-    return l->callback_error < 0 ? l->callback_error : rc;
+    if (l->callback_error < 0) return l->callback_error;
+    /* E uses NO_WAKEUP: preserve a yield through the daemon's backlog flag
+     * so its next epoll wait cannot sleep while the suffix is still queued. */
+    if (dest == PGWT_WIRE_DEST_E && yielded) return -EAGAIN;
+    return rc;
 }
 static void linux_close_io(void *ctx)
 {

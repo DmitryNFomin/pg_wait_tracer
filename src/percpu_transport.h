@@ -52,8 +52,8 @@ struct pgwt_transport_perf_attributes pgwt_transport_perf_attributes(size_t buff
  * fills. Each main-loop iteration shares a 50 ms cooperative service budget,
  * with at most 10 ms for raw draining before completion/merge work. Callbacks
  * consume the yielding record; unread and unadmitted suffixes stay queued.
- * Shutdown closes DATA/lifecycle admission, allows 256 passes/100 ms of
- * finishing work, then VOIDs unknown_evidence and counts unfinished evidence.
+ * Shutdown drains and completes rounds for up to 256 passes/100 ms, then
+ * VOIDs unknown_evidence and counts evidence still queued or unread.
  * An individual core feed or OS call is synchronous; these budgets apply
  * between those calls (issue 932 tracks the core's quadratic work).
  * Time is NEVER completeness evidence or permission to release DATA. */
@@ -95,8 +95,10 @@ bool pgwt_transport_pass_expired(struct pgwt_percpu_transport *);
 /* Full counter checkpoint through the same injectable I/O as the reader.
  * Available after prepare/load, including before the buffers are opened. */
 int pgwt_percpu_transport_snapshot(struct pgwt_daemon *, ma_snapshot *, uint64_t *now);
-/* consume returns records consumed, or negative errno. bounded is the
- * existing event-loop budget request; callers must not drain raw rings. */
+/* consume returns records consumed, or negative errno. E returns -EAGAIN
+ * on a budget yield so the main loop immediately services pending work.
+ * bounded is the existing event-loop budget request; callers must not drain
+ * raw rings. */
 int pgwt_percpu_transport_consume(struct pgwt_daemon *d, uint32_t dest,
                                  bool bounded);
 int pgwt_percpu_transport_record(struct pgwt_daemon *d, uint32_t dest,
@@ -209,7 +211,7 @@ struct pgwt_transport_stats {
     uint64_t skipped;            /* skipped sequence numbers explained by discards */
     uint64_t uncovered;          /* cookie-less records consumed, not merge input */
     uint64_t records, queue_high, round_ns_total, round_ns_max;
-    uint64_t finish_deadline_reached, unfinished_records;
+    uint64_t finish_deadline_reached, finish_pass_limit_reached, unfinished_records;
     uint64_t acks_at_completion; /* CPUs whose higher-round boundary was consumed, summed over completed rounds */
     uint64_t acks_before_fence;  /* accepted acks whose cutoff precedes their fence request */
     uint64_t final_attempts[3], final_delivered[3], final_failures[3], final_discards[3];

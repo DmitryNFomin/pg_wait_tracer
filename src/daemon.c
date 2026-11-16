@@ -124,10 +124,10 @@ static bool consume_event_ring(struct pgwt_daemon *d, const char *op,
         bounded && !d->test_no_event_drain_budget
         ? PGWT_EVENT_DRAIN_CALLBACK_BUDGET : 0;
     int rc = pgwt_consume_event_ring(d, bounded);
-    bool yielded = d->event_drain_callback_limit != 0
-                && d->event_drain_callbacks_current
-                   >= d->event_drain_callback_limit
-                && rc < 0;
+    bool yielded = d->exact_perf ? rc == -EAGAIN :
+                   d->event_drain_callback_limit != 0
+                   && d->event_drain_callbacks_current >= d->event_drain_callback_limit
+                   && rc < 0;
     d->event_drain_callback_limit = 0;
     if (yielded && d->debug_dump_state)
         d->debug_event_drain_yields++;

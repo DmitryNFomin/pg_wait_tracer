@@ -545,7 +545,12 @@ static int finish_capture(struct pgwt_merge_capture *c, uint64_t d, const ma_sna
     if (!c) return -EINVAL;
     if (c->finished) return 0;
     ma_envelope check = {.version = 1, .kind = MA_CHECK};
-    int rc = pgwt_capture_envelope(c, &check, d, s);
+    /* The final vector is mandatory even at the last pass's budget edge.
+     * Feed it directly; any retained suffix is unfinished evidence below,
+     * rather than another potentially unbounded drain at shutdown. */
+    ma_snapshot current = s ? *s : (ma_snapshot){0};
+    bool hold;
+    int rc = mapped(c, &check, d, &current, &hold);
     if (rc < 0) return rc;
     if (pgwt_capture_waiting(c)) rc = pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);
     return rc;
@@ -896,10 +901,11 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
     /* Measurements for the box runs, one parseable line each. Not gates. */
     struct pgwt_transport_stats ts = pgwt_transport_stats(d->percpu_transport);
     struct pgwt_capture_stats cs = pgwt_capture_stats(d->merge_capture);
-    if (ts.finish_deadline_reached || ts.unfinished_records)
+    if (ts.finish_deadline_reached || ts.finish_pass_limit_reached || ts.unfinished_records)
         fprintf(stderr, "exact-perf: capture ended at deadline/stop with unfinished evidence; "
-            "finish_deadline_reached=%llu unfinished_records=%llu; VOID, not complete\n",
-            (unsigned long long)ts.finish_deadline_reached, (unsigned long long)ts.unfinished_records);
+            "finish_deadline_reached=%llu finish_pass_limit_reached=%llu unfinished_records=%llu; VOID, not complete\n",
+            (unsigned long long)ts.finish_deadline_reached, (unsigned long long)ts.finish_pass_limit_reached,
+            (unsigned long long)ts.unfinished_records);
 #define U(v) ((unsigned long long)(v))
     fprintf(stderr, "exact-perf: stats rounds_requested=%llu rounds_completed=%llu "
         "rounds_completed_nonempty=%llu holds=%llu cuts=%llu terminal_discards=%llu skipped=%llu "
@@ -910,7 +916,7 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
         "event_us_p50=%llu event_us_p99=%llu event_us_max=%llu "
         "event_max_rank=%u event_max_source=%u event_max_pid=%llu "
         "seal_violation=%llu sequence_gap=%llu unknown_evidence=%llu perf_lost=%llu "
-        "finish_deadline_reached=%llu unfinished_records=%llu status=%u\n",
+        "finish_deadline_reached=%llu finish_pass_limit_reached=%llu unfinished_records=%llu status=%u\n",
         U(ts.rounds_requested), U(ts.rounds_completed), U(ts.rounds_completed_nonempty),
         U(ts.holds), U(ts.cuts), U(ts.terminal_discards), U(ts.skipped), U(ts.uncovered),
         U(ts.records), U(ts.queue_high),
@@ -922,7 +928,7 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
         U(cs.event_max_ns / 1000), cs.event_max_rank, cs.event_max_source, U(cs.event_max_pid),
         U(report.faults[PGWT_MERGE_SEAL_VIOLATION]),
         U(report.faults[PGWT_MERGE_SEQUENCE_GAP]), U(report.faults[PGWT_MERGE_UNKNOWN_EVIDENCE]),
-        U(lost), U(ts.finish_deadline_reached), U(ts.unfinished_records), (unsigned)report.status);
+        U(lost), U(ts.finish_deadline_reached), U(ts.finish_pass_limit_reached), U(ts.unfinished_records), (unsigned)report.status);
     static const char *const names[3] = {"CPU", "E", "L"};
     for (size_t i = 0; i < 3; ++i)
         fprintf(stderr, "exact-perf: reconcile dest=%s attempted=%llu delivered=%llu failures=%llu "

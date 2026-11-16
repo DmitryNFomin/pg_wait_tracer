@@ -252,6 +252,7 @@ def run_deadline_arm(pm, db, directory, uncertified, seconds, terminate):
                     '-T', str(duration + 60), db]
     load = None
     with log.open('w') as error, (trace / 'pgbench.out').open('w') as load_out:
+        launched = time.monotonic()
         proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=error, env=env)
         try:
             wait_for(proc, lambda: (trace / 'pgwt.sock').exists(), 45,
@@ -279,8 +280,13 @@ def run_deadline_arm(pm, db, directory, uncertified, seconds, terminate):
                 proc.wait(timeout=allowance)
             except subprocess.TimeoutExpired:
                 raise AssertionError(f'{label}: capture exit deadline exceeded under unthrottled c16 load') from None
-            elapsed = time.monotonic() - (signal_at if terminate else started)
+            exited = time.monotonic()
+            elapsed = exited - (signal_at if terminate else started)
             assert elapsed <= (15 if terminate else seconds + 15), f'{label}: exit within deadline'
+            # The daemon's duration starts after launch, using whole monotonic
+            # seconds. Its earliest legal deadline is floor(launch) + duration.
+            if not terminate:
+                assert exited >= int(launched) + duration, 'duration: stayed alive for the requested duration'
             assert load.poll() is None, 'unthrottled load continued until the daemon exited'
             assert proc.returncode == 0, log.read_text()
         finally:
@@ -300,11 +306,13 @@ def run_deadline_arm(pm, db, directory, uncertified, seconds, terminate):
     stats, _ = measurements(log.read_text())
     dump = qualification(trace / 'merge-qualification.bin')
     assert stats is not None and dump['end'] is not None, 'deadline arm wrote its final capture status'
-    if stats.get('finish_deadline_reached', 0) or stats.get('unfinished_records', 0):
+    if (stats.get('finish_deadline_reached', 0) or stats.get('finish_pass_limit_reached', 0) or
+            stats.get('unfinished_records', 0)):
         assert stats['status'] != 0 and dump['voids'] and dump['end']['status'] != 0, \
             'unfinished deadline evidence is VOID, never complete'
     print(f'DEADLINE {label}: PASS elapsed={elapsed:.3f}s status={stats["status"]} '
           f'finish_deadline_reached={stats.get("finish_deadline_reached", "old-build")} '
+          f'finish_pass_limit_reached={stats.get("finish_pass_limit_reached", "old-build")} '
           f'unfinished_records={stats.get("unfinished_records", "old-build")}', flush=True)
 
 

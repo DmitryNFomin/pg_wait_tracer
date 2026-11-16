@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Production admission and completion mutants: a build failure is not a kill."""
 import hashlib
+import ast
+import contextlib
+import io
 import os
 import re
 from pathlib import Path
@@ -8,9 +11,96 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 repo = Path(__file__).resolve().parent.parent
+
+def deadline_gate_cases(source):
+    """Run the live arm's real orchestration with a virtual clock/processes.
+    No daemon, PostgreSQL, BPF, wall-clock waits or sleeps are involved."""
+    node = next(n for n in ast.parse(source).body
+                if isinstance(n, ast.FunctionDef) and n.name == 'run_deadline_arm')
+    code = compile(ast.Module(body=[node], type_ignores=[]), '<live deadline arm>', 'exec')
+    for name, terminate, stop_at, expected in [
+        ('early_zero_exit', False, 11.0, 'duration: stayed alive for the requested duration'),
+        ('whole_second_deadline', False, 28.0, None),
+        ('full_duration', False, 29.0, None),
+        ('duration_overrun', False, 45.0, 'duration: capture exit deadline exceeded'),
+        ('sigterm', True, 2.0, None),
+        ('sigterm_overrun', True, 16.0, 'sigterm: capture exit deadline exceeded'),
+    ]:
+        clock = SimpleNamespace(now=10.75)
+        processes = []
+        class Process:
+            def __init__(self, command, **kwargs):
+                self.daemon = not processes
+                self.returncode = None
+                self.signaled = False
+                self.exit_at = stop_at if not terminate else float('inf')
+                processes.append(self)
+            def poll(self):
+                return self.returncode
+            def wait(self, timeout):
+                if self.returncode is None:
+                    if self.daemon and clock.now + timeout < self.exit_at:
+                        clock.now += timeout
+                        raise subprocess.TimeoutExpired('virtual daemon', timeout)
+                    clock.now = max(clock.now, self.exit_at) if self.daemon else clock.now
+                    self.returncode = 0
+                return self.returncode
+            def send_signal(self, sig):
+                self.signaled = True
+                self.exit_at = clock.now + stop_at
+            def terminate(self):
+                self.returncode = 0
+            def kill(self):
+                self.returncode = -9
+        def ready(*args):
+            clock.now = 11.0
+        namespace = dict(os=os, time=SimpleNamespace(monotonic=lambda: clock.now),
+                         subprocess=SimpleNamespace(Popen=Process, DEVNULL=subprocess.DEVNULL,
+                                                    TimeoutExpired=subprocess.TimeoutExpired),
+                         TRACER=repo / 'pg_wait_tracer', wait_for=ready,
+                         signal=SimpleNamespace(SIGTERM=15),
+                         measurements=lambda text: ({'status': 0}, {}),
+                         qualification=lambda path: {'end': {'status': 0}, 'voids': []})
+        exec(code, namespace)
+        error = None
+        with tempfile.TemporaryDirectory(prefix='pgwt-deadline-host-') as temp:
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    namespace['run_deadline_arm'](1, 'virtual', Path(temp), False, 18, terminate)
+            except AssertionError as caught:
+                error = str(caught)
+        if expected is None:
+            assert error is None, (name, error)
+        else:
+            assert error and error.startswith(expected), f'{name}: expected rejection at {expected}; got {error}'
+        assert len(processes) == 2 and all(p.returncode is not None for p in processes), name
+        if terminate:
+            assert processes[0].signaled, name
+    return 'live deadline orchestration: 6/6 virtual process cases PASS (early zero exit rejected)'
+
 mutations = [
+    ('blanket_finish_void', 'rv_uncovered_finish', 'src/percpu_transport.c',
+     [('bool releasing;', 'bool releasing, finishing;'),
+      ('bool done = false;\n    unsigned pass;', 't->finishing = true;\n    bool done = false;\n    unsigned pass;'),
+      ('    if (t->io.received) {',
+       '    if (t->finishing && r.envelope.kind != MA_BOUNDARY) {\n'
+       '        ++t->stats.unfinished_records;\n        return 0;\n    }\n    if (t->io.received) {'),
+      ('    /* Terminal reconciliation, per (CPU,destination), after an empty pass:',
+       '    if (t->stats.unfinished_records && rc >= 0 && !t->suspended)\n'
+       '        rc = fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);\n'
+       '    /* Terminal reconciliation, per (CPU,destination), after an empty pass:')]),
+    ('skip_final_budget_edge_check', 'rv_final_check', 'src/merge_capture.c',
+     [('    ma_snapshot current = s ? *s : (ma_snapshot){0};\n    bool hold;\n'
+       '    int rc = mapped(c, &check, d, &current, &hold);',
+       '    int rc = pgwt_capture_envelope(c, &check, d, s);')]),
+    ('failures_as_unfinished', 'finish_failures', 'src/percpu_transport.c',
+     [('        unread = unread > t->failures[k] ? unread - t->failures[k] : 0;\n', '')]),
+    ('pass_cap_as_deadline', 'shutdown_raw', 'src/percpu_transport.c',
+     [('if (pass_limit) ++t->stats.finish_pass_limit_reached;',
+       'if (pass_limit) ++t->stats.finish_deadline_reached;')]),
     ('service_without_clock', 'service_deadline', 'src/percpu_transport.c',
      [('if (pgwt_transport_pass_expired(t)) return 1; /* retain the suffix */',
        'if (false) return 1; /* retain the suffix */')]),
@@ -97,6 +187,10 @@ mutations = [
      [('return c ? c->retained_count + c->staged : 0;', 'return c ? c->staged : 0;')]),
 ]
 deadline_assertions = {
+    'blanket_finish_void': 'pgwt_capture_report(d.capture).status==PGWT_MERGE_OK',
+    'skip_final_budget_edge_check': 'd.outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE',
+    'failures_as_unfinished': 'stats.unfinished_records==unread',
+    'pass_cap_as_deadline': 'pgwt_transport_stats(d.transport).finish_pass_limit_reached==1',
     'service_without_clock': 'd.now-started<=PGWT_TRANSPORT_PASS_NS',
     'merge_without_clock': 'd.now-started<=PGWT_TRANSPORT_PASS_NS',
     'finish_ignores_deadline': 'd.now-started<=PGWT_TRANSPORT_FINISH_NS',
@@ -137,6 +231,8 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
                             'binary sink:', 'counter cost:', 'indexed lookups ', 'lifetime history:',
                             'perf cadence:', 'poll budget:', 'completion:', 'completion control:',
                             'discards:', 'terminal hole:', 'uncovered:', 'terminal attempts:')):
+            print(line)
+        elif line.startswith(('REACHED rv_', 'RV-', 'finish accounting:', 'finish deadline:')):
             print(line)
     for name, guard, path, edits in mutations:
         original = (work / path).read_text()
@@ -201,6 +297,12 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     start = transport.index('int pgwt_transport_ring_result(')
     end = transport.index('int pgwt_transport_perf(', start)
     ring_result = transport[start:end]
+    start = transport.index('static int linux_consume_io(void *ctx,')
+    end = transport.index('static void linux_close_io(void *ctx)', start)
+    consume = transport[start:end]
+    start = daemon.index('int pgwt_consume_event_ring(')
+    end = daemon.index('/* Consume one lifecycle batch', start)
+    event_drain = daemon[start:end]
     start = capture.index('int pgwt_merge_capture_tick(')
     end = capture.index('uint64_t pgwt_merge_capture_pending_records(', start)
     tick_entry = capture[start:end]
@@ -212,8 +314,10 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     cadence = transport[start:end]
     harness = work / 'tick.c'
     tick_binary = work / 'tick-test'
-    def tick_build(tick_body, observer, drain_body=drain, poll_body=capture_poll):
-        harness.write_text('#include "percpu_tick_harness.h"\n' + tick_body + observer + ring_result + drain_body + tick_entry + cadence + poll_body)
+    def tick_build(tick_body, observer, drain_body=drain, poll_body=capture_poll,
+                   consume_body=consume, event_body=event_drain):
+        harness.write_text('#include "percpu_tick_harness.h"\n' + tick_body + observer + ring_result +
+                           drain_body + consume_body + event_body + tick_entry + cadence + poll_body)
         p = subprocess.run(cc + flags + ['-I' + str(repo / 'tests'), '-I' + str(repo / 'src'),
             str(harness), '-o', str(tick_binary)], capture_output=True, text=True, env=env)
         if p.returncode:
@@ -266,4 +370,37 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
             any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
             raise SystemExit(f'ERROR: {name}: survived or failed elsewhere\n' + p.stdout + p.stderr)
         print(f'{name}: KILLED at tick_duties')
-    print(f'transport + tick/publication/drain/cadence mutants: {len(mutations)+9}/{len(mutations)+9} killed at intended assertions')
+    for name, consume_body, event_body, assertion in [
+        ('expired_consume_sleeps', consume.replace('return dest == PGWT_WIRE_DEST_E ? -EAGAIN : 0;',
+                                                  'return 0;'), event_drain,
+         'consume_event_ring(d,"test",true) && e.records==15'),
+        ('yielded_consume_sleeps', consume.replace('if (dest == PGWT_WIRE_DEST_E && yielded) return -EAGAIN;',
+                                                  'if (dest == PGWT_WIRE_DEST_E && yielded) return rc;'), event_drain,
+         'consume_event_ring(d,"test",true) && e.records==10'),
+        ('daemon_forgets_yield', consume, event_drain.replace('d->exact_perf ? rc == -EAGAIN :',
+                                                            'd->exact_perf ? false :'),
+         'consume_event_ring(d,"test",true) && e.records==15'),
+    ]:
+        if consume_body == consume and event_body == event_drain:
+            raise SystemExit('ERROR: missing yield mutant anchor')
+        tick_build(tick, observe, consume_body=consume_body, event_body=event_body)
+        p = subprocess.run([str(tick_binary)], capture_output=True, text=True, env=env)
+        if (p.returncode != 1 or 'REACHED tick_duties\n' not in p.stdout or
+                f'transport ASSERT tick_duties: {assertion}' not in p.stderr or
+                any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
+            raise SystemExit(f'ERROR: {name}: survived or failed elsewhere\n' + p.stdout + p.stderr)
+        print(f'{name}: KILLED at tick_duties ({assertion})')
+    print(f'transport + tick/publication/drain/cadence/yield mutants: {len(mutations)+12}/{len(mutations)+12} killed at intended assertions')
+
+live_source = (repo / 'tests/test_transport_daemon_live.py').read_text()
+print(deadline_gate_cases(live_source))
+anchor = "assert exited >= int(launched) + duration, 'duration: stayed alive for the requested duration'"
+assert live_source.count(anchor) == 1, 'live lower bound mutant anchor'
+try:
+    deadline_gate_cases(live_source.replace(anchor, "assert True, 'duration: stayed alive for the requested duration'"))
+except AssertionError as error:
+    assert str(error).startswith('early_zero_exit: expected rejection at duration: stayed alive'), str(error)
+    print('natural_exit_without_lower_bound: KILLED at early_zero_exit')
+else:
+    raise SystemExit('ERROR: natural exit without lower bound survived')
+print(f'transport host mutants total: {len(mutations)+13}/{len(mutations)+13} killed at intended assertions')
