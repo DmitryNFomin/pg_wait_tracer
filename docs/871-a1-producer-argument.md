@@ -966,8 +966,9 @@ the reader.
   This is a measured limit of the experimental mode, tracked by issue #932.
   In this **EL8 rate sweep**, the transport completed every round it requested
   (342/342 at 12,000 tps; 7/7 unthrottled). That is not a claim about Ubuntu,
-  other runs, or bounded service: EL8 shutdown overran by 50–97 s before the
-  issue #931 service budgets. The registered deadline arm now checks natural
+  other runs, or bounded service: before the issue #931 service budgets the EL8
+  daemon ran 50 s (PG18) and 97 s (PG13) against `--duration 18`, an overrun of
+  32–79 s. The registered deadline arm now checks natural
   exit within duration + 15 s and SIGTERM to exit within 15 s under load;
   the historical overruns are not measurements of those budgets.
 - **Short-lived backends (issue #933).** A backend whose INIT is lost VOIDs
