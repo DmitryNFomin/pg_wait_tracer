@@ -152,10 +152,16 @@ def pg13_statement_and_clock_cases():
     assert "statement_timestamp()" in live.CHURN_SQL and "pg_sleep(0.05)" in live.CHURN_SQL
     assert "backend_start" not in live.CHURN_SQL and ";" not in live.CHURN_SQL
     with mock.patch.object(live.time, "clock_gettime_ns", side_effect=[10, 1000, 12]) as clock:
-        assert live.clock_probe() == {"mono_before_ns": 10, "wall_ns": 1000, "mono_after_ns": 12}
+        assert live.clock_probe(1) == {"mono_before_ns": 10, "wall_ns": 1000, "mono_after_ns": 12}
         assert clock.call_args_list == [mock.call(live.time.CLOCK_MONOTONIC),
                                        mock.call(live.time.CLOCK_REALTIME),
                                        mock.call(live.time.CLOCK_MONOTONIC)]
+    # A fixed number of brackets; the narrowest valid one is kept (a
+    # preempted 51 us bracket must not widen the run's offset envelope).
+    reads = [10, 1000, 60, 70, 1062, 73, 80, 1071, 84, 90, 1081, 95, 100, 1090, 140]
+    with mock.patch.object(live.time, "clock_gettime_ns", side_effect=reads) as clock:
+        assert live.clock_probe() == {"mono_before_ns": 70, "wall_ns": 1062, "mono_after_ns": 73}
+        assert clock.call_count == 3 * live.PG13_CLOCK_READS == 15
     print("pg13_one_statement_identity_sleep_and_independent_clock_bracket: PASS")
 
 

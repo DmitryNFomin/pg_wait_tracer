@@ -112,12 +112,27 @@ def churn_statement(connections, handle):
     return {"pid": pid, "statement_start_ns": start, "backend_id": slot}
 
 
-def clock_probe():
-    """Same host/kernel clocks as PG's gettimeofday and perf --clockid mono."""
-    before = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-    wall = time.clock_gettime_ns(time.CLOCK_REALTIME)
-    after = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-    return {"mono_before_ns": before, "wall_ns": wall, "mono_after_ns": after}
+PG13_CLOCK_READS = 5
+
+
+def clock_probe(reads=PG13_CLOCK_READS):
+    """Same host/kernel clocks as PG's gettimeofday and perf --clockid mono.
+
+    Take a FIXED number of back-to-back brackets and keep the narrowest.
+    Every bracket is an independently valid bound on realtime-minus-monotonic;
+    a bracket widened by preemption between the reads (51 us observed on
+    Ubuntu 6.8, 2 us typical) is valid but needlessly loose and inflated the
+    whole-run offset envelope 20x. Choosing among valid bounds never uses
+    samples, ticks or outcomes, and the envelope/ambiguity rule is unchanged.
+    """
+    best = None
+    for _ in range(reads):
+        before = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        wall = time.clock_gettime_ns(time.CLOCK_REALTIME)
+        after = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        if best is None or after - before < best["mono_after_ns"] - best["mono_before_ns"]:
+            best = {"mono_before_ns": before, "wall_ns": wall, "mono_after_ns": after}
+    return best
 
 
 def build_sample_reader(directory):
