@@ -415,6 +415,7 @@ struct pgwt_daemon {
      * left every trace root-only on a host without that group. */
     const char *trace_group;
     struct pgwt_event_writer *event_writer;     /* NULL if disabled */
+    struct pgwt_evidence_capture *evidence_capture; /* NULL unless pilot opted in */
     struct pgwt_summary_writer *summary_writer; /* NULL if disabled */
     struct pgwt_query_text_capture *query_text_capture; /* NULL if disabled */
     struct pgwt_pgss_resolver *pgss_resolver;            /* PG14+ async text */

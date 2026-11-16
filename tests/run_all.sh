@@ -610,6 +610,7 @@ EOF
 # Fifth field (optional): whitespace-separated extra arguments, split into
 # a bash array without eval; shell quoting/expansion inside it is unsupported.
 LIVE_TESTS=(
+    "test_evidence_capture_live|python3|test_evidence_capture_live.py"
     "test_lifecycle|bash|test_lifecycle.sh"
     "test_init_hint_recovery|python3|test_init_hint_recovery.py"
     "test_counter_vector_live|python3|test_counter_vector_live.py"

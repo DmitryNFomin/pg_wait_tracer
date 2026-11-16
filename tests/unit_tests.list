@@ -1066,6 +1066,9 @@ test_phase_capability
 test_phase_probe
 
 # Core wait_time v1: independent contract answers, no server dependency.
+test_evidence_capture
+test_evidence_capture_kinds.sh
+test_evidence_capture_portable.py
 test_core_wait_time_contract
 test_core_wait_time_differential.py
 
