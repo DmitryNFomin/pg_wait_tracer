@@ -18,6 +18,13 @@ from test_evidence_codec_redelivery import build as build_redelivery
 from evidence_codec_redelivery_mutations import MUTATIONS as REDELIVERY_MUTATIONS
 
 
+# Equivalent survivors from the clause 13/18 review are not counted as kills:
+# - Removing check_link's boot equality is redundant: its candidates already
+#   come exclusively from the successor's own (boot, capture, file_no-1) group.
+# - Removing the admission contiguity check cannot admit records across a gap:
+#   the first present successor after that gap has no immediate predecessor,
+#   so its PU cutoff already excludes that file and every later file.
+
 # (name, original text, replacement, independently asserted witness)
 MUTANTS = [
     ("C01_crc_polynomial", "UINT32_C(0xedb88320)", "UINT32_C(0xedb88321)", "crc_known_answers"),

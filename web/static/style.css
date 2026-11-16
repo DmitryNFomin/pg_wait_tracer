@@ -1058,3 +1058,26 @@ details.backend-activity-panel > summary { cursor: pointer; color: #bbb; }
 .backend-activity-spans { max-height: 320px; overflow: auto; }
 .backend-activity-spans details { padding: 8px 0; border-top: 1px solid #444; }
 .backend-activity-spans summary { cursor: pointer; }
+
+/* Opt-in evidence-v1 panel; absent from the default Events layout. */
+.events-pilot { margin: 12px 20px; padding: 16px; border: 1px solid #6574ad; border-radius: 6px; background: #1e1e3a; }
+.events-pilot h2 { margin: 0 0 8px; font-size: 16px; }
+.events-pilot form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 12px 0; }
+.events-pilot label { display: grid; gap: 4px; font-size: 12px; }
+.events-pilot input { width: 190px; padding: 6px; color: #eee; background: #151528; border: 1px solid #6574ad; border-radius: 3px; font: inherit; }
+.events-pilot button { padding: 7px 12px; cursor: pointer; }
+.events-pilot .pilot-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin: 16px 0; }
+.events-pilot .pilot-metric { min-width: 0; }
+.events-pilot h3 { margin: 0 0 6px; font-size: 16px; }
+.events-pilot output { font-family: monospace; font-size: 16px; }
+.events-pilot .pilot-status { color: #b9c0d3; font-size: 12px; }
+.events-pilot .pilot-reasons p { margin: 8px 0 12px; color: #ffd08a; }
+.events-pilot [data-reason-token] { color: #b9c0d3; font-size: 12px; overflow-wrap: anywhere; }
+.events-pilot .pilot-diagnostics { color: #b9c0d3; font-size: 12px; }
+.events-pilot .pilot-incomplete { margin-top: 16px; padding: 12px; border: 1px solid #454562; border-radius: 4px; background: #19192e; }
+.events-pilot h4 { margin: 0 0 8px; font-size: 12px; font-weight: 500; }
+.events-pilot dl { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 4px 12px; margin: 0; }
+.events-pilot dd { margin: 0; font-family: monospace; text-align: right; overflow-wrap: anywhere; }
+.events-pilot .pilot-diagnostic-hint { color: #b9c0d3; font-size: 12px; }
+.events-pilot pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .events-pilot .pilot-metrics { grid-template-columns: minmax(0, 1fr); } }
