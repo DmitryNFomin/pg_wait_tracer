@@ -3,6 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef PGWT_MERGE_TEST_WORK
+#include "core_merge_work.h"
+#define MERGE_WORK(kind, count) pgwt_merge_test_work(PGWT_WORK_##kind, (count))
+#else
+#define MERGE_WORK(kind, count) ((void)0)
+#endif
+
 struct source_state {
     pgwt_merge_source proof;
     bool has_position, has_data;
@@ -14,6 +21,7 @@ struct generation_state {
     bool fork_seed_admitted, first_released;
     unsigned creation;             /* 1: FORK awaiting INIT, 2: creation admitted */
     pgwt_merge_record exit_record;
+    size_t next_pid;                /* one-based link in the PID hash bucket */
 };
 struct frontier_state {
     uint64_t epoch, frontier;
@@ -31,6 +39,8 @@ struct pgwt_merge {
     struct staged *queue;
     unsigned char *payload_storage;
     struct generation_state *attachments, *prospective;
+    size_t *generation_index, *pid_heads, *touched, *planned;
+    size_t index_capacity, touched_count;
     struct frontier_state *frontiers;
     uint64_t *dependencies;
     size_t count, attachment_count;
@@ -40,6 +50,74 @@ struct pgwt_merge {
     bool has_last;
     pgwt_merge_record last;
 };
+
+/* Keep accounting tied to the size of the copy, including test mutants that
+ * replace a touched-slot copy with a retained-table copy. */
+static void copy_generations(struct generation_state *to,
+                              const struct generation_state *from, size_t count)
+{
+    MERGE_WORK(COPY, count);
+    memcpy(to, from, count * sizeof(*to));
+}
+
+static uint64_t mix(uint64_t x)
+{
+    x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return x ^ (x >> 31);
+}
+
+/* At most half full, no deletions: generations and their index entries live
+ * for the whole capture, including across failed releases and REARM. */
+static size_t generation_bucket(const pgwt_merge *m, const pgwt_merge_record *r)
+{
+    MERGE_WORK(LOOKUP, 0);
+    MERGE_WORK(INDEX, 1);
+    size_t slot = (size_t)mix(mix(r->pid) ^ r->g) & (m->index_capacity - 1);
+    while (m->generation_index[slot]) {
+        MERGE_WORK(STATE, 1);
+        const pgwt_merge_attachment *a =
+            &m->attachments[m->generation_index[slot] - 1].proof;
+        if (a->pid == r->pid && a->g == r->g) break;
+        slot = (slot + 1) & (m->index_capacity - 1);
+        MERGE_WORK(INDEX, 1);
+    }
+    return slot;
+}
+
+static struct generation_state *attachment(pgwt_merge *m, const pgwt_merge_record *r)
+{
+    size_t entry = m->generation_index[generation_bucket(m, r)];
+    MERGE_WORK(STATE, entry ? 1 : 0);
+    return entry ? &m->attachments[entry - 1] : NULL;
+}
+
+/* touched[plan slot] names the retained slot; planned[retained slot] is the
+ * one-based reverse map. Only eligible DATA touches prospective state. A held
+ * or failed batch starts from published state again on its next evaluation. */
+static void reset_plan(pgwt_merge *m)
+{
+    for (size_t i = 0; i < m->touched_count; ++i) {
+        MERGE_WORK(STATE, 1);
+        m->planned[m->touched[i]] = 0;
+    }
+    m->touched_count = 0;
+}
+
+static struct generation_state *plan_generation(pgwt_merge *m,
+                                                const pgwt_merge_record *r)
+{
+    struct generation_state *a = attachment(m, r);
+    if (!a) return NULL;
+    size_t slot = (size_t)(a - m->attachments);
+    MERGE_WORK(STATE, 1);
+    if (!m->planned[slot]) {
+        copy_generations(&m->prospective[m->touched_count], a, 1);
+        m->touched[m->touched_count++] = slot;
+        m->planned[slot] = m->touched_count;
+    }
+    return &m->prospective[m->planned[slot] - 1];
+}
 
 const char *pgwt_merge_reason_name(pgwt_merge_reason r)
 {
@@ -88,10 +166,8 @@ static pgwt_merge_status fault(pgwt_merge *m, pgwt_merge_reason reason,
     for (size_t i = 0; i < m->count; ++i) {
         const struct staged *v = &m->queue[i];
         if (v->text || v->record.rank == PGWT_MERGE_TRANS) continue;
-        for (size_t j = 0; j < m->attachment_count; ++j)
-            if (m->attachments[j].proof.pid == v->record.pid &&
-                m->attachments[j].proof.g == v->record.g)
-                m->attachments[j].lifecycle_seen = true;
+        struct generation_state *a = attachment(m, &v->record);
+        if (a) a->lifecycle_seen = true;
     }
     m->count = 0;
     m->report.status = breach ? PGWT_MERGE_EXIT_REQUIRED : PGWT_MERGE_SUSPENDED;
@@ -120,22 +196,20 @@ static pgwt_merge_status late_fault(pgwt_merge *m, pgwt_merge_reason reason,
     return fault(m, reason, in->observation);
 }
 
-static struct generation_state *attachment(struct generation_state *a, size_t n,
-                                            const pgwt_merge_record *r)
-{
-    for (size_t i = 0; i < n; ++i)
-        if (a[i].proof.pid == r->pid && a[i].proof.g == r->g) return &a[i];
-    return NULL;
-}
-
 static struct generation_state *remember_generation(pgwt_merge *m,
                                                      const pgwt_merge_record *r)
 {
-    struct generation_state *a = attachment(m->attachments, m->attachment_count, r);
-    if (a) return a;
+    size_t bucket = generation_bucket(m, r);
+    size_t entry = m->generation_index[bucket];
+    MERGE_WORK(STATE, 1);
+    if (entry) return &m->attachments[entry - 1];
     if (m->attachment_count == m->config.attachment_capacity) return NULL;
-    a = &m->attachments[m->attachment_count++];
-    *a = (struct generation_state){.proof = {.pid = r->pid, .g = r->g}};
+    struct generation_state *a = &m->attachments[m->attachment_count++];
+    size_t pid_bucket = (size_t)mix(r->pid) & (m->index_capacity - 1);
+    *a = (struct generation_state){.proof = {.pid = r->pid, .g = r->g},
+        .next_pid = m->pid_heads[pid_bucket]};
+    m->pid_heads[pid_bucket] = m->attachment_count;
+    m->generation_index[bucket] = m->attachment_count;
     return a;
 }
 
@@ -188,6 +262,7 @@ static bool proofs_valid(const pgwt_merge_attachment *a, size_t n)
  * prospective until successful publication; first arrival never sets next_q. */
 static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
 {
+    reset_plan(m);
     if (m->report.status != PGWT_MERGE_OK) return m->report.status;
     uint64_t W = UINT64_MAX;
     for (size_t s = 0; s < m->config.source_count; ++s)
@@ -211,14 +286,12 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
     size_t eligible = 0;
     while (eligible < m->count && (m->queue[eligible].text ||
            m->queue[eligible].record.t < W)) ++eligible; /* contract §3 strict t<W */
-    memcpy(m->prospective, m->attachments,
-           m->attachment_count * sizeof(*m->attachments));
     bool held = false;
     for (size_t i = 0; i < eligible; ++i) {
         const struct staged *v = &m->queue[i];
         if (v->text) continue;
         const pgwt_merge_record *r = &v->record;
-        struct generation_state *generation = attachment(m->prospective, m->attachment_count, r);
+        struct generation_state *generation = plan_generation(m, r);
         if (!r->identity_known || !generation)
             return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
         pgwt_merge_attachment *a = &generation->proof;
@@ -228,8 +301,15 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
             if (r->rank != PGWT_MERGE_FORK || generation->lifecycle_seen ||
                 generation->sequence_seen)
                 return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
-            for (size_t j = 0; j < m->attachment_count; ++j) {
-                const struct generation_state *other = &m->prospective[j];
+            /* Only this PID can conflict. Unrelated retained lifetimes must
+             * not make ordinary creation scan the generation table. */
+            size_t pid_bucket = (size_t)mix(r->pid) & (m->index_capacity - 1);
+            for (size_t entry = m->pid_heads[pid_bucket]; entry;
+                 entry = m->attachments[entry - 1].next_pid) {
+                MERGE_WORK(STATE, 1);
+                size_t j = entry - 1;
+                const struct generation_state *other = m->planned[j] ?
+                    &m->prospective[m->planned[j] - 1] : &m->attachments[j];
                 if (other == generation || other->proof.pid != r->pid) continue;
                 /* A registry slot reserved by a later queued generation is
                  * not lifecycle/sequence evidence preceding this FORK. */
@@ -302,9 +382,10 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         pgwt_merge_output out = {.kind = v->text ? PGWT_MERGE_OUT_TEXT : PGWT_MERGE_OUT_DATA,
             .record = v->record, .epoch = m->report.epoch};
         struct generation_state *published = v->text ? NULL :
-            attachment(m->attachments, m->attachment_count, &v->record);
+            attachment(m, &v->record);
         struct generation_state *planned = v->text ? NULL :
-            attachment(m->prospective, m->attachment_count, &v->record);
+            &m->prospective[m->planned[published - m->attachments] - 1];
+        MERGE_WORK(STATE, v->text ? 0 : 1);
         bool transition = !v->text && v->record.rank == PGWT_MERGE_TRANS;
         if (transition)
             out.prior_interval_certified = !planned->fork_seed_admitted || published->first_released;
@@ -324,8 +405,11 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
             return fault(m, counter_fault(obs.counters, m->observed), obs);
         if (!v->text) { m->last = v->record; m->has_last = true; }
     }
-    memcpy(m->attachments, m->prospective,
-           m->attachment_count * sizeof(*m->attachments));
+    for (size_t i = 0; i < m->touched_count; ++i) {
+        size_t slot = m->touched[i];
+        MERGE_WORK(STATE, 1);
+        copy_generations(&m->attachments[slot], &m->prospective[i], 1);
+    }
     /* Recycle slots by rotation; payload ownership stays unique. */
     for (size_t i = 0; i < eligible; ++i) {
         struct staged done = m->queue[0];
@@ -421,7 +505,7 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
         if (m->count == m->config.staged_capacity ||
             r->payload_size > m->config.payload_capacity) {
             if (in->kind == PGWT_MERGE_DATA && r->rank != PGWT_MERGE_TRANS)
-                attachment(m->attachments, m->attachment_count, r)->lifecycle_seen = true;
+                attachment(m, r)->lifecycle_seen = true;
             return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
         }
         if (in->kind == PGWT_MERGE_TEXT && r->dependency_id &&
@@ -494,7 +578,7 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
         size_t needed = 0;
         for (size_t i = 0; i < in->attachment_count; ++i) {
             pgwt_merge_record r = {.pid = in->attachments[i].pid, .g = in->attachments[i].g};
-            if (!attachment(m->attachments, m->attachment_count, &r)) ++needed;
+            if (!attachment(m, &r)) ++needed;
         }
         if (needed > m->config.attachment_capacity - m->attachment_count)
             return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
@@ -565,17 +649,33 @@ pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *sta
         for (size_t i = 0; i < c->attachment_count; ++i)
             if (!c->attachments[i].sequence_proved || !c->attachments[i].next_q)
                 return create_fault(c, status, PGWT_MERGE_UNKNOWN_EVIDENCE);
+    size_t index_capacity = 1;
+    while (index_capacity / 2 < c->attachment_capacity) {
+        if (index_capacity > SIZE_MAX / 2)
+            return create_fault(c, status, PGWT_MERGE_MALFORMED_ENVELOPE);
+        index_capacity *= 2;
+    }
+    if (index_capacity > SIZE_MAX / sizeof(size_t))
+        return create_fault(c, status, PGWT_MERGE_MALFORMED_ENVELOPE);
     pgwt_merge *m = calloc(1, sizeof(*m));
     if (m) {
         m->config = *c;
+        m->index_capacity = index_capacity;
         if (!m->config.frontier_capacity) m->config.frontier_capacity = c->staged_capacity;
         if (!m->config.dependency_capacity) m->config.dependency_capacity = c->staged_capacity;
         m->sources = calloc(c->source_count, sizeof(*m->sources));
         m->queue = calloc(c->staged_capacity, sizeof(*m->queue));
         m->attachments = calloc(c->attachment_capacity ? c->attachment_capacity : 1,
                                 sizeof(*m->attachments));
-        m->prospective = calloc(c->attachment_capacity ? c->attachment_capacity : 1,
-                                sizeof(*m->prospective));
+        size_t plan_capacity = c->attachment_capacity < c->staged_capacity ?
+            c->attachment_capacity : c->staged_capacity;
+        m->prospective = calloc(plan_capacity ? plan_capacity : 1, sizeof(*m->prospective));
+        m->generation_index = calloc(index_capacity, sizeof(*m->generation_index));
+        m->pid_heads = calloc(index_capacity, sizeof(*m->pid_heads));
+        m->planned = calloc(c->attachment_capacity ? c->attachment_capacity : 1,
+                            sizeof(*m->planned));
+        /* Distinct touched generations cannot exceed the eligible DATA count. */
+        m->touched = calloc(plan_capacity ? plan_capacity : 1, sizeof(*m->touched));
         m->frontiers = calloc(m->config.frontier_capacity, sizeof(*m->frontiers));
         m->dependencies = calloc(m->config.dependency_capacity, sizeof(*m->dependencies));
         if (m->queue) {
@@ -588,6 +688,7 @@ pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *sta
         }
     }
     if (!m || !m->sources || !m->queue || !m->attachments || !m->prospective ||
+        !m->generation_index || !m->pid_heads || !m->planned || !m->touched ||
         !m->frontiers || !m->dependencies ||
         !m->queue[0].bytes) {
         pgwt_merge_destroy(m);
@@ -607,10 +708,11 @@ pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *sta
         m->sources[s].accepted_boundary = c->sources[s].cutoff;
         if (!c->sources[s].qualified) m->report.qualified = false;
     }
-    m->attachment_count = c->attachment_count;
     for (size_t i = 0; i < c->attachment_count; ++i) {
-        m->attachments[i].proof = c->attachments[i];
-        m->attachments[i].sequence_seen = true;
+        pgwt_merge_record r = {.pid = c->attachments[i].pid, .g = c->attachments[i].g};
+        struct generation_state *a = remember_generation(m, &r);
+        a->proof = c->attachments[i];
+        a->sequence_seen = true;
     }
     m->baseline = c->observation.counters;
     m->observed = c->last_observed;
@@ -627,6 +729,10 @@ void pgwt_merge_destroy(pgwt_merge *m)
     free(m->sources);
     free(m->attachments);
     free(m->prospective);
+    free(m->generation_index);
+    free(m->pid_heads);
+    free(m->planned);
+    free(m->touched);
     free(m->frontiers);
     free(m->dependencies);
     free(m);

@@ -32,8 +32,8 @@ static int full_stop(struct pgwt_daemon *d)
 
 static int full_poll(struct pgwt_daemon *d)
 {
-    if (d->event_rb)
-        ring_buffer__consume(d->event_rb);
+    if (d->event_rb || d->exact_perf)
+        pgwt_consume_event_ring(d, false);
     return 0;
 }
 
