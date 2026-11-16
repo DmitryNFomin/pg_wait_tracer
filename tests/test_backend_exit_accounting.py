@@ -39,6 +39,7 @@ static struct pgwt_pid_state state;
 static int have_state, read_error, reads, deletes, closes, forgets, qexits, target_live;
 static int bootstrap_error, attach_error, exit_proof, scan_cursor, counter_phase;
 static uint64_t resolved_ptr;
+static int sampler_enrolls;
 static char retirement_line[1024];
 #define CHECK(x, msg) do { if (!(x)) { fprintf(stderr, "FAIL %s\n", msg); exit(1); } } while (0)
 uint64_t pgwt_debug_monotonic_ns(void) { return 300; }
@@ -101,6 +102,28 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *ctx, pid_t pid, uint64_t gen, bo
 { (void)ctx; (void)pid; (void)gen; (void)coherent; return 0; }
 bool pgwt_pgbs_exclusion_contains(const struct pgwt_pgbs_exclusion_set *set, pid_t pid)
 { (void)set; (void)pid; return false; }
+/* Enroll the fixture's live incarnation (start time 1) successfully. The real
+ * enrollment and FORK/EXIT bodies still decide when to enroll/reset; these
+ * /proc substitutes cannot change attach accounting or retire an entry. */
+int pgwt_pgbs_reader_enroll(struct pgwt_pgbs_reader *reader, pid_t pid)
+{
+    ++sampler_enrolls;
+    reader->pid = pid;
+    reader->start_time = 1;
+    return 0;
+}
+/* Return true only for PID 42's current fixture incarnation; the real FORK
+ * chooses refusal versus retirement, so this cannot bypass either branch. */
+bool pgwt_pgbs_pid_is_original(pid_t pid, uint64_t start_time)
+{ return pid == 42 && start_time == 1; }
+/* Release fixture reader storage and clear identity exactly at reset calls;
+ * no liveness decision or failure counter is supplied by this void stub. */
+void pgwt_pgbs_reader_reset(struct pgwt_pgbs_reader *reader)
+{
+    free(reader->target_maps);
+    free(reader->reader_maps);
+    memset(reader, 0, sizeof(*reader));
+}
 uint64_t pgwt_resolve_backend_wait_addr(struct pgwt_daemon *ctx, pid_t pid)
 { (void)ctx; (void)pid; errno = EACCES; return resolved_ptr; }
 int pgwt_addr_is_shared(pid_t pid, uint64_t ptr)
@@ -163,7 +186,7 @@ static void reset(int registered)
     d.skel = &skel; d.mode = PGWT_MODE_FULL; d.verbose = true; d.postmaster_pid = 7;
     d.summary_writer = (void *)1;
     d.init_last_sweep_start_ns = 200;
-    counter_phase = 0;
+    counter_phase = sampler_enrolls = 0;
     if (registered) {
         target_live = 1; bootstrap_error = 0; resolved_ptr = 0x1234;
         CHECK(pgwt_handle_fork(&d, 42) == 0, "build armed registry through FORK");
@@ -337,6 +360,55 @@ int main(void)
     retire();
     CHECK(d.counters.lifecycle_exit_before_attach_total == 0, "sampled capture needs no watchpoint");
     puts("retirement counts, duplicate cleanup, evidence, read errors and sampled controls: PASS");
+
+    /* Exercise all merged existing-entry branches through the real FORK.
+     * An exit-race entry can ALSO have a stale sampled identity: refusal wins. */
+    reset(1); target_live = 1;
+    struct pgwt_backend *be = pgwt_find_backend(&d.backends, 42);
+    be->wp_attach_exit_race = true;
+    be->sampled_reader.start_time = 2;
+    CHECK(pgwt_handle_fork(&d, 42) == -1 && be->wp_attach_failed &&
+          d.counters.wp_attach_failures_total == 1 &&
+          d.counters.wp_attach_exit_race_total == 0 && sampler_enrolls == 1 &&
+          deletes == 0 && be->sampled_reader.start_time == 2,
+          "existing exit race refuses and counts before stale identity retirement");
+    puts("merged FORK: exit race plus stale identity refused and counted: PASS");
+
+    reset(1); target_live = 1; d.mode = PGWT_MODE_SAMPLED;
+    be = pgwt_find_backend(&d.backends, 42);
+    be->sampled_reader.start_time = 2;
+    be->pgbs_addr = 0x5678;
+    CHECK(pgwt_handle_fork(&d, 42) == 0 && sampler_enrolls == 2 && deletes == 1 &&
+          d.backends.count == 1 && pgwt_find_backend(&d.backends, 42) == be &&
+          be->is_alive && be->sampled_reader.pid == 42 &&
+          be->sampled_reader.start_time == 1 && be->pgbs_addr == 0 &&
+          be->bootstrap_fd == -1 && be->wp_fd == -1 &&
+          d.counters.wp_attach_failures_total == 0 &&
+          d.counters.lifecycle_exit_before_attach_total == 0,
+          "existing stale incarnation retired and fresh slot re-enrolled");
+    puts("merged FORK: stale incarnation retired and re-enrolled: PASS");
+
+    for (int exact = 0; exact < 2; ++exact) {
+        reset(1); target_live = 1;
+        d.mode = exact ? PGWT_MODE_FULL : PGWT_MODE_TIERED;
+        d.escalation.active = !exact;
+        be = pgwt_find_backend(&d.backends, 42);
+        be->sampled_reader.start_time = 2;
+        be->pgbs_addr = 0x5678;
+        CHECK(pgwt_handle_fork(&d, 42) == 0 && sampler_enrolls == 2 && deletes == 0 &&
+              be->sampled_reader.start_time == 1 && be->sampled_cache_stale &&
+              be->pgbs_addr == 0 && be->bootstrap_armed &&
+              d.counters.wp_attach_failures_total == 0,
+              "existing stale exact tier preserves entry and re-enrolls sampled proof");
+    }
+
+    reset(1); target_live = 1;
+    struct pgwt_counters before = d.counters;
+    CHECK(pgwt_handle_fork(&d, 42) == 0 && sampler_enrolls == 1 && deletes == 0 &&
+          d.backends.count == 1 &&
+          memcmp(&before, &d.counters, sizeof(before)) == 0,
+          "existing plain duplicate returns zero and counts nothing");
+    puts("merged FORK: plain duplicate returns zero and counts nothing: PASS");
     return 0;
 }
 '''
@@ -515,7 +587,7 @@ def main():
     registry = backend[backend.index("struct pgwt_backend *pgwt_find_backend("):
                        backend.index("\nstatic uint64_t now_ns(")]
     functions = registry + "\n\n" + "\n\n".join(function(backend, name) for name in (
-        "enrollment_failure_counted", "enrollment_was_refused", "remember_enrollment_refusal",
+        "pgwt_sampler_enroll_backend", "enrollment_failure_counted", "enrollment_was_refused", "remember_enrollment_refusal",
         "forget_enrollment_refusal", "record_watchpoint_failure", "pgwt_attach_backend_watchpoint",
         "lifecycle_target", "read_init_state", "pgwt_handle_fork", "pgwt_handle_init",
         "pgwt_scan_existing_backends", "record_init_loss", "pgwt_handle_exit", "pgwt_handle_exit_at"))

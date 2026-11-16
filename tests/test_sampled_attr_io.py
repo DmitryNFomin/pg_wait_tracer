@@ -69,7 +69,7 @@ def perf_gate_cases():
 
 def function(source, name):
     """Compile the production lifecycle/policy functions unchanged, as in the INIT harness."""
-    match = re.search(r"^(?:static )?(?:int|void|uint64_t|struct pgwt_backend \*)\s*" + name +
+    match = re.search(r"^(?:static )?(?:int|void|bool|uint64_t|struct pgwt_backend \*)\s*" + name +
                       r"\([^;]*?\)\n\{.*?^\}", source, re.M | re.S)
     assert match, f"missing production function {name}"
     return match[0]
@@ -455,9 +455,11 @@ def registry_sources():
     # Keep the merged attach failure classification in the compiled lifecycle,
     # including its real retained-fd liveness parser; only libc I/O is injected.
     cmdline = (ROOT / "src/cmdline.c").read_text()
-    lifecycle = function(cmdline, "pgwt_backend_target_live_fd") + "\n" + "\n".join(
+    lifecycle = "\n".join(function(cmdline, name) for name in (
+        "pgwt_backend_target_live_fd", "pgwt_backend_no_command_fd")) + "\n" + "\n".join(
         function(backend, name) for name in (
             "open_watchpoint_target", "record_watchpoint_failure", "alloc_backend",
+            "enrollment_failure_counted", "enrollment_was_refused", "remember_enrollment_refusal",
             "pgwt_sampler_enroll_backend", "pgwt_scan_existing_backends",
             "pgwt_handle_fork", "pgwt_handle_init"))
     discovery = (ROOT / "src/discovery.c").read_text()

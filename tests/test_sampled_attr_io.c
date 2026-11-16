@@ -664,6 +664,7 @@ static void test_pg13_guards(void)
  * /proc and VM reads still use the same injection layer above. */
 #include "daemon.h"
 #include "backend_init.h"
+#include "capture_counters.h"
 #include "idle_rule.h"
 #include "discovery.h"
 static struct pgwt_sample_target recorded_samples[MAX_BACKENDS];
@@ -678,6 +679,11 @@ void pgwt_debug_block_report(const char *op, pid_t pid, uint64_t ts)
 { (void)op; (void)pid; (void)ts; }
 static int lifecycle_target(struct pgwt_daemon *d, pid_t pid)
 { (void)d; return pid == 1000 ? 1 : -1; }
+/* Return a valid zero failure-counter snapshot: this fixture injects successful
+ * hardware attachment only. The real FORK still snapshots both counters;
+ * sampled identity/row checks and enrollment refusals do not use these values. */
+struct pgwt_counter_value pgwt_read_bpf_fail_counter(struct pgwt_daemon *d, uint32_t slot)
+{ (void)d; (void)slot; return (struct pgwt_counter_value){0, true}; }
 static int bpf_program__fd(void *p) { (void)p; return 7; }
 static int bpf_map__fd(void *p) { (void)p; return 7; }
 #define BPF_NOEXIST 1

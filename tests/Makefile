@@ -19,12 +19,8 @@ LIBBPF_INC ?=
 LIBBPF_LIB ?= -lbpf
 
 TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
-<<<<<<< HEAD
-            test_trace_v2 test_sampler test_sampler_dispatch test_sample_weight bench_sample_weight test_anomaly test_escalation_budget \
-=======
             test_evidence_capture \
-            test_trace_v2 test_sampler test_sample_weight bench_sample_weight test_anomaly test_escalation_budget \
->>>>>>> origin/master
+            test_trace_v2 test_sampler test_sampler_dispatch test_sample_weight bench_sample_weight test_anomaly test_escalation_budget \
             test_wp_attr \
             test_trace_perms \
             test_exact_probe \

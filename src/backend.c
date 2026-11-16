@@ -998,11 +998,20 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     int live = lifecycle_target(d, child_pid);
     if (live <= 0) return live < 0 ? -1 : 0;
 
-<<<<<<< HEAD
-    /* A lost EXIT must not make a replacement PID inherit a stale row.
-     * Identity checks happen on lifecycle delivery, never per steady tick. */
+    /* A startup exit-race entry may outlive its PID (no seeded state means
+     * no EXIT). A live FORK for that PID must never disappear as a duplicate.
+     * We cannot distinguish reuse from a queued duplicate of the dying task
+     * here. Count the refusal conservatively; do not retry a proven exit. */
     struct pgwt_backend *existing = pgwt_find_backend(&d->backends, child_pid);
     if (existing) {
+        if (existing->wp_attach_exit_race) {
+            d->counters.wp_attach_failures_total++;
+            existing->wp_attach_failed = true;
+            fprintf(stderr, "ERROR: live FORK PID %d conflicts with retained attach exit race; enrollment refused and counted\n", child_pid);
+            return -1;
+        }
+        /* A lost EXIT must not make a replacement PID inherit a stale row.
+         * Identity checks happen on lifecycle delivery, never per steady tick. */
         if (existing->sampled_reader.pid != 0 &&
             !pgwt_pgbs_pid_is_original(child_pid,
                                        existing->sampled_reader.start_time)) {
@@ -1023,21 +1032,6 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
         }
         else
             return 0;
-=======
-    /* A startup exit-race entry may outlive its PID (no seeded state means
-     * no EXIT). A live FORK for that PID must never disappear as a duplicate.
-     * We cannot distinguish reuse from a queued duplicate of the dying task
-     * here. Count the refusal conservatively; do not retry a proven exit. */
-    struct pgwt_backend *existing = pgwt_find_backend(&d->backends, child_pid);
-    if (existing) {
-        if (existing->wp_attach_exit_race) {
-            d->counters.wp_attach_failures_total++;
-            existing->wp_attach_failed = true;
-            fprintf(stderr, "ERROR: live FORK PID %d conflicts with retained attach exit race; enrollment refused and counted\n", child_pid);
-            return -1;
-        }
-        return 0;
->>>>>>> origin/master
     }
 
     struct pgwt_backend *be = alloc_backend(&d->backends, child_pid,
