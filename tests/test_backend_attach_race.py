@@ -834,7 +834,7 @@ static uint64_t fresh_generation;
 static unsigned maps_reads;
 static struct pgwt_pgbs_mapping pg13_main_mapping(pid_t pid, const struct PgBackendStatusLayout *layout)
 {
-    CHECK((pid == 7 || pid == 42) && layout == &d.backend_status_layout, "fresh mapping belongs to postmaster");
+    CHECK((pid == 7 || (pid == 42 && layout->major >= 14 && layout->major <= 17)) && layout == &d.backend_status_layout, "fresh mapping belongs to postmaster");
     ++maps_reads;
     return (struct pgwt_pgbs_mapping){.lo=0x2000,.hi=0x9000,.identity=fresh_generation};
 }
@@ -1526,7 +1526,8 @@ def live_churn(args):
             psql("SELECT count(*) FROM pgbench_accounts")
             proof_counters = ("exact_preseed_gone_total", "exact_preseed_exiting_total",
                               "exact_preseed_null_entry_total", "exact_preseed_startup_total",
-                              "exact_preseed_retired_zero_total", "exact_preseed_retired_other_pid_total")
+                              "exact_preseed_retired_zero_total", "exact_preseed_retired_other_pid_total",
+                              "exact_preseed_unpublished_total")
             counters = ("exact_preseed_no_command_total", "exact_preseed_failures_total",
                         "escalation_windows_total", "escalation_denied_total", *proof_counters)
             summaries = []
