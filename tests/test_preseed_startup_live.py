@@ -110,23 +110,32 @@ def until(proc, predicate, reason, seconds=15):
 def startup_duration(events, clocks):
     """Independent wall-clock brackets; never use product totals as truth."""
     send, armed, release_before, release_after = clocks
-    locks = [e for e in events if e["event"] >> 24 == 3]
-    # A held relation lock should be one real transition, not a manufactured
-    # count inferred from an escalation or a positive proof counter.
-    assert len(locks) == 1, "startup Lock duration: expected one completed Lock wait"
-    event = locks[0]
+    lock_indices = [i for i, e in enumerate(events) if e["event"] >> 24 == 3]
+    # PG17 ProcSleep re-enters WaitLatch after CheckDeadLock: one held lock
+    # can report two Lock segments with a short on-CPU interval between them.
+    assert 1 <= len(lock_indices) <= 2, (
+        "startup Lock duration: expected one or two completed Lock segments")
+    locks = [events[i] for i in lock_indices]
+    between = events[lock_indices[0] + 1:lock_indices[-1]]
+    assert all(e["event"] == 0 for e in between), (
+        "startup Lock duration: non-CPU record between Lock segments", between)
+    assert sum(e["duration"] for e in between) <= 10_000_000, (
+        "startup Lock duration: CPU gap exceeds 10 ms", between)
+    start = locks[0]["end"] - locks[0]["duration"]
+    end = locks[-1]["end"]
+    span = end - start
     low = release_before - armed - TOLERANCE_NS
     high = release_after - send + TOLERANCE_NS
-    assert low > 0 and low <= event["duration"] <= high, (
-        "startup Lock duration outside independent hold bounds", event, low, high)
-    start = event["end"] - event["duration"]
+    assert low > 0 and low <= span <= high, (
+        "startup Lock duration outside independent hold bounds", locks, low, high)
     assert send - TOLERANCE_NS <= start <= armed + TOLERANCE_NS, (
-        "startup Lock duration starts outside escalation bracket", event, clocks)
-    assert release_before - TOLERANCE_NS <= event["end"] <= release_after + TOLERANCE_NS, (
-        "startup Lock duration ends outside release bracket", event, clocks)
-    assert event["query"] == 0 and not event["flags"] & 2, (
-        "startup Lock must be query-less and command-closed", event)
-    return event["duration"]
+        "startup Lock duration starts outside escalation bracket", locks, clocks)
+    assert release_before - TOLERANCE_NS <= end <= release_after + TOLERANCE_NS, (
+        "startup Lock duration ends outside release bracket", locks, clocks)
+    for event in locks:
+        assert event["query"] == 0 and not event["flags"] & 2, (
+            "startup Lock must be query-less and command-closed", event)
+    return sum(e["duration"] for e in locks)
 
 
 def first_statement(events, query_id, sleep_event):
@@ -147,6 +156,13 @@ def host_checks():
                  query=123, flags=2)
     assert startup_duration([lock, sleep], clocks) == 1_230_000_000
     first_statement([lock, sleep], 123, 0x09000001)
+    split_clocks = (5528624706083, 5528649686083, 5529853069965, 5529854663041)
+    first_lock = dict(event=0x03000000, end=5529617624997, duration=976_843_403,
+                      query=0, flags=0)
+    cpu = dict(event=0, end=5529617677334, duration=52_337, query=0, flags=0)
+    second_lock = dict(event=0x03000000, end=5529854606858, duration=236_929_524,
+                       query=0, flags=0)
+    assert startup_duration([first_lock, cpu, second_lock], split_clocks) == 1_213_772_927
     red = 0
     for events, message in (([sleep], "startup Lock duration"),
                             ([dict(lock, duration=1), sleep], "startup Lock duration"),
@@ -158,6 +174,26 @@ def host_checks():
             red += 1
         else:
             raise AssertionError("duration/attribution control survived")
+    long_gap = 10_000_001
+    for events, message in (
+            ([first_lock, dict(cpu, event=0x09000001), second_lock],
+             "non-CPU record between Lock segments"),
+            ([dict(first_lock, end=cpu["end"] - long_gap,
+                   duration=first_lock["duration"] - (long_gap - cpu["duration"])),
+              dict(cpu, duration=long_gap), second_lock], "CPU gap exceeds 10 ms"),
+            ([first_lock, cpu,
+              dict(second_lock, end=second_lock["end"] - 1,
+                   duration=second_lock["duration"] - 1),
+              dict(second_lock, duration=1)], "expected one or two completed Lock segments"),
+            ([first_lock, cpu, dict(second_lock, query=123)],
+             "startup Lock must be query-less")):
+        try:
+            startup_duration(events, split_clocks)
+        except AssertionError as error:
+            assert message in str(error), error
+            red += 1
+        else:
+            raise AssertionError("split Lock control survived")
     try:
         first_statement([dict(sleep, query=0)], 123, 0x09000001)
     except AssertionError as error:
@@ -177,7 +213,7 @@ def host_checks():
              contextlib.redirect_stdout(output):
             assert main() == 77
         assert output.getvalue().strip() == f"SKIP test_preseed_startup_live: requires PG17 (running PG{version})"
-    print(f"startup live oracle host: 2 positive, {red} red controls; decoder build PASS")
+    print(f"startup live oracle host: 3 positive, {red} red controls; decoder build PASS")
     print("startup live skip contract: PG13/PG18 exit 77 before capture PASS")
 
 
