@@ -6,6 +6,7 @@ import {
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import {
     mountUnavailablePanel, buildCoverageBadge, paneFidelityBadgeHtml,
+    buildCoverageNotice, coverageEmptyStateHtml,
 } from '../lib/panels.js';
 import { attachBoxSelection } from '../lib/selection.js';
 
@@ -61,7 +62,8 @@ export function createExecScatterView() {
             if (isUnavailable(data)) return { unavailable: data };
             // U3: record-level — points stay, the coverage label rides along.
             return Object.assign(buildExecScatterOption(data),
-                { coverageBadge: buildCoverageBadge(data) });
+                { coverageBadge: buildCoverageBadge(data),
+                  coverageNotice: buildCoverageNotice(data) });
         },
 
         mount(el, model, ctx) {
@@ -74,10 +76,14 @@ export function createExecScatterView() {
             }
             if (!model.hasData) {
                 disposeChart();
+                // U3: under an incomplete verdict the notice replaces the
+                // "No completed … executions" placeholder (and the badge).
                 el.innerHTML = '<div class="scatter-shell">' +
-                    paneFidelityBadgeHtml(model.coverageBadge) + '<div class="chart-notes">' +
-                    model.notes.join(' · ') + '</div>' +
-                    '<div class="loading">No completed, positive-duration executions for selected range</div></div>';
+                    (model.coverageNotice ? '' : paneFidelityBadgeHtml(model.coverageBadge)) +
+                    '<div class="chart-notes">' + model.notes.join(' · ') + '</div>' +
+                    coverageEmptyStateHtml(model.coverageNotice,
+                        '<div class="loading">No completed, positive-duration executions for selected range</div>') +
+                    '</div>';
                 return;
             }
             ensureShell(el);

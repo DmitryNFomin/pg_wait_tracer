@@ -49,7 +49,7 @@ import {
 } from '../lib/builders/fidelity.js';
 import {
     compareFidelityHtml, buildPaneFidelity, paneFidelityBadgeHtml,
-    buildCoverageNotice, coverageNoticeHtml,
+    buildCoverageNotice, coverageNoticeHtml, coverageEmptyStateHtml,
 } from '../lib/panels.js';
 import { buildTableModel, mountTable } from '../lib/table.js';
 import { buildDeltaComparison } from '../lib/builders/compare.js';
@@ -495,7 +495,14 @@ function renderTimeline(body, foot, state) {
 
 function renderHistogram(body, foot, state) {
     const m = buildHeatmapOption(state.data, state.opts);
-    if (!m.hasData) { emptyCard(body, 'No data for selected event/range'); return; }
+    if (!m.hasData) {
+        // U3: the view's own empty-state rule (views/histogram.js): under an
+        // incomplete verdict the coverage notice replaces "No data".
+        const notice = coverageEmptyStateHtml(buildCoverageNotice(state.data), null);
+        if (notice) div('panel-card', body).innerHTML = notice;
+        else emptyCard(body, 'No data for selected event/range');
+        return;
+    }
     makeChart(div('chart', body), m.option, 340);
     // #105: not-captured count deliberately NOT appended here — a longer
     // fact line wraps to a 2nd line, growing the cell's height and reflowing

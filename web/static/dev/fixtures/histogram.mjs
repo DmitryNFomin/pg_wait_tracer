@@ -88,6 +88,11 @@ export const states = {
         tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
         data: heatmapWindow('capture_loss'),
     },
+    'coverage-not-recorded': {
+        description: 'A legacy capture (no coverage record): the whole window is uncovered, no cells arrive, and the coverage notice stands in place of "No data" — never both.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        data: heatmapWindow('not_recorded'),
+    },
     'one-hot-cell': {
         description: 'One 50 000-count cell over a ≤16 floor: heavy-tail worst case for the linear rainbow ramp (P8).',
         tags: ['SEMANTICS', 'HIERARCHY'],

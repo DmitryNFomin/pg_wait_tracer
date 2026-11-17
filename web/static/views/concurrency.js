@@ -26,6 +26,7 @@ import {
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import {
     mountUnavailablePanel, buildCoverageNotice, coverageNoticeHtml,
+    buildCoverageBadge, paneFidelityBadgeHtml,
 } from '../lib/panels.js';
 
 export function createConcurrencyView() {
@@ -49,6 +50,7 @@ export function createConcurrencyView() {
         if (document.getElementById('concurrency-chart')) return;
         disposeChart();   // shell is being rebuilt — any old chart DOM is gone
         el.innerHTML =
+            '<div id="concurrency-coverage"></div>' +
             '<div id="concurrency-chart" style="width:100%;height:270px;"></div>' +
             '<div class="concurrency-panel-selector">' +
                 '<button type="button" class="cp-select active" data-panel="peaks">' +
@@ -122,7 +124,10 @@ export function createConcurrencyView() {
             // use for "predates the trace") — buckets before it are marked
             // "not captured", never painted as a measured zero.
             const captureFromNs = ctx && ctx.server ? ctx.server.fromNs : null;
-            return buildConcurrencyOption(data, { captureFromNs });
+            // U3: complete / live_edge — the numbers stay, their marks ("up
+            // to HH:MM:SS", in-flight time excluded) ride along.
+            return Object.assign(buildConcurrencyOption(data, { captureFromNs }),
+                { coverageBadge: buildCoverageBadge(data) });
         },
 
         mount(el, model, ctx) {
@@ -141,10 +146,13 @@ export function createConcurrencyView() {
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
             if (!model.hasData) {
                 disposeChart();
-                el.innerHTML = '<p style="color:#888;padding:20px">No concurrency data</p>';
+                el.innerHTML = paneFidelityBadgeHtml(model.coverageBadge) +
+                    '<p style="color:#888;padding:20px">No concurrency data</p>';
                 return;
             }
             ensureShell(el);
+            document.getElementById('concurrency-coverage').innerHTML =
+                paneFidelityBadgeHtml(model.coverageBadge);
             if (!chart) {
                 chart = ctx.echarts.init(
                     document.getElementById('concurrency-chart'), 'dark');

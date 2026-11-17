@@ -118,15 +118,20 @@ const LAT_LABELS = ['<1', '1-2', '2-4', '4-8', '8-16', '16-32', '32-64',
     '2K-4K', '4K-8K', '8K-16K', '>=16K'];
 
 /* Heatmap: 60 × 16; cells in buckets that meet an uncovered range absent;
- * max_count and total_events withheld while incomplete. */
+ * max_count and total_events withheld while incomplete. A live_edge window
+ * drops the cells of every bucket not wholly before covered_to, as aasWindow
+ * and the mock do (spec §2 Time-bucketed: only buckets wholly inside the
+ * covered piece [S, E], E = covered_to while live, carry values). */
 export function heatmapWindow(state) {
     const cov = COVERAGE[state];
+    const holes = cov.uncovered.slice();
+    if (cov.verdict === 'live_edge') holes.push({ from: cov.covered_to, to: COV_TO + MIN_NS });
     const times = [];
     const cells = [];
     for (let i = 0; i < 60; i++) {
         const t = BASE_NS + i * MIN_NS;
         times.push(t);
-        if (meets(t, t + MIN_NS, cov.uncovered)) continue;
+        if (meets(t, t + MIN_NS, holes)) continue;
         for (let j = 2; j < 9; j++) cells.push([i, j, 100 + ((i * 7 + j * 13) % 400)]);
     }
     const inc = cov.verdict === 'incomplete';

@@ -144,6 +144,16 @@ export function buildCoverageNotice(data) {
     return { label: cov.label, ranges: cov.uncovered, coverage: cov };
 }
 
+/* An empty-state placeholder ("No data …", "No events …") under an
+ * incomplete verdict would claim that nothing happened in time the capture
+ * never covered. Every view's empty state goes through this: the coverage
+ * notice takes the placeholder's place (and carries the label itself, so a
+ * view drops its own coverage badge alongside). `notice` is
+ * buildCoverageNotice(data) of the response the placeholder speaks for. */
+export function coverageEmptyStateHtml(notice, placeholderHtml) {
+    return notice ? coverageNoticeHtml(notice) : placeholderHtml;
+}
+
 /* Compare: either side withheld withholds every derived difference. */
 export function buildCompareCoverageNotice(dataA, dataB) {
     return buildCoverageNotice(dataA) || buildCoverageNotice(dataB);

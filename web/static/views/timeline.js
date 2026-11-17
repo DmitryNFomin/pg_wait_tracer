@@ -48,7 +48,9 @@
 import { buildTimelineOption } from '../lib/builders/timeline.js';
 import { attachSelection } from '../lib/selection.js';
 import { esc } from '../lib/format.js';
-import { buildCoverageBadge, paneFidelityBadgeHtml } from '../lib/panels.js';
+import {
+    buildCoverageBadge, paneFidelityBadgeHtml, buildCoverageNotice, coverageEmptyStateHtml,
+} from '../lib/panels.js';
 
 /* The chart host's own horizontal padding, from the shell markup below. The
  * CANVAS is that much narrower than the host box: zrender sizes itself as
@@ -126,7 +128,8 @@ export function createTimelineView() {
                 // already laid out on every refresh after the first; the builder
                 // falls back to TIMELINE_DEFAULT_WIDTH when it is not.
                 width: hostWidth(),
-            }), { coverageBadge: buildCoverageBadge(data) });
+            }), { coverageBadge: buildCoverageBadge(data),
+                coverageNotice: buildCoverageNotice(data) });
         },
 
         mount(el, model, ctx) {
@@ -141,9 +144,11 @@ export function createTimelineView() {
             }
             if (!model.hasData) {
                 disposeChart();
-                el.innerHTML = paneFidelityBadgeHtml(model.coverageBadge) +
+                // U3: under an incomplete verdict the notice replaces "No events".
+                el.innerHTML = coverageEmptyStateHtml(model.coverageNotice,
+                    paneFidelityBadgeHtml(model.coverageBadge) +
                     '<div style="padding:40px;text-align:center;color:#888">' +
-                    'No events for selected session/range</div>';
+                    'No events for selected session/range</div>');
                 return;
             }
 

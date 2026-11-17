@@ -409,6 +409,20 @@ export function aasPeakText(model) {
     return 'peak ' + ((model && model.maxAas) || 0).toFixed(1) + ' AAS' + upTo;
 }
 
+/* Empty-window text shared by both renderers (views/active.js): the chart
+ * card and the status line. An empty window under an incomplete verdict is
+ * time the capture never covered, so it reads as the coverage label, never
+ * "No data". */
+export const AAS_EMPTY_TEXT = 'No data in selected range';
+export function aasEmptyText(model) {
+    const cov = model && model.coverage;
+    return cov && cov.withheld ? cov.label : AAS_EMPTY_TEXT;
+}
+export function aasEmptyStatusText(model) {
+    const cov = model && model.coverage;
+    return cov && cov.withheld ? cov.label : 'no data';
+}
+
 /* Label of the 'offcpu' WAIT_CLASSES entry — used to spot it among tooltip
  * params by name (series carry their WAIT_CLASSES label as seriesName). */
 const OFFCPU_LABEL = WAIT_CLASSES.find(c => c.key === 'offcpu').label;

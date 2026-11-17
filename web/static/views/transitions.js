@@ -43,6 +43,7 @@ import {
 } from '../lib/builders/fidelity.js';
 import {
     mountUnavailablePanel, buildCoverageNotice, coverageNoticeHtml,
+    buildCoverageBadge, paneFidelityBadgeHtml,
 } from '../lib/panels.js';
 import { esc } from '../lib/format.js';
 
@@ -85,8 +86,16 @@ function renderFidelityChip(model) {
     chip.innerHTML = html;
 }
 
-const FIDELITY_HOST = '<div id="dfg-fidelity-chip" style="display:none;' +
+const FIDELITY_HOST = '<div id="dfg-coverage" style="padding:0 20px"></div>' +
+    '<div id="dfg-fidelity-chip" style="display:none;' +
     'padding:0 20px 8px;font-size:11px;color:#aaa"></div>';
+
+/* U3: complete / live_edge — the graph stays; "up to HH:MM:SS" and the
+ * in-flight mark ride along above it (buildCoverageBadge). */
+function renderCoverageBadge(model) {
+    const host = document.getElementById('dfg-coverage');
+    if (host) host.innerHTML = paneFidelityBadgeHtml(model.coverageBadge);
+}
 
 /* Preserve where inside the node the user grabbed it: the cursor delta moves
  * the BUILT centre by the same amount instead of snapping the centre under the
@@ -511,6 +520,7 @@ export function createTransitionsView() {
             const hasLinks = !!(t && t.links && t.links.length > 0);
             return {
                 ...buildTransitionsFidelity(t, ctx && ctx.timeRange),
+                coverageBadge: buildCoverageBadge(t),
                 transitions: t,
                 hasLinks,
                 total: (t && t.total) || 0,
@@ -543,12 +553,14 @@ export function createTransitionsView() {
                 disposeChart();
                 el.innerHTML = FIDELITY_HOST +
                     '<p style="color:#888;padding:20px">No transitions found</p>';
+                renderCoverageBadge(model);
                 renderFidelityChip(model);
                 return;
             }
             dataRef = model.transitions;
 
             ensureShell(el);
+            renderCoverageBadge(model);
             renderFidelityChip(model);
             renderDFG(threshold);   // sets #dfg-total too (idle-hidden count included)
 

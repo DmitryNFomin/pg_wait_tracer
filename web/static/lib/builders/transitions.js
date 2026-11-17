@@ -29,7 +29,9 @@
 
 import { eventColor, fmtMs, esc as escHtml } from '../format.js';
 import { buildFidelityShading, fidelityOf, fidelityLabel } from './fidelity.js';
-import { buildCoverageNotice, coverageNoticeHtml } from '../panels.js';
+import {
+    buildCoverageNotice, coverageNoticeHtml, buildCoverageBadge, paneFidelityBadgeHtml,
+} from '../panels.js';
 
 /* The DFG has no time axis. Its fidelity strip uses the same shading model
  * as AAS, projected onto the requested window above the graph. */
@@ -863,7 +865,8 @@ export function buildVariantsPanel(state, vdata, esc) {
         // U3: variants are a whole-window metric; withheld when incomplete.
         const notice = buildCoverageNotice(vdata);
         if (notice) return coverageNoticeHtml(notice);
-        return buildVariantsHtml(vdata, esc);
+        // complete / live_edge: the variants stay, their marks ride along.
+        return paneFidelityBadgeHtml(buildCoverageBadge(vdata)) + buildVariantsHtml(vdata, esc);
     }
     return '';   // 'error' (or anything unrecognized): silent, never a stale look
 }

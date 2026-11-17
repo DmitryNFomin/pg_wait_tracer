@@ -7,6 +7,7 @@ import {
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import {
     mountUnavailablePanel, buildCoverageNotice, coverageNoticeHtml,
+    buildCoverageBadge, paneFidelityBadgeHtml,
 } from '../lib/panels.js';
 
 export function createMatrixView() {
@@ -28,6 +29,7 @@ export function createMatrixView() {
             '<div class="matrix-shell">' +
             ' <div class="view-title">Transition matrix <span>cell color is log-scaled count; ' +
             'label color is event identity</span></div>' +
+            ' <div id="matrix-coverage"></div>' +
             ' <div id="matrix-cpu-note" class="panel-caption"></div>' +
             ' <div id="matrix-chart"></div>' +
             ' <div id="matrix-notes" class="chart-notes"></div>' +
@@ -74,6 +76,8 @@ export function createMatrixView() {
             // from rank order again.
             const model = buildMatrixOption(data, { limit: 20, prevLabels });
             if (model.hasData) prevLabels = model.labels;
+            // U3: complete / live_edge — the cells stay, their marks ride along.
+            model.coverageBadge = buildCoverageBadge(data);
             return model;
         },
         mount(el, model, ctx) {
@@ -91,10 +95,13 @@ export function createMatrixView() {
             }
             if (!model.hasData) {
                 disposeChart();
-                el.innerHTML = '<div class="loading">No transitions found</div>';
+                el.innerHTML = paneFidelityBadgeHtml(model.coverageBadge) +
+                    '<div class="loading">No transitions found</div>';
                 return;
             }
             ensureShell(el);
+            document.getElementById('matrix-coverage').innerHTML =
+                paneFidelityBadgeHtml(model.coverageBadge);
             document.getElementById('matrix-cpu-note').textContent = model.cpuNote || '';
             document.getElementById('matrix-notes').textContent = model.notes.join(' · ');
             const host = document.getElementById('matrix-chart');

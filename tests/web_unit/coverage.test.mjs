@@ -3,6 +3,7 @@
  * computes its own. Fixtures: web/static/dev/fixtures/coverage.mjs. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readdirSync } from 'node:fs';
 import {
     coverageOf, coverageWithholds, coverageReasonText, aasScaleMax,
     COVERAGE_UNVERIFIED_LABEL, IN_FLIGHT_EXCLUDED_LABEL, IDLE_UNVERIFIED_LABEL,
@@ -10,9 +11,11 @@ import {
 } from '../../web/static/lib/builders/fidelity.js';
 import {
     buildPaneFidelity, paneFidelityBadgeHtml, buildCoverageBadge,
-    buildCoverageNotice, buildCompareCoverageNotice, coverageNoticeHtml,
+    buildCoverageNotice, buildCompareCoverageNotice, coverageNoticeHtml, coverageEmptyStateHtml,
 } from '../../web/static/lib/panels.js';
-import { buildAasOption, AAS_ANNOTATION_SERIES, aasPeakText } from '../../web/static/lib/builders/aas.js';
+import {
+    buildAasOption, AAS_ANNOTATION_SERIES, aasPeakText, aasEmptyText, aasEmptyStatusText,
+} from '../../web/static/lib/builders/aas.js';
 import { buildUplotSpec, overlayGeometry } from '../../web/static/lib/uplot-aas.js';
 import {
     buildHeatmapOption, heatmapScaleMax, HEATMAP_COVERAGE_SERIES,
@@ -30,6 +33,17 @@ import { createMatrixView } from '../../web/static/views/matrix.js';
 import { createConcurrencyView } from '../../web/static/views/concurrency.js';
 import { createExecScatterView } from '../../web/static/views/exec-scatter.js';
 import { createTimelineView } from '../../web/static/views/timeline.js';
+import { createQueriesView } from '../../web/static/views/queries.js';
+import { createHistogramView, selectorCoverageHtml } from '../../web/static/views/histogram.js';
+import { createWaterfallView } from '../../web/static/views/waterfall.js';
+import { aasFidelityChipHtml } from '../../web/static/views/active.js';
+import { states as transitionsStates } from '../../web/static/dev/fixtures/transitions.mjs';
+import { states as matrixStates } from '../../web/static/dev/fixtures/matrix.mjs';
+import { states as concurrencyStates } from '../../web/static/dev/fixtures/concurrency.mjs';
+import { states as scatterStates } from '../../web/static/dev/fixtures/exec-scatter.mjs';
+import { states as waterfallStates } from '../../web/static/dev/fixtures/waterfall.mjs';
+import { states as timelineStates } from '../../web/static/dev/fixtures/timeline.mjs';
+import { MIN_NS as MIN_NS_T } from '../../web/static/dev/fixtures/base.mjs';
 import {
     COVERAGE, INCOMPLETE_STATES, WITHHELD_COMMANDS, COV_FROM, COV_TO, COV_GAP,
     withheld, aasWindow, heatmapWindow, timeModelWindow, topEventsWindow,
@@ -37,6 +51,8 @@ import {
 } from '../../web/static/dev/fixtures/coverage.mjs';
 
 const WIN = { from: COV_FROM, to: COV_TO };
+/* Real flow-variant cards (numbers included), from the gallery fixture. */
+const VARIANTS_PAYLOAD = transitionsStates['variants-html'].variants;
 const ctx = () => ({
     server: { numCpus: 4, fromNs: COV_FROM }, timeRange: { ...WIN, span: () => COV_TO - COV_FROM },
     filters: { snapshot: () => ({}), filters: {} }, getSort: () => null,
@@ -190,7 +206,7 @@ function renderedWholeWindowViews(state) {
         v.mount(el, model, { ...c, summaryEl: { innerHTML: '' } });
         out[name] = el.innerHTML;
     }
-    out.variants = buildVariantsPanel('ready', leaky(state, { variants: [{ steps: 3, count: 9 }] }), esc);
+    out.variants = buildVariantsPanel('ready', leaky(state, VARIANTS_PAYLOAD), esc);
     out.pilot = pilotEvidenceHtml(leaky(state, {
         wait_time: { value: '123', unit: 'ns', completeness: 'complete', reasons: [], diagnostic: {} },
         completed_waits: { value: '4', unit: 'waits', completeness: 'complete', reasons: [], diagnostic: {} },
@@ -506,4 +522,316 @@ test('A3: no raw reason, verdict or cause token reaches rendered output', () => 
         }
     }
     assert.ok(nonEmpty > rendered.length / 2, 'the check rendered real output');
+});
+
+/* ── r3: every §3 Web view, mounted ──────────────────────────────────────── */
+
+/* A minimal DOM: an element registers every id its innerHTML names, so a
+ * view's ensureShell() builds its shell and getElementById finds only what
+ * the view itself wrote. text() is everything painted, in any element. */
+function fakeDom() {
+    const known = new Map();
+    const all = [];
+    function makeEl(id) {
+        let html = '';
+        const el = {
+            id, style: {}, dataset: {}, textContent: '', className: '', hidden: false,
+            disabled: false, value: '', isConnected: true, parentNode: null,
+            clientWidth: 1000, clientHeight: 500, offsetWidth: 1000, offsetHeight: 500,
+            classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+            addEventListener() {}, removeEventListener() {}, appendChild() {}, remove() {},
+            before() {}, insertBefore() {}, scrollHeight: 0,
+            get parentElement() { return makeEl(null); },
+            querySelector: () => makeEl(null), querySelectorAll: () => [],
+            getBoundingClientRect: () => ({ top: 0, left: 0, width: 1000, height: 500, bottom: 500, right: 1000 }),
+            insertAdjacentHTML(where, h) { el.innerHTML = where === 'afterbegin' ? h + html : html + h; },
+            get innerHTML() { return html; },
+            set innerHTML(v) {
+                html = String(v);
+                for (const m of html.matchAll(/id="([^"]+)"/g)) {
+                    if (!known.has(m[1])) known.set(m[1], makeEl(m[1]));
+                }
+            },
+        };
+        all.push(el);
+        return el;
+    }
+    const document = {
+        getElementById: (id) => known.get(id) || null,
+        querySelector: () => makeEl(null), querySelectorAll: () => [],
+        createElement: () => makeEl(null), activeElement: null,
+    };
+    const echarts = { init: () => ({
+        setOption() {}, on() {}, off() {}, dispose() {}, resize() {}, clear() {},
+        getOption: () => ({ series: [] }), getWidth: () => 1000, getHeight: () => 500,
+        dispatchAction() {}, convertToPixel: () => [0, 0], convertFromPixel: () => [0, 0],
+        getZr: () => ({ on() {}, off() {} }), isDisposed: () => false,
+    }) };
+    return { document, echarts, makeEl,
+        text: () => all.map(e => e.innerHTML + ' ' + e.textContent).join('\n') };
+}
+
+function withDom(fn) {
+    const saved = ['document', 'window', 'getComputedStyle', 'requestAnimationFrame']
+        .map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]);
+    const dom = fakeDom();
+    globalThis.document = dom.document;
+    globalThis.window = { innerHeight: 800, innerWidth: 1280, devicePixelRatio: 1,
+        location: { search: '' }, addEventListener() {}, removeEventListener() {} };
+    globalThis.getComputedStyle = () => ({ position: 'relative', getPropertyValue: () => '' });
+    globalThis.requestAnimationFrame = () => 0;   // deferred paints never run here
+    try { return fn(dom); } finally {
+        for (const [k, d] of saved) {
+            if (d) Object.defineProperty(globalThis, k, d); else delete globalThis[k];
+        }
+    }
+}
+
+/* Mount `view` on `data` in a fresh fake DOM; everything painted. */
+function mounted(view, data, extra) {
+    return withDom((dom) => {
+        const c = { ...ctx(), echarts: dom.echarts, summaryEl: dom.makeEl('summary'),
+            chartEl: dom.makeEl('chart'), isLiveTick: () => false, onDrill() {},
+            ...(extra || {}) };
+        const el = dom.makeEl('root');
+        view.mount(el, view.build(data, c), c);
+        return dom.text();
+    });
+}
+
+const withCov = (state, payload) => ({ ...payload,
+    fidelity: COVERAGE[state].verdict === 'incomplete' ? 'incomplete' : 'exact',
+    coverage: COVERAGE[state] });
+const TL = timelineStates['single-point'].data;
+const SC = scatterStates['single-point'].data;
+const WF = waterfallStates['single-point'].data;
+const WF_ROW = { pid: 4100, query_id: WF.query_id, start_ns: WF.leader.events[0].start_ns,
+    end_ns: '999999999999', duration_ms: 1, n_events: 1, n_workers: 0, in_progress: false };
+
+/* Every view of spec §3 "Web", each rendered the way the app paints it, for
+ * one coverage state. `empty`: the same response with no records (the
+ * empty-state path). A view the app can only paint in a browser (active:
+ * uPlot/ECharts) renders its exported pure surface: the status line and the
+ * chip HTML the mount writes. */
+const VIEW_RENDERERS = {
+    overview: (s, empty) => {
+        const tm = timeModelWindow(COVERAGE[s].verdict === 'incomplete' ? s : 'complete');
+        const data = COVERAGE[s].verdict === 'incomplete' ? tm
+            : { ...tm, coverage: COVERAGE[s], rows: empty ? [] : tm.rows };
+        return mounted(createOverviewView(), data);
+    },
+    events: (s, empty) => {
+        if (COVERAGE[s].verdict === 'incomplete') return mounted(createEventsView(), withheld(s));
+        const ev = { ...topEventsWindow('complete'), coverage: COVERAGE[s] };
+        return mounted(createEventsView(), empty ? { ...ev, rows: [] } : ev);
+    },
+    queries: (s, empty) => mounted(createQueriesView(),
+        COVERAGE[s].verdict === 'incomplete' ? withheld(s)
+            : withCov(s, { rows: empty ? [] : [{ query_id: '1', total_ms: 5000, calls: 3 }] })),
+    sessions: (s, empty) => mounted(createSessionsView(),
+        COVERAGE[s].verdict === 'incomplete' ? withheld(s)
+            : withCov(s, { rows: empty ? [] : [{ pid: 1001, db_time_ms: 5000, cpu_pct: 50 }] })),
+    active: (s, empty) => {
+        const data = empty ? withCov(s, { bucket_ns: MIN_NS_T, buckets: [], max_aas: 0 }) : aasWindow(s);
+        const out = [];
+        for (const m of [buildAasOption(data, { win: WIN, numCpus: 4 }),
+            buildUplotSpec(data, { win: WIN, numCpus: 4 })]) {
+            if (!m.hasData) out.push(aasEmptyText(m), aasEmptyStatusText(m));
+            else out.push(aasPeakText(m), aasFidelityChipHtml(m) || '');
+        }
+        return out.join('\n');
+    },
+    transitions: (s, empty) => mounted(createTransitionsView(), { transitions:
+        COVERAGE[s].verdict === 'incomplete' ? withheld(s)
+            : withCov(s, empty ? { total: 0, nodes: [], links: [] } : transitionsStates['single-self-loop'].data) }),
+    variants: (s, empty) => buildVariantsPanel('ready',
+        COVERAGE[s].verdict === 'incomplete' ? withheld(s)
+            : withCov(s, empty ? {} : transitionsStates['variants-html'].variants), esc),
+    histogram: (s, empty) => {
+        const hm = heatmapWindow(empty ? 'not_recorded' : s);
+        const data = empty ? { ...hm, coverage: COVERAGE[s], cells: [],
+            fidelity: COVERAGE[s].verdict === 'incomplete' ? 'incomplete' : 'exact' } : hm;
+        const ev = COVERAGE[s].verdict === 'incomplete' ? withheld(s) : topEventsWindow('complete');
+        const view = createHistogramView();
+        return withDom((dom) => {
+            const c = { ...ctx(), echarts: dom.echarts, summaryEl: dom.makeEl('summary'),
+                isLiveTick: () => false, onDrill() {},
+                transport: { request: async () => null }, channel: (n) => n };
+            const el = dom.makeEl('root');
+            const model = view.build({ events: (ev && ev.rows) || [],
+                eventsNotice: buildCoverageNotice(ev), heatmap: data }, c);
+            view.mount(el, model, c);
+            return dom.text();
+        });
+    },
+    matrix: (s, empty) => mounted(createMatrixView(),
+        COVERAGE[s].verdict === 'incomplete' ? withheld(s)
+            : withCov(s, empty ? { total: 0, nodes: [], links: [] } : matrixStates['single-cell'].data)),
+    concurrency: (s, empty) => mounted(createConcurrencyView(),
+        COVERAGE[s].verdict === 'incomplete' ? withheld(s)
+            : withCov(s, empty ? concurrencyStates.empty.data : concurrencyStates['single-point'].data)),
+    'exec-scatter': (s, empty) => mounted(createExecScatterView(),
+        withCov(s, empty ? scatterStates.empty.data : SC)),
+    waterfall: (s, empty) => mounted(createWaterfallView(), {
+        executions: withCov(s, { rows: empty ? [] : [WF_ROW], total_count: empty ? 0 : 1 }),
+        selected: empty ? null : WF_ROW,
+        detail: empty ? null : withCov(s, WF), detailEnd: WF_ROW.end_ns, windowTo: COV_TO }),
+    timeline: (s, empty) => mounted(createTimelineView(),
+        withCov(s, empty ? timelineStates.empty.data : TL)),
+    // The pilot has no empty placeholder; its "empty" is a value-less answer.
+    'events-pilot': (s, empty) => pilotEvidenceHtml(
+        COVERAGE[s].verdict === 'incomplete' ? withheld(s) : withCov(s, {
+            wait_time: { value: empty ? null : '123', unit: 'ns', completeness: 'complete', reasons: [], diagnostic: {} },
+            completed_waits: { value: empty ? null : '4', unit: 'waits', completeness: 'complete', reasons: [], diagnostic: {} },
+            storage: {} })),
+};
+
+/* Spec §3 Web, the view list, plus the variants panel (a §3 Withhold command
+ * the transitions view paints). */
+const SPEC_WEB_VIEWS = ['overview', 'events', 'queries', 'sessions', 'active', 'transitions',
+    'histogram', 'matrix', 'concurrency', 'exec-scatter', 'waterfall', 'timeline', 'events-pilot'];
+
+test('r3: the renderer list is the full §3 Web list and every file in web/static/views', () => {
+    const files = readdirSync(new URL('../../web/static/views/', import.meta.url))
+        .filter(f => f.endsWith('.js')).map(f => f.slice(0, -3)).sort();
+    assert.deepEqual(files, SPEC_WEB_VIEWS.slice().sort(),
+        'VIEW_ADDED_WITHOUT_COVERAGE_RENDERER: a new view must join SPEC_WEB_VIEWS and VIEW_RENDERERS');
+    assert.deepEqual(Object.keys(VIEW_RENDERERS).sort(), [...SPEC_WEB_VIEWS, 'variants'].sort());
+});
+
+test('r3 F1: every view showing whole-window numbers carries "up to HH:MM:SS" and the in-flight mark on live_edge_xf', () => {
+    for (const name of Object.keys(VIEW_RENDERERS)) {
+        const text = VIEW_RENDERERS[name]('live_edge_xf', false);
+        assert.ok(text.includes('up to 09:46:38'), `LIVE_EDGE_UP_TO_MISSING ${name}: ${text.slice(0, 400)}`);
+        assert.ok(text.includes(IN_FLIGHT_EXCLUDED_LABEL), `IN_FLIGHT_MARK_MISSING ${name}`);
+        assert.ok(!text.includes(COVERAGE_UNVERIFIED_LABEL), `LIVE_EDGE_IS_NOT_WITHHELD ${name}`);
+        // complete_xf: the in-flight mark alone, no end time.
+        const done = VIEW_RENDERERS[name]('complete_xf', false);
+        assert.ok(done.includes(IN_FLIGHT_EXCLUDED_LABEL), `IN_FLIGHT_MARK_MISSING (complete) ${name}`);
+        assert.ok(!done.includes('up to '), `UP_TO_ON_COMPLETE ${name}`);
+    }
+    // The AAS chip itself (not only the status line) names both marks, in
+    // both renderers.
+    for (const m of [buildAasOption(aasWindow('live_edge_xf'), { win: WIN }),
+        buildUplotSpec(aasWindow('live_edge_xf'), { win: WIN })]) {
+        const chip = aasFidelityChipHtml(m);
+        assert.ok(chip.includes('up to 09:46:38'), 'AAS_CHIP_UP_TO');
+        assert.ok(chip.includes(IN_FLIGHT_EXCLUDED_LABEL), 'AAS_CHIP_IN_FLIGHT');
+    }
+    // Negative control: a plain complete window carries neither mark.
+    for (const name of Object.keys(VIEW_RENDERERS)) {
+        const text = VIEW_RENDERERS[name]('complete', false);
+        assert.ok(!text.includes(IN_FLIGHT_EXCLUDED_LABEL) && !text.includes('up to '),
+            `MARK_WITHOUT_CAUSE ${name}`);
+    }
+});
+
+/* Any empty-state placeholder: "No data …", "No events …", "No transitions
+ * …", "No concurrency data", "No completed …", "No execution(s) …". */
+const PLACEHOLDER = /\b[Nn]o [a-z]/;
+
+test('r3 F2: no view renders a "No data"-style placeholder together with an incomplete coverage notice', () => {
+    for (const state of INCOMPLETE_STATES) {
+        for (const name of Object.keys(VIEW_RENDERERS)) {
+            for (const empty of [true, false]) {
+                const text = VIEW_RENDERERS[name](state, empty);
+                assert.ok(text.includes(COVERAGE_UNVERIFIED_LABEL),
+                    `INCOMPLETE_SHOWS_LABEL ${name} ${state} empty=${empty}`);
+                assert.doesNotMatch(text, PLACEHOLDER,
+                    `NO_DATA_UNDER_COVERAGE_NOTICE ${name} ${state} empty=${empty}`);
+                // One pane, one label: the notice and a badge never stack.
+                // (active: its status line and chart card, both renderers;
+                // histogram: its disabled selectors say why, separately.)
+                if (name !== 'active') {
+                    const pane = text.replace(/<span class="selector-coverage"[^>]*>[^<]*<\/span>/g, '')
+                        .replace(/<[^>]*>/g, ' ');   // visible text, not title attributes
+                    assert.equal(pane.split(COVERAGE_UNVERIFIED_LABEL).length - 1, 1,
+                        `LABEL_ONCE ${name} ${state} empty=${empty}`);
+                }
+            }
+        }
+    }
+    // Waterfall's two detail-pane placeholders: a selected execution whose
+    // detail has no events ("No execution events captured") and one whose
+    // detail did not arrive ("No detail was returned …").
+    const wfCases = (s) => [
+        { executions: withCov(s, { rows: [WF_ROW], total_count: 1 }), selected: WF_ROW,
+          detail: withCov(s, waterfallStates.empty.data), detailEnd: WF_ROW.end_ns, windowTo: COV_TO },
+        { executions: withCov(s, { rows: [WF_ROW], total_count: 1 }), selected: WF_ROW,
+          detail: null, detailEnd: WF_ROW.end_ns, windowTo: COV_TO },
+    ];
+    for (const state of INCOMPLETE_STATES) {
+        for (const data of wfCases(state)) {
+            const text = mounted(createWaterfallView(), data);
+            assert.ok(text.includes(COVERAGE_UNVERIFIED_LABEL), `INCOMPLETE_SHOWS_LABEL waterfall detail ${state}`);
+            assert.doesNotMatch(text, PLACEHOLDER, `NO_DATA_UNDER_COVERAGE_NOTICE waterfall detail ${state}`);
+        }
+    }
+    for (const data of wfCases('complete')) {
+        assert.match(mounted(createWaterfallView(), data), PLACEHOLDER, 'PLACEHOLDER_CONTROL waterfall detail');
+    }
+    // Negative control: the same empty responses on a complete window do
+    // paint their placeholders (the regex sees them; the rule is scoped).
+    const withPlaceholder = Object.keys(VIEW_RENDERERS)
+        .filter(name => PLACEHOLDER.test(VIEW_RENDERERS[name]('complete', true)));
+    assert.deepEqual(withPlaceholder.sort(), ['active', 'concurrency', 'events', 'exec-scatter',
+        'histogram', 'matrix', 'overview', 'queries', 'sessions', 'timeline', 'transitions',
+        'waterfall'].sort(), 'PLACEHOLDER_CONTROL');
+    // ... and AAS's status line says "no data" there, not the label.
+    const emptyAas = { bucket_ns: 60e9, buckets: [], max_aas: 0, fidelity: 'exact', coverage: COVERAGE.complete };
+    assert.match(aasEmptyStatusText(buildAasOption(emptyAas, { win: WIN })), /^no data$/);
+    assert.equal(aasEmptyStatusText(buildAasOption(withCov('capture_loss', { ...emptyAas }), { win: WIN })),
+        COVERAGE_UNVERIFIED_LABEL + ' (capture loss)', 'AAS_EMPTY_STATUS_IS_LABEL');
+});
+
+test('r3 F2: the histogram of a wholly uncovered window shows the notice, not "No data"', () => {
+    const data = heatmapWindow('not_recorded');
+    assert.equal(buildHeatmapOption(data).hasData, false);
+    const text = VIEW_RENDERERS.histogram('not_recorded', false);
+    assert.match(text, /Coverage unverified — whole-window metrics unavailable \(coverage not recorded/);
+    assert.doesNotMatch(text, /No data for selected event\/range/, 'HISTOGRAM_NO_DATA_UNDER_NOTICE');
+    // The label appears once in the heatmap pane (the badge gives way).
+    const pane = text.split('\n').filter(l => l.includes('coverage-unavailable') || l.includes('pane-fidelity-badge'));
+    assert.equal(pane.filter(l => l.includes('pane-fidelity-badge')).length, 0, 'BADGE_GIVES_WAY_TO_NOTICE');
+    assert.equal(coverageEmptyStateHtml(null, 'No data'), 'No data');
+});
+
+test('r3 nit: withheld top_events disables the histogram selectors and says why', () => {
+    assert.equal(selectorCoverageHtml(null), '');
+    const html = selectorCoverageHtml(buildCoverageNotice(withheld('capture_loss')));
+    assert.match(html, /Coverage unverified — whole-window metrics unavailable \(capture loss\)/);
+    withDom((dom) => {
+        const c = { ...ctx(), echarts: dom.echarts, summaryEl: dom.makeEl('summary'),
+            isLiveTick: () => false, onDrill() {} };
+        const view = createHistogramView();
+        const el = dom.makeEl('root');
+        view.mount(el, view.build({ events: [], eventsNotice: buildCoverageNotice(withheld('capture_loss')),
+            heatmap: heatmapWindow('capture_loss') }, c), c);
+        assert.equal(dom.document.getElementById('hm-class').disabled, true, 'SELECTOR_DISABLED');
+        assert.equal(dom.document.getElementById('hm-event').disabled, true, 'SELECTOR_DISABLED');
+        assert.match(dom.document.getElementById('hm-coverage').innerHTML, /Coverage unverified/);
+        // Control: with the event list, the selectors are live.
+        const view2 = createHistogramView();
+        const dom2 = fakeDom();
+        globalThis.document = dom2.document;
+        view2.mount(dom2.makeEl('root'), view2.build({ events: topEventsWindow('complete').rows,
+            eventsNotice: null, heatmap: heatmapWindow('complete') }, c), { ...c, echarts: dom2.echarts });
+        assert.equal(dom2.document.getElementById('hm-class').disabled, false);
+        assert.equal(dom2.document.getElementById('hm-coverage').innerHTML, '');
+        globalThis.document = dom.document;
+    });
+});
+
+test('r3 nit: the heatmap fixture drops cells past covered_to, as aasWindow and the mock do (spec §2)', () => {
+    const cov = COVERAGE.live_edge_xf;
+    const hm = heatmapWindow('live_edge_xf');
+    const late = hm.cells.filter(c => hm.times[c[0]] + hm.bucket_ns > cov.covered_to);
+    assert.deepEqual(late, [], 'HEATMAP_LIVE_EDGE_CELLS_DROPPED');
+    const aas = aasWindow('live_edge_xf');
+    const lateAas = aas.buckets.filter(b => b.t + aas.bucket_ns > cov.covered_to);
+    assert.ok(lateAas.length > 0 && lateAas.every(b => b.cpu === null), 'AAS_LIVE_EDGE_BUCKETS_NULL');
+    // The bucket set dropped is the same in both fixture sources.
+    const hmKept = new Set(hm.cells.map(c => c[0]));
+    const aasKept = aas.buckets.map((b, i) => [b, i]).filter(([b]) => b.cpu !== null).map(([, i]) => i);
+    assert.deepEqual([...hmKept].sort((a, b) => a - b), aasKept);
 });

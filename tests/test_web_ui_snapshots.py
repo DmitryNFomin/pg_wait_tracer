@@ -157,6 +157,7 @@ GALLERY_STATIC_CELLS = [
     "gallery-timeline-single-point",            # degenerate timeline
     "gallery-histogram-dense",                  # dense heatmap
     "gallery-histogram-coverage-capture-loss",  # U3: uncovered buckets shaded, cells absent
+    "gallery-histogram-coverage-not-recorded",  # U3 r3: notice in place of "No data", never both
     "gallery-concurrency-dense-bursts",         # overlay chart + burst tables
     "gallery-waterfall-dense-plan-3lanes",      # leader/workers + plan band
     "gallery-exec-scatter-dense-downsampled",   # log latency modes + count note
@@ -229,6 +230,7 @@ GALLERY_EVIDENCE = {
     "gallery-timeline-single-point": [".chart"],
     "gallery-histogram-dense": [".chart"],
     "gallery-histogram-coverage-capture-loss": [".chart"],
+    "gallery-histogram-coverage-not-recorded": [".coverage-unavailable", ("text", "coverage not recorded")],
     "gallery-concurrency-dense-bursts": [".chart"],
     "gallery-waterfall-dense-plan-3lanes": [".chart"],
     "gallery-exec-scatter-dense-downsampled": [".chart"],
