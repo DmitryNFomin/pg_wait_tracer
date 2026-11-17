@@ -11,9 +11,7 @@ import {
 } from '../../web/static/lib/builders/aas.js';
 import { WAIT_CLASSES, AAS_CLASS_ORDER, eventColor } from '../../web/static/lib/format.js';
 
-/* No 'offcpu' key on purpose (bypass-suite case: the key absent entirely —
- * see 'offcpu absent/zero never breaks the stack sum' below). The AAS_CLASS_
- * ORDER-driven builder must default it to 0, not throw or drop other series. */
+/* No offcpu key: omitted measurements stay missing, with the series retained. */
 function classBuckets(n) {
     const out = [];
     for (let i = 0; i < n; i++) {
@@ -67,26 +65,19 @@ test('class mode: one series per wait class, x=tMs y=aas', () => {
     assert.ok(cpu.areaStyle);
 });
 
-/* Bypass-suite (#187 spawn contract): the offcpu key absent entirely (this
- * fixture's classBuckets never sets it) must fall back to 0, not throw and
- * not drop the series — the stack sum still equals the sum of every OTHER
- * present class, i.e. omission never silently changes the total. */
-test('offcpu key absent: defaults to a real zero-valued series, never dropped', () => {
+test('offcpu key absent: retains a gap series, never invents zero', () => {
     const data = { bucket_ns: 1, max_aas: 2.0, buckets: classBuckets(2) };
     const { option } = buildAasOption(data, { numCpus: 4 });
     const off = option.series.find(s => s.name === 'CPU (waiting for a core)');
     assert.ok(off, 'offcpu series is present even though the payload omits the key');
-    assert.deepEqual(off.data.map(p => p[1]), [0, 0]);
+    assert.deepEqual(off.data.map(p => p[1]), [null, null]);
 });
 
-/* Bypass-suite: an explicit offcpu of 0 (every sampled-tier bucket today,
- * T8/server.c) behaves identically to the key being absent — same series,
- * same zero — so a tier switch mid-window (some buckets carry a real offcpu,
- * others carry an explicit 0) never produces a visible step in the stack. */
+/* Explicit zero remains measured zero through a tier switch. */
 test('offcpu explicit zero and a tier switch mid-window both conserve the stack total', () => {
     const buckets = [
         { t: 1000, cpu: 1.0, offcpu: 0, io: 0.5 },          // sampled-style: explicit 0
-        { t: 1001, cpu: 1.0, io: 0.5 },                     // key absent entirely
+        { t: 1001, cpu: 1.0, offcpu: 0, io: 0.5 },
         { t: 1002, cpu: 0.6, offcpu: 0.4, io: 0.5 },        // exact tier: real split
     ];
     const data = { bucket_ns: 1, max_aas: 2.0, buckets };
@@ -95,8 +86,7 @@ test('offcpu explicit zero and a tier switch mid-window both conserve the stack 
     dataSeries(option).forEach(s => { byName[s.name] = s.data; });
     const total = (i) => (byName['CPU (running)'][i][1] +
         byName['CPU (waiting for a core)'][i][1] + byName['IO'][i][1]);
-    // Every bucket's CPU-group + IO total is 1.5, whichever way this bucket
-    // spelled "no measurable off-cpu time" — the group total never steps.
+    // Every fully reported bucket's CPU-group + IO total is 1.5.
     assert.equal(total(0), 1.5);
     assert.equal(total(1), 1.5);
     assert.equal(total(2), 1.5);

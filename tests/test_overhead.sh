@@ -21,7 +21,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TRACER="$SCRIPT_DIR/../pg_wait_tracer"
+# TRACER is a test-only override for the host-runnable gate controls.
+TRACER="${TRACER:-$SCRIPT_DIR/../pg_wait_tracer}"
 source "$SCRIPT_DIR/testutil.sh"
 
 # Defaults
@@ -63,6 +64,28 @@ if [[ ! -x "$TRACER" ]]; then
     exit 1
 fi
 
+# Retain per-run evidence outside the source tree, including on errors.
+EVIDENCE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-overhead.XXXXXX")
+echo "Run evidence: $EVIDENCE_DIR"
+tracer_pid=""
+tracer_stderr=""
+cleanup() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$tracer_pid" ]]; then
+        kill "$tracer_pid" 2>/dev/null || true
+        wait "$tracer_pid" 2>/dev/null || true
+    fi
+    if [[ "$status" -ne 0 && -n "$tracer_stderr" ]]; then
+        echo "Tracer stderr (last 20 lines): $tracer_stderr" >&2
+        tail -n 20 "$tracer_stderr" >&2
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # Parse client list
 IFS=',' read -ra CLIENT_COUNTS <<< "$CLIENTS_LIST"
 
@@ -75,7 +98,7 @@ echo ""
 
 # System info
 NCPUS=$(nproc)
-MEM_GB=$(awk '/MemTotal/{printf "%.1f", $2/1048576}' /proc/meminfo)
+MEM_GB=$(awk '/MemTotal/{printf "%.1f", $2/1048576}' /proc/meminfo 2>/dev/null || echo unknown)
 KERNEL=$(uname -r)
 echo "System:       $(uname -n), $NCPUS CPUs, ${MEM_GB}GB RAM, kernel $KERNEL"
 echo "Postmaster:   PID $PM_PID"
@@ -95,6 +118,8 @@ if [[ -x "$PSQL" ]]; then
         echo "              Consider: ALTER SYSTEM SET shared_preload_libraries TO '';"
         echo "              and restart PostgreSQL for clean measurements."
     fi
+else
+    PSQL=psql
 fi
 
 # Check for other tracers (perf, strace, bpftrace)
@@ -120,7 +145,8 @@ echo ""
 
 extract_tps() {
     # Extract "tps = 1234.56" (excluding connection establishing) from pgbench output
-    grep -oP 'tps = \K[\d.]+' | tail -1
+    awk '$1 == "tps" && $2 == "=" && $3 ~ /^[0-9]+([.][0-9]+)?$/ {tps=$3}
+         END {if (tps != "") print tps}'
 }
 
 # Compute mean from a space-separated list of numbers
@@ -141,29 +167,149 @@ calc_stddev() {
     }'
 }
 
-# Run pgbench once with warmup, return TPS
+# /proc/stat's aggregate CPU row: steal is field 9 (cumulative clock ticks).
+read_steal() {
+    awk '$1 == "cpu" && NF >= 9 {print $9; found=1; exit}
+         END {if (!found) exit 1}' /proc/stat 2>/dev/null || echo unavailable
+}
+
+capture_pg_log() {
+    local logfile data_dir
+    # Neither this script nor run_all.sh has a server-log variable. Ask the
+    # logging collector first, then try the postmaster's redirected stderr
+    # (e.g. Debian clusters without logging_collector). Never read a pipe.
+    logfile=$("$PSQL" -U postgres -d postgres -tAc 'SELECT pg_current_logfile()' 2>/dev/null) || logfile=""
+    if [[ -n "$logfile" && "$logfile" != /* ]]; then
+        data_dir=$("$PSQL" -U postgres -d postgres -tAc 'SHOW data_directory' 2>/dev/null) || data_dir=""
+        if [[ -n "$data_dir" ]]; then
+            logfile="$data_dir/$logfile"
+        else
+            logfile=""
+        fi
+    fi
+    if [[ ! -f "$logfile" || ! -r "$logfile" ]]; then
+        logfile=$(readlink "/proc/$PM_PID/fd/2" 2>/dev/null) || logfile=""
+    fi
+    if [[ -f "$logfile" && -r "$logfile" ]]; then
+        echo "PostgreSQL log: $logfile"
+        tail -n 20 "$logfile" || echo "PostgreSQL log unavailable: tail failed"
+    else
+        echo "PostgreSQL log unavailable: pg_current_logfile() and postmaster stderr did not locate a readable regular file"
+    fi
+}
+
+check_tracer_alive() {
+    local stage=$1
+    if ! kill -0 "$tracer_pid" 2>/dev/null; then
+        echo "ERROR: tracer liveness: not running $stage" >&2
+        return 1
+    fi
+}
+
+wait_tracer_ready() {
+    local attempt
+    # Provider startup precedes pgbench. Poll for at most 20 seconds; this
+    # waits for readiness without retrying any workload measurement.
+    for ((attempt=0; attempt<=100; attempt++)); do
+        check_tracer_alive 'while waiting for provider readiness' || return 1
+        if grep -qxF 'INFO: capture provider: full (exact fidelity)' "$tracer_stderr"; then
+            return 0
+        fi
+        if [[ "$attempt" -lt 100 ]]; then
+            sleep 0.2
+        fi
+    done
+    echo 'ERROR: tracer liveness: full-mode attach signal missing after 20s readiness wait' >&2
+    return 1
+}
+
+check_tracer() {
+    local stage=$1
+    check_tracer_alive "$stage" || return 1
+    # src/daemon.c:1857-1859, after provider->start and the backend scan;
+    # src/provider_full.c names this provider 'full' with EXACT fidelity.
+    if ! grep -qxF 'INFO: capture provider: full (exact fidelity)' "$tracer_stderr"; then
+        echo "ERROR: tracer liveness: full-mode attach signal missing $stage" >&2
+        return 1
+    fi
+    # Provider startup alone does not prove a backend watchpoint attached:
+    # full_start() is a no-op (src/provider_full.c:21-25). Require the verbose
+    # client success from src/backend.c:1297-1300 before stopping each run.
+    if ! grep -qE '^INFO: PID [0-9]+ initialized \(client\), real watchpoint at 0x[[:xdigit:]]+$' "$tracer_stderr"; then
+        echo "ERROR: tracer liveness: no client real watchpoint initialized $stage" >&2
+        return 1
+    fi
+    # src/backend.c:358-363 distinguishes a live attach failure from an exit
+    # race (gone/exiting). Only the live failure makes this run invalid.
+    if grep -qE '^WP-ATTACH-FAIL: .*liveness=live([[:space:]]|$)' "$tracer_stderr"; then
+        echo "ERROR: tracer liveness: live backend watchpoint attach failed $stage" >&2
+        return 1
+    fi
+}
+
+# Run pgbench once with warmup. Set TPS in the parent shell so failures and
+# the EXIT trap cannot be lost inside command substitution.
 run_pgbench() {
     local clients=$1
+    local evidence=$2
+    local status=0 before after
 
     # Warmup (discard results)
     if [[ "$WARMUP" -gt 0 ]]; then
         pgbench -U postgres -d postgres -c "$clients" -j "$clients" \
-            -T "$WARMUP" $PGBENCH_EXTRA > /dev/null 2>&1 || true
+            -T "$WARMUP" $PGBENCH_EXTRA > "$evidence.warmup" 2>&1 || status=$?
+        if [[ "$status" -ne 0 ]]; then
+            echo "ERROR: pgbench warmup failed (exit $status): $evidence.warmup" >&2
+            cat "$evidence.warmup" >&2
+            return 1
+        fi
     fi
 
     # Measured run
-    local output
-    output=$(pgbench -U postgres -d postgres -c "$clients" -j "$clients" \
-        -T "$DURATION" $PGBENCH_EXTRA 2>&1)
-    local tps
-    tps=$(echo "$output" | extract_tps)
-    if [[ -z "$tps" ]]; then
-        echo "ERROR: pgbench failed to produce TPS output" >&2
-        echo "$output" >&2
-        echo "0"
-        return
+    before=$(read_steal)
+    pgbench -U postgres -d postgres -c "$clients" -j "$clients" \
+        -T "$DURATION" -P 5 $PGBENCH_EXTRA > "$evidence.pgbench" 2>&1 || status=$?
+    after=$(read_steal)
+    {
+        echo "Steal before: $before; after: $after (clock ticks)"
+        if [[ "$before" != unavailable && "$after" != unavailable ]]; then
+            awk -v b="$before" -v a="$after" 'BEGIN {print "Steal delta: " a-b " clock ticks"}'
+        else
+            echo "Steal delta: unavailable (/proc/stat unreadable or missing steal field)"
+        fi
+    } > "$evidence.steal"
+    capture_pg_log > "$evidence.pglog" 2>&1
+    TPS=$(extract_tps < "$evidence.pgbench")
+    if [[ "$status" -ne 0 || -z "$TPS" ]]; then
+        if [[ "$status" -ne 0 ]]; then
+            echo "ERROR: pgbench failed (exit $status): $evidence.pgbench" >&2
+        else
+            echo "ERROR: pgbench failed to produce TPS output: $evidence.pgbench" >&2
+        fi
+        cat "$evidence.pgbench" >&2
+        cat "$evidence.steal" "$evidence.pglog" >&2
+        return 1
     fi
-    echo "$tps"
+}
+
+# Evidence only: compare each run to the median of its own arm's OTHER runs.
+# Keep every run in the mean, standard deviation and existing verdict.
+report_stalls() {
+    local arm=$1 clients=$2 results=$3 run median evidence
+    local values=($results)
+    for ((run=1; run<=${#values[@]}; run++)); do
+        median=$(printf '%s\n' "${values[@]}" | awk -v skip="$run" 'NR != skip' |
+            sort -n | awk '{a[NR]=$1} END {
+                if (NR) print NR%2 ? a[(NR+1)/2] : (a[NR/2]+a[NR/2+1])/2
+            }')
+        if [[ -n "$median" ]] && awk -v t="${values[$((run-1))]}" -v m="$median" 'BEGIN {exit !(t < 0.25*m)}'; then
+            evidence="$EVIDENCE_DIR/$clients-$arm-$run"
+            echo "  STALL: $arm, $clients clients, run $run: ${values[$((run-1))]} TPS < 25% of other-run median $median (evidence only)"
+            echo "pgbench progress: $evidence.pgbench"
+            grep '^progress:' "$evidence.pgbench" || true
+            cat "$evidence.steal" "$evidence.pglog"
+        fi
+    done
 }
 
 # Count PostgreSQL backend processes (gives event transition rate proxy)
@@ -190,7 +336,7 @@ fi
 # benchmark doesn't depend on any particular scale (baseline and tracer runs
 # both read/write the same tables), so it now reads the provisioned dataset
 # read-only and never re-initializes it.
-SCALE=$(psql -U postgres -d postgres -tAc "SELECT count(*)/100000 FROM pgbench_accounts" 2>/dev/null || echo "0")
+SCALE=$("$PSQL" -U postgres -d postgres -tAc "SELECT count(*)/100000 FROM pgbench_accounts" 2>/dev/null || echo "0")
 if [[ "$SCALE" -lt 1 ]]; then
     echo "ERROR: pgbench_accounts is missing/empty in the shared 'postgres' database."
     echo "       Issue #133: this test reads the provisioned dataset read-only and"
@@ -214,13 +360,15 @@ for CLIENTS in "${CLIENT_COUNTS[@]}"; do
     echo "  Baseline (no tracer):"
     baseline_results=""
     for i in $(seq 1 "$RUNS"); do
-        tps=$(run_pgbench "$CLIENTS")
+        run_pgbench "$CLIENTS" "$EVIDENCE_DIR/$CLIENTS-baseline-$i"
+        tps=$TPS
         printf "    Run %d: %s TPS\n" "$i" "$tps"
         baseline_results+="$tps "
         if [[ -n "$OUTPUT_FILE" ]]; then
             echo "$CLIENTS,baseline,$i,$tps" >> "$OUTPUT_FILE"
         fi
     done
+    report_stalls baseline "$CLIENTS" "$baseline_results"
 
     b_mean=$(calc_mean "$baseline_results")
     b_stddev=$(calc_stddev "$baseline_results")
@@ -234,24 +382,37 @@ for CLIENTS in "${CLIENT_COUNTS[@]}"; do
         # measures the always-on watchpoint (exact) tier's overhead. The
         # default is now tiered (sampled, ~zero PG cost) — to benchmark that,
         # run without --mode.
-        "$TRACER" --mode full --pid "$PM_PID" --interval 5 --duration $((DURATION + WARMUP + 30)) \
-            --view time_model > /dev/null 2>&1 &
+        tracer_stderr="$EVIDENCE_DIR/$CLIENTS-tracer-$i.stderr"
+        "$TRACER" --mode full --verbose --pid "$PM_PID" --interval 5 --duration $((DURATION + WARMUP + 30)) \
+            --view time_model > /dev/null 2> "$tracer_stderr" &
         tracer_pid=$!
-        sleep 2  # let tracer attach all backends
+        wait_tracer_ready
 
-        tps=$(run_pgbench "$CLIENTS")
+        run_pgbench "$CLIENTS" "$EVIDENCE_DIR/$CLIENTS-tracer-$i"
+        tps=$TPS
         printf "    Run %d: %s TPS\n" "$i" "$tps"
         tracer_results+="$tps "
 
         # Stop tracer
-        kill "$tracer_pid" 2>/dev/null || true
-        wait "$tracer_pid" 2>/dev/null || true
+        check_tracer 'after pgbench, before stop'
+        kill "$tracer_pid"
+        tracer_status=0
+        wait "$tracer_pid" || tracer_status=$?
+        tracer_pid=""
+        # SIGTERM is our normal stop request; accept a clean handler exit or
+        # default signal termination, but never hide a different failure.
+        if [[ "$tracer_status" -ne 0 && "$tracer_status" -ne 143 ]]; then
+            echo "ERROR: tracer liveness: unexpected exit $tracer_status at stop" >&2
+            exit 1
+        fi
+        tracer_stderr=""
         sleep 1
 
         if [[ -n "$OUTPUT_FILE" ]]; then
             echo "$CLIENTS,tracer,$i,$tps" >> "$OUTPUT_FILE"
         fi
     done
+    report_stalls tracer "$CLIENTS" "$tracer_results"
 
     t_mean=$(calc_mean "$tracer_results")
     t_stddev=$(calc_stddev "$tracer_results")

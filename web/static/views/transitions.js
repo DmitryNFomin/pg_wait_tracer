@@ -39,7 +39,7 @@ import {
     buildTransitionsFidelity,
 } from '../lib/builders/transitions.js';
 import {
-    isUnavailable, SAMPLED_BAND_COLOR, SAMPLED_BORDER, MIXED_BAND_COLOR, MIXED_BORDER,
+    isUnavailable, fidelityBandStyle,
 } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
 import { esc } from '../lib/format.js';
@@ -57,21 +57,21 @@ function renderFidelityChip(model) {
         '<span style="width:14px;height:10px;display:inline-block;border-radius:2px;' +
         'background:' + fill + ';border:1px dashed ' + border + '"></span>';
     let html = '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center">' +
-        '<span>' + esc(model.fidelityLabel) + '</span>' +
-        '<span style="display:inline-flex;align-items:center;gap:5px">' +
-        swatch(SAMPLED_BAND_COLOR, SAMPLED_BORDER) + 'sampled</span>';
-    if (model.fidelity === 'mixed') {
+        '<span>' + esc(model.fidelityLabel) + '</span>';
+    for (const kind of new Set(model.stripBands.map(b => b.kind))) {
+        const style = fidelityBandStyle(kind);
+        const label = kind === 'sampled' ? 'sampled' : kind === 'mixed' ? 'mixed window' : style.label;
         html += '<span style="display:inline-flex;align-items:center;gap:5px">' +
-            swatch(MIXED_BAND_COLOR, MIXED_BORDER) + 'mixed window</span>';
+            swatch(style.fill, style.border) + esc(label) + '</span>';
     }
     html += '</div><div role="img" aria-label="Window fidelity bands" ' +
         'style="position:relative;height:10px;margin-top:6px;background:#1a1a2e">';
     for (const band of model.stripBands) {
-        const mixed = band.kind === 'mixed';
-        html += '<span title="' + esc(band.kind) + '" style="position:absolute;box-sizing:border-box;' +
+        const style = fidelityBandStyle(band.kind);
+        const label = band.kind === 'sampled' || band.kind === 'mixed' ? band.kind : style.label;
+        html += '<span title="' + esc(label) + '" style="position:absolute;box-sizing:border-box;' +
             'height:100%;left:' + band.left + '%;width:' + band.width + '%;background:' +
-            (mixed ? MIXED_BAND_COLOR : SAMPLED_BAND_COLOR) + ';border:1px dashed ' +
-            (mixed ? MIXED_BORDER : SAMPLED_BORDER) + '"></span>';
+            style.fill + ';border:1px dashed ' + style.border + '"></span>';
     }
     html += '</div>';
     if (model.window) {
