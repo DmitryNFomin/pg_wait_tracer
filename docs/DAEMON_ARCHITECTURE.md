@@ -427,3 +427,32 @@ SELECT * FROM pgwt_query_events(
 | `src/retention.c/h` | NEW — file retention manager (delete old files) |
 | `ext/pg_wait_tracer_ext.c` | NEW (future) — PG extension SQL functions |
 | `lib/pgwt_reader.c/h` | NEW (future) — shared library for file reading (CLI + extension) |
+
+Auxiliary processes retain their closed seed on an incoherent read without
+classification or proof counters. Escalation preseeds a client backend with
+query ID 0, command closed and quality NONE
+only after a failed coherent read and positive proof from a pinned process
+identity: gone/Z/X, PF_EXITING with zero virtual size, a successfully read NULL
+MyBEEntry on PG14+, or a coherent own-pid startup row with database and user 0
+and no command open. PG13 clients also qualify when a coherent, complete row
+previously accepted by the sampler for that pid incarnation now names zero or
+another pid. The acceptance record contains the row address, pid, process start
+time and shared-memory generation; candidate addresses and computed hints do
+not qualify. The pinned stat start time must match before and after the proof
+read, and a fresh mapping check must confirm the same generation with recovery
+READY. A retirement observed first by the sampler survives address invalidation
+under those same checks; reset, generation change or recovery outside READY
+clears the record. `exact_preseed_retired_zero_total` and
+`exact_preseed_retired_other_pid_total` separate the two outcomes (a rising
+other-pid count can reveal a wrong-address problem). These proofs also cover a
+FATAL during a command without a close edge. Proof classes and the generation's
+backend count are reported beside `exact_preseed_entries`; other failures remain counted
+rollbacks, including PG13 startup without proof. For a proof-seeded backend, a command
+open at the boundary that closes before the seed read has that slice attributed
+to no query, bounded by seed-loop latency; `exact_preseed_no_command_total`
+counts backend proof-seeding attempts, including attempts in escalations that
+later roll back, not an estimate of the lost duration. The lifetime proof-class
+counters include those attempts too. Coverage for
+backends without an exact wait stream during a window is tracked in #934. Late
+attach refuses an incoherent seed instead of overwriting a coherent seed from
+the same generation, and reports the refusal and failed attach seed counts.

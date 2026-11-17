@@ -337,6 +337,19 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cJSON_AddNumberToObject(root, "exact_preseed_entries",
                             pgwt_exact_seed_count((struct pgwt_daemon *)d,
                                                   d->escalation.generation));
+    cJSON_AddNumberToObject(root, "exact_preseed_no_command_entries",
+        d->exact_probes.preseed_generation == d->escalation.generation
+            ? d->exact_probes.preseed_no_command : 0);
+    cjson_add_uint64(root, "exact_preseed_no_command_total", ctr->exact_preseed_no_command_total);
+    cjson_add_uint64(root, "exact_preseed_gone_total", ctr->exact_preseed_gone_total);
+    cjson_add_uint64(root, "exact_preseed_exiting_total", ctr->exact_preseed_exiting_total);
+    cjson_add_uint64(root, "exact_preseed_null_entry_total", ctr->exact_preseed_null_entry_total);
+    cjson_add_uint64(root, "exact_preseed_startup_total", ctr->exact_preseed_startup_total);
+    cjson_add_uint64(root, "exact_preseed_retired_zero_total", ctr->exact_preseed_retired_zero_total);
+    cjson_add_uint64(root, "exact_preseed_retired_other_pid_total", ctr->exact_preseed_retired_other_pid_total);
+    cjson_add_uint64(root, "exact_preseed_failures_total", ctr->exact_preseed_failures_total);
+    cjson_add_uint64(root, "exact_preseed_overwrite_refusals_total", ctr->exact_preseed_overwrite_refusals_total);
+    cjson_add_uint64(root, "exact_preseed_late_attach_failures_total", ctr->exact_preseed_late_attach_failures_total);
     cjson_add_uint64(root, "sample_read_failures_total",
                      pm.sample_read_failures_total);
     cJSON_AddNumberToObject(root, "sample_read_targets",

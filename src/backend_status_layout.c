@@ -993,6 +993,14 @@ static ssize_t pread_exact(int fd, void *buf, size_t size, uint64_t addr)
     return n == (ssize_t)size ? n : -1;
 }
 
+static int read_entry_pointer_fd(int fd, uint64_t addr, uint64_t *base)
+{
+    *base = 0;
+    if (!addr || pread_exact(fd, base, sizeof(*base), addr) < 0)
+        return PGWT_PGBS_PRESEED_FAILED;
+    return *base == 0 ? PGWT_PGBS_PRESEED_ABSENT : PGWT_PGBS_PRESEED_ROW;
+}
+
 static int read_field_value(int fd, uint64_t base,
                             const struct pgwt_pgbs_field *field,
                             uint64_t *value)
@@ -1367,8 +1375,8 @@ int pgwt_pgbs_read_sampled_attr(
     int fd = open_mem(backend_pid);
     if (fd < 0) return -1;
     uint64_t base = 0;
-    int rc = -1;
-    if (pread_exact(fd, &base, sizeof(base), my_be_entry_addr) >= 0 && base)
+    int rc = read_entry_pointer_fd(fd, my_be_entry_addr, &base);
+    if (rc == PGWT_PGBS_PRESEED_ROW)
         rc = read_sampled_attr_at_fd(fd, backend_pid, base, layout, out);
     close(fd);
     return rc;
@@ -1685,6 +1693,13 @@ void pgwt_pgbs_resolve_pg13_batch(pid_t postmaster_pid,
     struct pgwt_pgbs_batch_target *targets, size_t n,
     struct pgwt_pgbs_maps_cache *maps_cache, uint64_t *scan_total)
 {
+    if (layout && layout->major == 13 && targets && n <= PGWT_PGBS_BATCH_MAX)
+        for (size_t i = 0; i < n; i++) {
+            struct pgwt_pgbs_reader *r = targets[i].reader;
+            if (r && (layout->pg13_recovery != PGWT_PGBS_PG13_READY ||
+                      r->accepted.shm_generation != layout->shm_generation))
+                memset(&r->accepted, 0, sizeof(r->accepted));
+        }
     if (!layout || !pgwt_pgbs_sampled_activity_enabled(layout) ||
         !targets || !n || n > PGWT_PGBS_BATCH_MAX || postmaster_pid <= 0 ||
         (!layout->shm_generation || layout->pg13_recovery != PGWT_PGBS_PG13_READY))
@@ -1971,6 +1986,13 @@ void pgwt_pgbs_read_batch(pid_t postmaster_pid,
         memset(&targets[i].gate, 0, sizeof(targets[i].gate));
         targets[i].rc = -1; targets[i].error = EAGAIN;
     }
+    if (layout && layout->major == 13)
+        for (size_t i = 0; i < n; i++) {
+            struct pgwt_pgbs_reader *r = targets[i].reader;
+            if (r && (layout->pg13_recovery != PGWT_PGBS_PG13_READY ||
+                      r->accepted.shm_generation != layout->shm_generation))
+                memset(&r->accepted, 0, sizeof(r->accepted));
+        }
     /* Live negative control: leave every target unread and issue no status
      * syscall. Both the volume floor and positive-attribution gate must fail. */
     if (getenv("PGWT_TEST_DISABLE_STATUS_BATCH")) {
@@ -2082,6 +2104,23 @@ void pgwt_pgbs_read_batch(pid_t postmaster_pid,
             }
             struct pgwt_pgbs_snapshot snapshot;
             batch_decode(layout, row, lo, text_len, &snapshot);
+            struct pgwt_pgbs_reader *reader = targets[i].reader;
+            if (layout->major == 13 && !reader->candidate &&
+                reader->accepted.address == reader->status_addr &&
+                reader->accepted.pid == targets[i].pid &&
+                snapshot.procpid != (uint32_t)targets[i].pid &&
+                !reader->accepted.exit_observed) {
+                /* Pin and re-read on this failure path only. The observation
+                 * survives the normal invalidation below, not reader reset. */
+                char path[64];
+                snprintf(path, sizeof(path), "/proc/%d/stat", targets[i].pid);
+                int fd = open(path, O_RDONLY | O_CLOEXEC);
+                if (fd >= 0) {
+                    reader->accepted.exit_observed = pgwt_pgbs_read_retirement(
+                        targets[i].pid, postmaster_pid, fd, &reader->accepted, layout);
+                    close(fd);
+                }
+            }
             if (text_len && snapshot.activity_raw != targets[i].reader->activity_addr) {
                 /* Re-resolve through the target's OWN pid with caller backoff. */
                 targets[i].reader->status_addr = 0;
@@ -2119,6 +2158,13 @@ void pgwt_pgbs_read_batch(pid_t postmaster_pid,
                     continue;
                 }
                 r->candidate = false;
+                if (layout->major == 13 && layout->shm_generation &&
+                    r->shm_generation == layout->shm_generation)
+                    r->accepted = (struct pgwt_pgbs_acceptance){
+                        .address = r->status_addr, .pid = r->pid,
+                        .start_time = r->start_time,
+                        .shm_generation = layout->shm_generation,
+                    };
             }
             if (targets[i].rc >= 0) targets[i].error = 0;
         }
@@ -2196,12 +2242,13 @@ static uint64_t scan_shared_for_entry(pid_t pid,
     return matches == 1 ? found : 0;
 }
 
-static uint64_t resolve_entry_fd(
-    pid_t backend_pid, int mem_fd, const struct PgBackendStatusLayout *layout)
+static int resolve_entry_fd(pid_t backend_pid, int mem_fd,
+    const struct PgBackendStatusLayout *layout, uint64_t *resolved)
 {
+    *resolved = 0;
     if (!layout || backend_pid <= 0 ||
         !pgwt_pgbs_sampled_activity_enabled(layout))
-        return 0;
+        return PGWT_PGBS_PRESEED_FAILED;
 
     /* Runtime PG13 resolution stays close to the row proved by startup
      * validation. PgBackendStatus rows form one shared, fixed-stride array;
@@ -2212,7 +2259,7 @@ static uint64_t resolve_entry_fd(
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", backend_pid);
     FILE *maps = fopen(maps_path, "r");
     if (!maps)
-        return 0;
+        return PGWT_PGBS_PRESEED_FAILED;
     while (fgets(line, sizeof(line), maps)) {
         unsigned long long start, end;
         char perms[5] = "";
@@ -2226,13 +2273,13 @@ static uint64_t resolve_entry_fd(
     }
     fclose(maps);
     if (!map_start || !map_end || !layout->struct_size)
-        return 0;
+        return PGWT_PGBS_PRESEED_FAILED;
 
     bool owns_fd = mem_fd < 0;
     if (owns_fd)
         mem_fd = open_mem(backend_pid);
     if (mem_fd < 0)
-        return 0;
+        return PGWT_PGBS_PRESEED_FAILED;
     struct pgwt_pgbs_expected expected = {.pid = backend_pid};
     struct pgwt_pgbs_snapshot snapshot;
     uint64_t found = 0;
@@ -2266,13 +2313,114 @@ static uint64_t resolve_entry_fd(
     }
     if (owns_fd)
         close(mem_fd);
-    return found;
+    *resolved = found;
+    /* PG13 has no positive absence proof: no matching row is unknown. */
+    return found ? PGWT_PGBS_PRESEED_ROW : PGWT_PGBS_PRESEED_FAILED;
 }
 
 uint64_t pgwt_pgbs_resolve_entry(
     pid_t backend_pid, const struct PgBackendStatusLayout *layout)
 {
-    return resolve_entry_fd(backend_pid, -1, layout);
+    uint64_t base = 0;
+    resolve_entry_fd(backend_pid, -1, layout, &base);
+    return base;
+}
+
+int pgwt_pgbs_read_preseed(pid_t pid, uint64_t my_be_entry_addr,
+    uint64_t status_addr, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_snapshot *snapshot)
+{
+    if (!snapshot || pid <= 0 || !pgwt_pgbs_sampled_attr_enabled(layout))
+        return PGWT_PGBS_PRESEED_FAILED;
+    memset(snapshot, 0, sizeof(*snapshot));
+    int fd = open_mem(pid);
+    if (fd < 0) return PGWT_PGBS_PRESEED_FAILED;
+    int rc = PGWT_PGBS_PRESEED_FAILED;
+    uint64_t base = status_addr;
+    if (layout->major >= 14) {
+        rc = read_entry_pointer_fd(fd, my_be_entry_addr, &base);
+        if (rc != PGWT_PGBS_PRESEED_ROW)
+            goto done;
+    } else if (!base) {
+        /* An unresolved PG13 row does not prove there is no command. */
+        if (resolve_entry_fd(pid, fd, layout, &base) != PGWT_PGBS_PRESEED_ROW)
+            goto done;
+    }
+    rc = PGWT_PGBS_PRESEED_FAILED;
+    uint32_t wanted = PGWT_PGBS_READ_CHANGECOUNT | PGWT_PGBS_READ_PROCPID |
+        PGWT_PGBS_READ_DATABASEID | PGWT_PGBS_READ_USERID | PGWT_PGBS_READ_STATE;
+    if (base && read_snapshot_fd(fd, base, layout, wanted, snapshot, NULL, 0) == 0 &&
+        (snapshot->read_mask & wanted) == wanted &&
+        snapshot_untorn(snapshot->changecount_before, snapshot->changecount_after) &&
+        snapshot->state <= (uint32_t)layout->state_max) {
+        if (snapshot->procpid == (uint32_t)pid)
+            rc = PGWT_PGBS_PRESEED_ROW;
+        else if (layout->major == 13)
+            rc = PGWT_PGBS_PRESEED_RETIRED;
+    }
+done:
+    close(fd);
+    return rc;
+}
+
+int pgwt_pgbs_retirement_proof(const struct pgwt_pgbs_acceptance *accepted,
+    pid_t pid, const struct PgBackendStatusLayout *layout,
+    uint64_t current_generation, uint64_t before, uint64_t after,
+    int result, const struct pgwt_pgbs_snapshot *row)
+{
+    if (!layout || layout->major != 13 || !accepted || !accepted->address ||
+        pid <= 0 || accepted->pid != pid || !accepted->start_time ||
+        !accepted->shm_generation ||
+        accepted->shm_generation != layout->shm_generation ||
+        accepted->shm_generation != current_generation ||
+        layout->pg13_recovery != PGWT_PGBS_PG13_READY ||
+        before != accepted->start_time || after != accepted->start_time)
+        return PGWT_PGBS_RETIRED_NONE;
+    if (accepted->exit_observed == PGWT_PGBS_RETIRED_ZERO ||
+        accepted->exit_observed == PGWT_PGBS_RETIRED_OTHER_PID)
+        return accepted->exit_observed;
+    uint32_t required = PGWT_PGBS_READ_CHANGECOUNT | PGWT_PGBS_READ_PROCPID |
+        PGWT_PGBS_READ_DATABASEID | PGWT_PGBS_READ_USERID | PGWT_PGBS_READ_STATE;
+    if (result != PGWT_PGBS_PRESEED_RETIRED || !row ||
+        (row->read_mask & required) != required ||
+        !snapshot_untorn(row->changecount_before, row->changecount_after) ||
+        row->procpid == (uint32_t)pid)
+        return PGWT_PGBS_RETIRED_NONE;
+    return row->procpid == 0 ? PGWT_PGBS_RETIRED_ZERO : PGWT_PGBS_RETIRED_OTHER_PID;
+}
+
+static int pinned_start_time(int fd, uint64_t *start_time);
+
+int pgwt_pgbs_read_retirement(pid_t pid, pid_t postmaster_pid, int stat_fd,
+    struct pgwt_pgbs_acceptance *accepted,
+    const struct PgBackendStatusLayout *layout)
+{
+    if (!accepted || !layout || layout->major != 13)
+        return PGWT_PGBS_RETIRED_NONE;
+    if (layout->pg13_recovery != PGWT_PGBS_PG13_READY ||
+        accepted->shm_generation != layout->shm_generation) {
+        memset(accepted, 0, sizeof(*accepted));
+        return PGWT_PGBS_RETIRED_NONE;
+    }
+    if (!accepted->address || accepted->pid != pid)
+        return PGWT_PGBS_RETIRED_NONE;
+    uint64_t before = 0, after = 0;
+    if (pinned_start_time(stat_fd, &before) != 0) return PGWT_PGBS_RETIRED_NONE;
+    struct pgwt_pgbs_snapshot row = {0};
+    int result = PGWT_PGBS_PRESEED_FAILED;
+    if (!accepted->exit_observed)
+        result = pgwt_pgbs_read_preseed(pid, 0, accepted->address, layout, &row);
+    if (pinned_start_time(stat_fd, &after) != 0) return PGWT_PGBS_RETIRED_NONE;
+    /* Unlike the interval cache, this maps observation is fresh at seed time. */
+    struct pgwt_pgbs_mapping map = pg13_main_mapping(postmaster_pid, layout);
+    uint64_t current = map.lo == layout->shm_start && map.hi == layout->shm_end &&
+        postmaster_pid == layout->generation_postmaster ? map.identity : 0;
+    if (!current || current != accepted->shm_generation) {
+        memset(accepted, 0, sizeof(*accepted));
+        return PGWT_PGBS_RETIRED_NONE;
+    }
+    return pgwt_pgbs_retirement_proof(accepted, pid, layout, current,
+                                      before, after, result, &row);
 }
 
 static int postmaster_connection(pid_t postmaster_pid, int *port,
@@ -2467,6 +2615,49 @@ static uint64_t validation_cleanup_deadline(uint64_t overall_deadline_ms)
                          : overall_deadline_ms +
                            PGWT_PGBS_CLEANUP_TIMEOUT_MS;
     return deadline_from_now(PGWT_PGBS_CLEANUP_TIMEOUT_MS, cleanup_cap);
+}
+
+static int pinned_start_time(int fd, uint64_t *start_time)
+{
+    if (fd < 0 || !start_time) return -1;
+    char line[4096];
+    ssize_t got;
+    do { got = pread(fd, line, sizeof(line) - 1, 0); } while (got < 0 && errno == EINTR);
+    if (got <= 0 || got == (ssize_t)sizeof(line) - 1)
+        return -1;
+    line[got] = '\0';
+
+    /* comm (field 2) may contain spaces and parentheses.  Field 3 starts
+     * after the final ')'; walk tokens through field 22 (starttime). */
+    char *cursor = strrchr(line, ')');
+    if (!cursor)
+        return -1;
+    cursor++;
+    for (int field = 3; field <= 22; field++) {
+        while (*cursor && isspace((unsigned char)*cursor))
+            cursor++;
+        if (!*cursor)
+            return -1;
+        char *end = cursor;
+        while (*end && !isspace((unsigned char)*end))
+            end++;
+        if (field == 22) {
+            errno = 0;
+            char saved = *end;
+            *end = '\0';
+            char *number_end = NULL;
+            unsigned long long value = strtoull(cursor, &number_end, 10);
+            bool valid = !errno && number_end != cursor &&
+                         *number_end == '\0' && *cursor != '-' && value != 0;
+            *end = saved;
+            if (!valid)
+                return -1;
+            *start_time = (uint64_t)value;
+            return 0;
+        }
+        cursor = end;
+    }
+    return -1;
 }
 
 int pgwt_pgbs_pid_start_time(pid_t pid, uint64_t *start_time)

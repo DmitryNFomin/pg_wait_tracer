@@ -41,12 +41,23 @@ struct pgwt_counters {
     uint64_t lifecycle_events_total;   /* fork/init/exit/query_text events */
     uint64_t wp_attach_failures_total; /* operation failure without ESRCH + exit proof;
                                       * includes bootstrap and validation refusals */
+<<<<<<< ours
     uint64_t wp_attach_exit_race_total; /* ESRCH with pinned gone/Z/X or PF_EXITING + zero vsize proof */
     /* Live/gone/unknown subsets of failed hardware operations, excluding lifecycle
      * eligibility refusals and proven ESRCH exit races. */
     uint64_t wp_attach_failures_live_total;
     uint64_t wp_attach_failures_unknown_total;
     uint64_t wp_attach_failures_gone_total; /* non-ESRCH failure on a gone target */
+=======
+    uint64_t wp_attach_exit_race_total; /* attach/enable failure with original target gone */
+    uint64_t exact_preseed_no_command_total;
+    uint64_t exact_preseed_gone_total, exact_preseed_exiting_total;
+    uint64_t exact_preseed_null_entry_total, exact_preseed_startup_total;
+    uint64_t exact_preseed_retired_zero_total, exact_preseed_retired_other_pid_total;
+    uint64_t exact_preseed_failures_total;
+    uint64_t exact_preseed_overwrite_refusals_total;
+    uint64_t exact_preseed_late_attach_failures_total;
+>>>>>>> theirs
     uint64_t prev_events_total;        /* events_total at previous timer tick */
     double   events_per_sec;           /* recent rate, refreshed each tick */
 

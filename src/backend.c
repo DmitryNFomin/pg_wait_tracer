@@ -398,9 +398,10 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
      * the all-backend snapshot. Seed it now before its watchpoint is armed.
      * Post-boundary query/activity edges already captured by the BPF fork
      * enrollment win over this separate seed during resolution. */
-    if (d->exact_probes.core.generation != 0)
+    if (d->exact_probes.core.generation != 0 &&
         pgwt_exact_seed_backend(d, be->pid,
-                                d->exact_probes.core.generation, false);
+                                d->exact_probes.core.generation, false) != 0)
+        d->counters.exact_preseed_late_attach_failures_total++;
     started_ns = pgwt_debug_block_begin(d);
     preseed_state_map(d, be->pid, be->wp_addr, be->attach_ts, false);
     pgwt_debug_block_end(d, "watchpoint_preseed", be->pid, started_ns);

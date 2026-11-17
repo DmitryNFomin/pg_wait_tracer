@@ -283,6 +283,12 @@ void pgwt_pgbs_maps_cache_reset(struct pgwt_pgbs_maps_cache *cache);
  * Only the coherent batch accepts row identity; liveness stays on lifecycle
  * events. Mapping snapshots are loaded once per enrollment/postmaster pair,
  * and PG13 additionally discards them on shared-memory generation changes. */
+/* PG13 evidence created only by batch acceptance, never by resolution. */
+struct pgwt_pgbs_acceptance {
+    uint64_t address, start_time, shm_generation;
+    pid_t pid;
+    int exit_observed; /* retirement result, retained after address invalidation */
+};
 struct pgwt_pgbs_reader {
     pid_t pid;
     uint64_t start_time;
@@ -297,6 +303,7 @@ struct pgwt_pgbs_reader {
     uint64_t shm_generation;
     int32_t backend_id_hint;
     bool computed_hint;
+    struct pgwt_pgbs_acceptance accepted;
 };
 /* Readers must be zero-initialized before first enrollment. */
 int pgwt_pgbs_reader_enroll(struct pgwt_pgbs_reader *reader, pid_t pid);
@@ -384,6 +391,37 @@ int pgwt_pgbs_read_sampled_attr_at(
     struct pgwt_pgbs_sampled_attr *out);
 uint64_t pgwt_pgbs_resolve_entry(
     pid_t backend_pid, const struct PgBackendStatusLayout *layout);
+
+/* Failure-path reader: ROW (0), absent MyBEEntry (2), retired row (3), failed (-1).
+ * ROW includes startup context and passes the usual pid/counter/state checks.
+ * RETIRED is a complete, coherent PG13 pid mismatch, not a proof without an
+ * acceptance record. PG13 resolution failure is unknown, never absence. */
+enum pgwt_pgbs_preseed_result {
+    PGWT_PGBS_PRESEED_FAILED = -1,
+    PGWT_PGBS_PRESEED_ROW = 0,
+    PGWT_PGBS_PRESEED_RETIRED = 3, /* coherent complete row naming another pid */
+    PGWT_PGBS_PRESEED_ABSENT = 2, /* 1 is reserved for ATTR_NO_CONTEXT */
+};
+int pgwt_pgbs_read_preseed(pid_t pid, uint64_t my_be_entry_addr,
+    uint64_t status_addr, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_snapshot *snapshot);
+
+/* Pure PG13 retirement gate. A retained observation has already passed the
+ * row checks; identity and generation must still pass on every use. */
+enum pgwt_pgbs_retirement {
+    PGWT_PGBS_RETIRED_NONE = 0,
+    PGWT_PGBS_RETIRED_ZERO = 5,
+    PGWT_PGBS_RETIRED_OTHER_PID = 6,
+};
+int pgwt_pgbs_retirement_proof(const struct pgwt_pgbs_acceptance *accepted,
+    pid_t pid, const struct PgBackendStatusLayout *layout,
+    uint64_t current_generation, uint64_t before, uint64_t after,
+    int result, const struct pgwt_pgbs_snapshot *row);
+/* Failure path only: pinned stat before/after the RECORDED row, and a fresh
+ * postmaster maps check. A cached backend address is never consulted. */
+int pgwt_pgbs_read_retirement(pid_t pid, pid_t postmaster_pid, int stat_fd,
+    struct pgwt_pgbs_acceptance *accepted,
+    const struct PgBackendStatusLayout *layout);
 
 void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                                 pid_t postmaster_pid,

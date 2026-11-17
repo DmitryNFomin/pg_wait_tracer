@@ -96,6 +96,8 @@ struct pgwt_exact_probe_pair {
 
 struct pgwt_exact_probe_bundle {
     struct pgwt_exact_probe_core core;
+    uint64_t preseed_generation;
+    unsigned preseed_no_command;
     uint64_t query_offset;
     uint64_t activity_offset;
     bool sampled_warmup_reconciled;
@@ -206,6 +208,7 @@ int pgwt_exact_probe_quiesce(struct pgwt_daemon *d);
 void pgwt_exact_probe_release(struct pgwt_daemon *d);
 void pgwt_exact_probe_cleanup(struct pgwt_daemon *d);
 
+/* 0 published; -1 no coherent evidence; -2 seed-map write failed. */
 int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
                             uint64_t generation, bool require_coherent);
 int pgwt_exact_seed_all(struct pgwt_daemon *d, uint64_t generation);

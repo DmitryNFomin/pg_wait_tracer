@@ -311,6 +311,7 @@ void pgwt_exact_probe_core_cleanup(struct pgwt_exact_probe_core *core,
 #include "sampler.h"
 
 #include <unistd.h>
+#include <fcntl.h>
 #include <time.h>
 #include <sys/utsname.h>
 
@@ -842,12 +843,15 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
         &d->backend_status_layout);
     bool sampled_attr_enabled = pgwt_pgbs_sampled_attr_enabled(
         &d->backend_status_layout);
-    if (sampled_attr_enabled && activity_source && !require_coherent) {
+    struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+    bool auxiliary = !require_coherent && be && be->meta_parsed &&
+        be->meta.backend_type != PGWT_BT_CLIENT &&
+        be->meta.backend_type != PGWT_BT_PARALLEL_WORKER;
+    if (sampled_attr_enabled && activity_source && auxiliary) {
         /* PG13 auxiliary processes have no query activity to seed. */
         coherent = true;
     } else if (sampled_attr_enabled) {
         struct pgwt_pgbs_sampled_attr attr;
-        struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
         int attr_rc;
         if (activity_source) {
             if (be && be->pgbs_addr == 0)
@@ -861,6 +865,10 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
             attr_rc = pgwt_pgbs_read_sampled_attr(
                 pid, d->my_be_entry_addr, &d->backend_status_layout, &attr);
         }
+        /* A coherent auxiliary row without attribution context is already
+         * query-less. It is not an exiting/starting client proof seed. */
+        if (attr_rc == PGWT_PGBS_ATTR_NO_CONTEXT && auxiliary)
+            coherent = true;
         if (attr_rc == 0) {
             if (be)
                 pgwt_bm_observe_context(d->backend_meta, be,
@@ -935,8 +943,20 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
             coherent = true;
         }
     }
-    if (!coherent && require_coherent)
+    /* Auxiliary processes retain their legacy closed seed on an incoherent
+     * read. Only attribution-bearing backends need a no-command proof. */
+    if (!coherent && !auxiliary) {
+        uint32_t key = (uint32_t)pid;
+        struct pgwt_exact_seed prior = {0};
+        if (!require_coherent &&
+            bpf_map_lookup_elem(bpf_map__fd(d->skel->maps.exact_seed_map),
+                                &key, &prior) == 0 &&
+            prior.generation == generation)
+            d->counters.exact_preseed_overwrite_refusals_total++;
+        /* An incoherent late attach must neither replace a coherent seed nor
+         * publish an invented closed command when there is no seed yet. */
         return -1;
+    }
 
     uint32_t key = (uint32_t)pid;
     struct pgwt_exact_seed seed = {
@@ -947,11 +967,61 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
         .query_quality = quality,
     };
     return bpf_map_update_elem(bpf_map__fd(d->skel->maps.exact_seed_map),
-                               &key, &seed, BPF_ANY);
+                               &key, &seed, BPF_ANY) == 0 ? 0 : -2;
+}
+
+static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
+                            uint64_t generation)
+{
+    /* Pin before classification, and keep the original handle through the
+     * memory read. No /proc work is added to a successful coherent seed. */
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", be->pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int pinned = fd >= 0 ? fd : -errno;
+    int proof = pgwt_backend_no_command_fd(pinned, d->postmaster_pid);
+    if (proof == 0 && d->backend_status_layout.major == 13 &&
+        be->meta_parsed && be->meta.backend_type == PGWT_BT_CLIENT)
+        proof = pgwt_pgbs_read_retirement(be->pid, d->postmaster_pid, pinned,
+            &be->sampled_reader.accepted, &d->backend_status_layout);
+    if (proof == 0) {
+        struct pgwt_pgbs_snapshot row;
+        uint64_t addr = be->pgbs_addr ? be->pgbs_addr : be->sampled_reader.status_addr;
+        int rc = pgwt_pgbs_read_preseed(be->pid, d->my_be_entry_addr, addr,
+                                        &d->backend_status_layout, &row);
+        int after = pgwt_backend_no_command_fd(pinned, d->postmaster_pid);
+        if (after != 0) proof = after;
+        else if (rc == PGWT_PGBS_PRESEED_ABSENT) proof = 3;
+        else if (rc == PGWT_PGBS_PRESEED_ROW &&
+                 row.databaseid == 0 && row.userid == 0 &&
+                 !pgwt_pgbs_state_is_cmd_open(&d->backend_status_layout, row.state))
+            proof = 4;
+    }
+    if (fd >= 0) close(fd);
+    if (proof <= 0) return -1;
+    uint32_t key = (uint32_t)be->pid;
+    struct pgwt_exact_seed seed = {
+        .generation = generation, .snapshot_ts = mono_ns(),
+        .query_id = 0, .cmd_open = 0, .query_quality = PGWT_QUERY_QUALITY_NONE,
+    };
+    if (bpf_map_update_elem(bpf_map__fd(d->skel->maps.exact_seed_map),
+                            &key, &seed, BPF_ANY) != 0)
+        return -1;
+    d->counters.exact_preseed_no_command_total++;
+    if (proof == 1) d->counters.exact_preseed_gone_total++;
+    if (proof == 2) d->counters.exact_preseed_exiting_total++;
+    if (proof == 3) d->counters.exact_preseed_null_entry_total++;
+    if (proof == 4) d->counters.exact_preseed_startup_total++;
+    if (proof == PGWT_PGBS_RETIRED_ZERO) d->counters.exact_preseed_retired_zero_total++;
+    if (proof == PGWT_PGBS_RETIRED_OTHER_PID) d->counters.exact_preseed_retired_other_pid_total++;
+    d->exact_probes.preseed_no_command++;
+    return 0;
 }
 
 int pgwt_exact_seed_all(struct pgwt_daemon *d, uint64_t generation)
 {
+    d->exact_probes.preseed_generation = generation;
+    d->exact_probes.preseed_no_command = 0;
     /* Deterministic integration hook for anomaly retry coverage: fail exactly
      * one coherent preseed in this process, after link acquisition but before
      * publishing any generation seed. */
@@ -961,6 +1031,7 @@ int pgwt_exact_seed_all(struct pgwt_daemon *d, uint64_t generation)
         test_preseed_failed_once = true;
         fprintf(stderr, "WARN: PGWT_TEST_EXACT_PRESEED_FAIL_ONCE -- forcing "
                 "one coherent preseed rollback (TEST ONLY)\n");
+        d->counters.exact_preseed_failures_total++;
         return -1;
     }
 
@@ -977,12 +1048,12 @@ int pgwt_exact_seed_all(struct pgwt_daemon *d, uint64_t generation)
         bool needs_attr = !be->meta_parsed ||
             be->meta.backend_type == PGWT_BT_CLIENT ||
             be->meta.backend_type == PGWT_BT_PARALLEL_WORKER;
-        if (pgwt_exact_seed_backend(d, be->pid, generation, needs_attr) != 0) {
-            char proc_path[64];
-            snprintf(proc_path, sizeof(proc_path), "/proc/%d", be->pid);
-            if (access(proc_path, F_OK) == 0) {
+        int rc = pgwt_exact_seed_backend(d, be->pid, generation, needs_attr);
+        if (rc != 0) {
+            if (rc != -1 || !needs_attr || seed_no_command(d, be, generation) != 0) {
+                d->counters.exact_preseed_failures_total++;
                 fprintf(stderr, "WARN: exact generation %llu denied: cannot "
-                        "coherently preseed live PID %d\n",
+                        "coherently preseed PID %d\n",
                         (unsigned long long)generation, be->pid);
                 return -1;
             }
@@ -993,6 +1064,8 @@ int pgwt_exact_seed_all(struct pgwt_daemon *d, uint64_t generation)
 
 void pgwt_exact_seed_clear(struct pgwt_daemon *d, uint64_t generation)
 {
+    if (d->exact_probes.preseed_generation == generation)
+        d->exact_probes.preseed_no_command = 0;
     if (!d->skel)
         return;
     int fd = bpf_map__fd(d->skel->maps.exact_seed_map);
