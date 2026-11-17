@@ -186,6 +186,32 @@ def first_statement(events, query_id, sleep_event):
         "first pg_sleep must lie inside a command starting after startup Lock", sleeps, spans)
 
 
+def startup_waiter(query, relation, excluded):
+    """The one pg_database waiter with NO published status row, else None.
+
+    Another backend can block behind the test's ACCESS EXCLUSIVE lock too,
+    e.g. the PG17 autovacuum launcher (REL_17_STABLE autovacuum.c:1817,
+    get_database_list: table_open(DatabaseRelationId, AccessShareLock)).
+    Such a backend already has a published row; the startup target does not.
+    pg_stat_get_activity(NULL), unlike the view, does not block behind the lock.
+    Published waiters are recorded in `excluded` (pid -> backend_type) and
+    printed once. Two unpublished waiters are genuinely ambiguous.
+    """
+    rows = query(f"SELECT l.pid, a.pid IS NOT NULL, coalesce(a.backend_type, '') FROM pg_locks l "
+                 f"LEFT JOIN pg_stat_get_activity(NULL) a ON a.pid = l.pid "
+                 f"WHERE l.locktype='relation' AND l.relation={relation} "
+                 f"AND l.mode='AccessShareLock' AND NOT l.granted")
+    assert all(len(row) == 3 and row[1] in ("t", "f") for row in rows), ("malformed waiter rows", rows)
+    for pid, published, backend_type in rows:
+        if published == "t" and int(pid) not in excluded:
+            excluded[int(pid)] = backend_type
+            print(f"INFO: excluded published pg_database waiter PID {pid} "
+                  f"backend_type={backend_type or '<empty>'}", flush=True)
+    unpublished = [int(pid) for pid, published, _ in rows if published == "f"]
+    assert len(unpublished) <= 1, ("ambiguous startup waiter", rows)
+    return unpublished[0] if unpublished else None
+
+
 def host_checks():
     import contextlib
     import io
@@ -279,6 +305,40 @@ def host_checks():
             red += 1
         else:
             raise AssertionError("first-statement attribution control survived")
+    launcher = ["8397", "t", "autovacuum launcher"]
+    target = ["46666", "f", ""]
+    waiter_cases = 0
+    sql = []
+
+    def fixed(rows):
+        return lambda statement: sql.append(statement) or rows
+
+    excluded = {}
+    with contextlib.redirect_stdout(io.StringIO()) as shown:
+        assert startup_waiter(fixed([launcher, target]), 1262, excluded) == 46666
+        assert startup_waiter(fixed([launcher, target]), 1262, excluded) == 46666
+    assert excluded == {8397: "autovacuum launcher"}, excluded
+    assert shown.getvalue() == (
+        "INFO: excluded published pg_database waiter PID 8397 backend_type=autovacuum launcher\n")
+    assert all("pg_stat_get_activity(NULL)" in s and "relation=1262" in s and "NOT l.granted" in s
+               for s in sql), sql
+    waiter_cases += 1
+    try:
+        startup_waiter(fixed([target, ["46667", "f", ""]]), 1262, {})
+    except AssertionError as error:
+        assert "ambiguous startup waiter" in str(error), error
+        waiter_cases += 1
+    else:
+        raise AssertionError("two unpublished waiters must be ambiguous")
+    polls = iter([[launcher], [launcher], [launcher, target]])
+    alive = type("Alive", (), {"poll": lambda self: None})()
+    excluded = {}
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert startup_waiter(lambda statement: [launcher], 1262, excluded) is None
+        assert until(alive, lambda: startup_waiter(lambda s: next(polls), 1262, excluded),
+                     "waiter", 5) == 46666
+    assert next(polls, None) is None and excluded == {8397: "autovacuum launcher"}
+    waiter_cases += 1
     with tempfile.TemporaryDirectory(prefix="pgwt616-reader-host-") as temporary:
         reader = build_reader(Path(temporary))
         assert subprocess.run([str(reader)], capture_output=True).returncode == 2
@@ -311,6 +371,8 @@ def host_checks():
     assert [call.args[3] for call in arm.call_args_list] == [
         "startup", "failed-read", "skip-wait-seed", "disabled-refresh", "torn-hold"]
     print(f"startup live oracle host: 6 positive, {red} red controls; decoder build PASS")
+    print(f"startup waiter selection: {waiter_cases} cases (published waiter excluded, "
+          "two unpublished ambiguous, published-only keeps waiting) PASS")
     print("startup live skip contract: PG13/PG18 exit 77 before capture PASS")
     print("startup live arm wiring: 5 isolated hook environments; PG17 runs startup and red controls A/B/C/D PASS")
 
@@ -376,12 +438,9 @@ def run_arm(pm_pid, base, reader, label, tracer=TRACER):
                 clients.query(holder, "BEGIN; LOCK pg_catalog.pg_database IN ACCESS EXCLUSIVE MODE")
                 lock_held = True
                 worker = pool.submit(new_client, 0.3)
-                def blocked():
-                    rows = query(f"SELECT pid FROM pg_locks WHERE locktype='relation' "
-                                 f"AND relation={relation} AND mode='AccessShareLock' AND NOT granted")
-                    assert len(rows) <= 1, ("ambiguous startup waiter", rows)
-                    return int(rows[0][0]) if rows else None
-                pid = until(daemon, blocked, "new connection did not block before publication")
+                excluded = {}
+                pid = until(daemon, lambda: startup_waiter(query, relation, excluded),
+                            "new connection did not block before publication")
                 until(daemon, lambda: request(directory, "metrics")["backends_tracked"] > before["backends_tracked"],
                       "startup backend not enrolled before escalation")
                 # Observe a real lock, not a delay/title heuristic.
