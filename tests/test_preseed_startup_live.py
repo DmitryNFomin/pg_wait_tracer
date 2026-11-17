@@ -7,12 +7,16 @@ The live runner excludes those majors before invoking this test.
 --self-test exercises the duration/attribution oracle on any host; no BPF runs.
 Startup arms suppress sampler wait-address resolution (TEST ONLY, default off).
 Red C additionally disables preseed refresh: that same hold must roll back.
+Red D holds the startup backend's status change counter odd (TEST ONLY hook,
+default off) for longer than the paced torn re-read budget: it must roll back
+and count exact_preseed_torn_exhausted_total.
 Expected PG17 lines:
 PASS: PG17 cold-cache refresh, unpublished escalation, query-less startup Lock duration, first pg_sleep attribution
 PASS: red control A denied and fully rolled back
 PASS: red control B caught by startup Lock duration assertion
 PASS: red control C disabled refresh denied and fully rolled back
-test_preseed_startup_live: PASS (cold-cache startup hold, red controls A/B/C)
+PASS: red control D held odd change counter denied, counted and fully rolled back
+test_preseed_startup_live: PASS (cold-cache startup hold, red controls A/B/C/D)
 
 Source ordering verified in PostgreSQL REL_17_STABLE:
 https://github.com/postgres/postgres/blob/REL_17_STABLE/src/backend/utils/init/postinit.c
@@ -287,7 +291,7 @@ def host_checks():
              contextlib.redirect_stdout(output):
             assert main() == 77
         assert output.getvalue().strip() == f"SKIP test_preseed_startup_live: requires PG17 (running PG{version})"
-    for label in ("startup", "failed-read", "skip-wait-seed", "disabled-refresh"):
+    for label in ARMS:
         with patch.dict(os.environ, {"PGWT_TEST_UNRELATED": "1"}):
             env = arm_environment(label, Path("/tmp/selected-pid"))
         assert "PGWT_TEST_UNRELATED" not in env
@@ -295,6 +299,9 @@ def host_checks():
         assert ("PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH" in env) == (label == "disabled-refresh")
         assert ("PGWT_TEST_PRESEED_READ_FAILURE_PID_FILE" in env) == (label == "failed-read")
         assert ("PGWT_TEST_SKIP_UNPUBLISHED_WAIT_SEED" in env) == (label == "skip-wait-seed")
+        assert ("PGWT_TEST_PRESEED_TORN_PID_FILE" in env) == (label == "torn-hold")
+        if label == "torn-hold":
+            assert env["PGWT_TEST_PRESEED_TORN_PID_FILE"] == "/tmp/selected-pid"
     with patch.object(sys, "argv", ["test_preseed_startup_live.py", "--pid", "7"]), \
          patch.object(sys, "platform", "linux"), patch.object(os, "geteuid", return_value=0), \
          patch.object(subprocess, "check_output", return_value="170000"), \
@@ -302,10 +309,14 @@ def host_checks():
          patch(__name__ + ".run_arm") as arm, contextlib.redirect_stdout(io.StringIO()):
         assert main() == 0
     assert [call.args[3] for call in arm.call_args_list] == [
-        "startup", "failed-read", "skip-wait-seed", "disabled-refresh"]
+        "startup", "failed-read", "skip-wait-seed", "disabled-refresh", "torn-hold"]
     print(f"startup live oracle host: 6 positive, {red} red controls; decoder build PASS")
     print("startup live skip contract: PG13/PG18 exit 77 before capture PASS")
-    print("startup live arm wiring: 4 isolated hook environments; PG17 runs startup and red controls A/B/C PASS")
+    print("startup live arm wiring: 5 isolated hook environments; PG17 runs startup and red controls A/B/C/D PASS")
+
+
+ARMS = ("startup", "failed-read", "skip-wait-seed", "disabled-refresh", "torn-hold")
+DENIED_ARMS = {"failed-read": "A", "disabled-refresh": "C", "torn-hold": "D"}
 
 
 def arm_environment(label, selector):
@@ -318,6 +329,8 @@ def arm_environment(label, selector):
         env["PGWT_TEST_SKIP_SAMPLER_WAIT_ADDR"] = "1"
     if label == "disabled-refresh":
         env["PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH"] = "1"
+    if label == "torn-hold":
+        env["PGWT_TEST_PRESEED_TORN_PID_FILE"] = str(selector)
     return env
 
 
@@ -379,6 +392,8 @@ def run_arm(pm_pid, base, reader, label, tracer=TRACER):
                     "startup waiter unexpectedly has a published status row", pid)
                 until(daemon, lambda: f"TEST ONLY skip sampler wait address PID {pid}" in log.read_text(),
                       "sampler cold-cache hook did not reach startup PID")
+                if label == "torn-hold":
+                    selector.write_text(f"{pid}\n")
             else:
                 worker = pool.submit(new_client, 5)
                 def established():
@@ -391,8 +406,8 @@ def run_arm(pm_pid, base, reader, label, tracer=TRACER):
             send = time.monotonic_ns()
             reply = request(directory, "escalate", duration_s=15, reason="manual")
             armed = time.monotonic_ns()
-            if label in ("failed-read", "disabled-refresh"):
-                control = "A" if label == "failed-read" else "C"
+            if label in DENIED_ARMS:
+                control = DENIED_ARMS[label]
                 assert reply.get("ok") is False and reply.get("error") == (
                     "coherent exact preseed failed; escalation rolled back"), (
                     f"red control {control}: preseed must deny escalation", reply)
@@ -403,13 +418,21 @@ def run_arm(pm_pid, base, reader, label, tracer=TRACER):
                 assert metrics["exact_preseed_failures_total"] == before["exact_preseed_failures_total"] + 1, metrics
                 assert metrics["escalation_windows_total"] == before["escalation_windows_total"], metrics
                 assert metrics["exact_preseed_wait_addr_refreshed_total"] == before["exact_preseed_wait_addr_refreshed_total"], metrics
+                torn = before["exact_preseed_torn_exhausted_total"] + (label == "torn-hold")
+                assert metrics["exact_preseed_torn_exhausted_total"] == torn, metrics
+                assert request(directory, "status")["exact_preseed_torn_exhausted_total"] == torn
                 if label == "failed-read":
                     assert f"TEST ONLY forced attribution read failure PID {pid}" in log.read_text()
                     print("PASS: red control A denied and fully rolled back")
                     selector.write_text("0\n")
                 else:
                     assert f"denied: cannot coherently preseed PID {pid}" in log.read_text()
-                    print("PASS: red control C disabled refresh denied and fully rolled back")
+                    if label == "torn-hold":
+                        assert f"TEST ONLY held status change counter odd PID {pid}" in log.read_text()
+                        print("PASS: red control D held odd change counter denied, counted and fully rolled back")
+                        selector.write_text("0\n")
+                    else:
+                        print("PASS: red control C disabled refresh denied and fully rolled back")
                     clients.query(holder, "COMMIT")
                     lock_held = False
                 worker.result(timeout=10)
@@ -421,6 +444,7 @@ def run_arm(pm_pid, base, reader, label, tracer=TRACER):
             assert metrics["exact_preseed_wait_addr_refreshed_total"] >= before["exact_preseed_wait_addr_refreshed_total"] + 1, metrics
             assert request(directory, "status")["exact_preseed_wait_addr_refreshed_total"] == metrics["exact_preseed_wait_addr_refreshed_total"]
             assert metrics["exact_preseed_failures_total"] == before["exact_preseed_failures_total"], metrics
+            assert metrics["exact_preseed_torn_exhausted_total"] == before["exact_preseed_torn_exhausted_total"], metrics
             if label == "startup":
                 snapshot = request(directory, "open_intervals")
                 assert any(row["pid"] == pid and row["event_id"] >> 24 == 3
@@ -503,9 +527,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="pgwt616-startup-live-") as temporary:
         base = Path(temporary)
         reader = build_reader(base)
-        for label in ("startup", "failed-read", "skip-wait-seed", "disabled-refresh"):
+        for label in ARMS:
             run_arm(pm_pid, base, reader, label, args.tracer.resolve())
-    print("test_preseed_startup_live: PASS (cold-cache startup hold, red controls A/B/C)")
+    print("test_preseed_startup_live: PASS (cold-cache startup hold, red controls A/B/C/D)")
     return 0
 
 

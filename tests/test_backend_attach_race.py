@@ -681,13 +681,47 @@ static uint64_t resolved_wait_addr;
 static int resolve_calls, fresh_wait_shared, reuse_on_resolve;
 static int state_updates, have_state, state_failure;
 static struct pgwt_pid_state wait_state;
+/* Torn-row re-read: row reads through memory open N are torn (odd counter). */
+static int torn_opens, sleeps, resolve_errno, stat_eio_from;
+static uint64_t mono_now;
 enum { NORMAL, LIVE, GONE, ZOMBIE, DEAD, EXITING, EXITING_VSIZE, NULL_ENTRY,
        STARTUP, EIO_READ, ZERO_READ, TORN, WRONG_PID, ZERO_PID, DB_ONLY,
        USER_ONLY, STARTUP_OPEN, UNKNOWN, REUSED, BAD_STAT, MEM_ESRCH, MEM_EPERM,
        MEM_EFAULT, MISSING_FIELD, UNRESOLVED, BAD_STATE, FOREIGN, BAD_OPEN,
        ENTRY_EIO, ENTRY_ZERO, UNKNOWN_AFTER, ZERO_VSIZE, OPEN_GONE,
-       UNPUBLISHED, UNPUBLISHED_TORN, OUTSIDE, OFF_STRIDE, RACE_OK, RACE_FAIL };
-#define CHECK(x, msg) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL %s\n", msg); exit(1); } } while (0)
+       UNPUBLISHED, UNPUBLISHED_TORN, OUTSIDE, OFF_STRIDE, RACE_OK, RACE_FAIL,
+       RACE_OPEN, RACE_OPEN_FAIL };
+/* While stderr is captured, a failure still reaches the real stderr. */
+static int saved_stderr = -1;
+#define CHECK(x, msg) do { ++checks; if (!(x)) { fflush(stderr); \
+    dprintf(saved_stderr >= 0 ? saved_stderr : 2, "FAIL %s\n", msg); exit(1); } } while (0)
+/* stderr capture for diagnostics; defined before the open/close/pread fakes. */
+static char capture_path[64];
+static int capture_fd = -1;
+static void capture_begin(void)
+{
+    fflush(stderr);
+    strcpy(capture_path, "/tmp/pgwt-preseed-diag-XXXXXX");
+    capture_fd = mkstemp(capture_path);
+    CHECK(capture_fd >= 0, "create diagnostic capture");
+    saved_stderr = dup(2);
+    CHECK(saved_stderr >= 0 && dup2(capture_fd, 2) == 2, "redirect diagnostic capture");
+}
+static void capture_end(char *out, size_t size)
+{
+    fflush(stderr);
+    CHECK(dup2(saved_stderr, 2) == 2, "restore stderr");
+    close(saved_stderr); saved_stderr = -1;
+    ssize_t n = pread(capture_fd, out, size - 1, 0);
+    out[n > 0 ? n : 0] = '\0';
+    close(capture_fd); unlink(capture_path);
+}
+static int count_lines(const char *text, const char *needle)
+{
+    int n = 0;
+    for (const char *at = strstr(text, needle); at; at = strstr(at + 1, needle)) ++n;
+    return n;
+}
 static int fake_open(const char *path, int flags)
 {
     CHECK(flags == (O_RDONLY | O_CLOEXEC), "classification descriptor flags");
@@ -700,7 +734,7 @@ static int fake_open(const char *path, int flags)
     }
     CHECK(!strcmp(path, "/proc/42/mem"), "only target memory opened");
     ++mem_opens;
-    if (scenario == RACE_FAIL) {
+    if (scenario == RACE_FAIL || scenario == RACE_OPEN_FAIL) {
         CHECK(mem_opens <= 3, "reread bounded to one attempt");
         if (mem_opens >= 3) { errno = EIO; return -1; }
     }
@@ -723,7 +757,8 @@ static ssize_t fake_pread(int fd, void *buf, size_t size, off_t offset)
         if (scenario == GONE || (scenario == REUSED && stat_reads > 1)) {
             errno = ESRCH; return -1;
         }
-        if (scenario == UNKNOWN || (scenario == UNKNOWN_AFTER && stat_reads > 1)) {
+        if (scenario == UNKNOWN || (scenario == UNKNOWN_AFTER && stat_reads > 1) ||
+            (stat_eio_from && stat_reads >= stat_eio_from)) {
             errno = EIO; return -1;
         }
         char line[512];
@@ -757,14 +792,17 @@ static ssize_t fake_pread(int fd, void *buf, size_t size, off_t offset)
         scenario == OUTSIDE ? 0xa000 : scenario == OFF_STRIDE ? 0x2001 : 0x2000;
     /* 0x1008 deliberately contains NULL: off-by-eight pointer mutant. */
     else if (offset == 0x1008) value = 0;
-    else if (offset == 0x2000) value = scenario == TORN || scenario == UNPUBLISHED_TORN ? 3 : 2;
+    else if (offset == 0x2000) value = scenario == TORN || scenario == UNPUBLISHED_TORN ||
+        mem_opens <= torn_opens ? 3 : 2;
     else if (offset == 0x2004) value = recorded_live ? 42 : scenario == WRONG_PID ? 43 :
         scenario == ZERO_PID || scenario == UNPUBLISHED || scenario == UNPUBLISHED_TORN ||
         scenario == OUTSIDE || scenario == OFF_STRIDE ? 0 : 42;
     else if (offset == 0x2008) value = scenario == STARTUP || scenario == USER_ONLY || scenario == STARTUP_OPEN ||
-        ((scenario == RACE_OK || scenario == RACE_FAIL) && mem_opens == 1) ? 0 : 1;
+        ((scenario == RACE_OK || scenario == RACE_FAIL || scenario == RACE_OPEN ||
+          scenario == RACE_OPEN_FAIL) && mem_opens == 1) ? 0 : 1;
     else if (offset == 0x200c) value = scenario == STARTUP || scenario == DB_ONLY || scenario == STARTUP_OPEN ||
-        ((scenario == RACE_OK || scenario == RACE_FAIL) && mem_opens == 1) ? 0 : 10;
+        ((scenario == RACE_OK || scenario == RACE_FAIL || scenario == RACE_OPEN ||
+          scenario == RACE_OPEN_FAIL) && mem_opens == 1) ? 0 : 10;
     else if (offset == 0x2010) value = scenario == STARTUP || scenario == RACE_OK || scenario == RACE_FAIL ? 0 : scenario == BAD_STATE ? 99 : 3;
     else if (offset == 0x2018) value = 123;
     else if (offset == 0x2020) value = 0; /* PG13 no activity text needed */
@@ -811,17 +849,27 @@ static int bpf_map_get_next_key(int fd, const void *key, void *next)
 }
 static int bpf_map_delete_elem(int fd, const void *key)
 { CHECK(fd == 1 && *(const uint32_t *)key == 42, "delete generation seed"); have_seed = 0; return 0; }
-static uint64_t mono_ns(void) { return 100; }
+static uint64_t mono_ns(void) { return mono_now; }
+static int fake_nanosleep(const struct timespec *pause, struct timespec *rest)
+{
+    CHECK(pause && !rest && pause->tv_sec == 0 && pause->tv_nsec == 500000,
+          "torn reread pauses 0.5 ms");
+    ++sleeps;
+    CHECK(sleeps <= 8, "torn reread bounded");
+    return 0;
+}
+#define nanosleep fake_nanosleep
 int pgwt_addr_is_shared(pid_t pid, uint64_t addr)
 {
-    CHECK(pid == 42 && (addr == 0x5000 || addr == 0x6000), "wait address belongs to backend");
-    return addr == 0x6000 ? fresh_wait_shared : wait_shared;
+    CHECK(pid == 42 && (addr == 0x5000 || addr == 0x6000 || addr == 0xa000), "wait address belongs to backend");
+    return addr == 0x5000 ? wait_shared : fresh_wait_shared;
 }
 uint64_t pgwt_resolve_backend_wait_addr(struct pgwt_daemon *ctx, pid_t pid)
 {
     CHECK(ctx == &d && pid == 42, "resolve original backend once");
     ++resolve_calls;
     if (reuse_on_resolve) start_change_on_read = (unsigned)stat_reads + 2;
+    if (resolve_errno) errno = resolve_errno;
     return resolved_wait_addr;
 }
 static int get_config(struct pgwt_daemon *ctx, struct pgwt_exact_config *cfg)
@@ -889,6 +937,7 @@ static void reset(int test, int major)
     start_change_on_read = 0;
     mem_opens=0; wait_shared=1;
     resolved_wait_addr=0; resolve_calls=0; fresh_wait_shared=1; reuse_on_resolve=0;
+    torn_opens=sleeps=resolve_errno=stat_eio_from=0; mono_now=100;
     state_updates=have_state=state_failure=0; memset(&wait_state, 0, sizeof(wait_state));
     scenario=test; have_seed=map_failure=stat_reads=stat_opens=mem_reads=stat_closed=mem_closed=edge_present=0;
     first_read_fail = test == LIVE || test == GONE || test == ZOMBIE || test == DEAD ||
@@ -904,6 +953,19 @@ static void deny(int test, int major, const char *message)
           d.exact_probes.preseed_no_command == 0, "rollback publishes no proof seed");
     CHECK(d.counters.exact_preseed_failures_total == 1, "rollback counted");
     CHECK(stat_closed == (scenario == BAD_OPEN ? 0 : stat_opens), "failure closes pinned identity");
+}
+/* A live backend whose coherent read failed once, but whose fallback row is
+ * published with context and an open command: never a no-command proof. PG13
+ * rolls back; PG14+ takes the one coherent reread, which seeds the command. */
+static void live_command(int test, int major, const char *message)
+{
+    if (major == 13) { deny(test, major, message); return; }
+    reset(test, major);
+    CHECK(pgwt_exact_seed_all(&d, 9) == 0 && have_seed && stored.cmd_open &&
+          stored.query_id == 123 && d.counters.exact_preseed_reread_total == 1 &&
+          d.counters.exact_preseed_no_command_total == 0 &&
+          d.exact_probes.preseed_no_command == 0 && mem_opens == 3,
+          "live published backend seeds its open command through the coherent reread");
 }
 static void auxiliary(int test, int major, enum pgwt_backend_type type, const char *message)
 {
@@ -1051,6 +1113,178 @@ static void retirement_seeds(void)
     CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed,
           "PG14+ does not use PG13 retirement proof");
 }
+static uint64_t proof_counters(void)
+{
+    return d.counters.exact_preseed_gone_total + d.counters.exact_preseed_exiting_total +
+        d.counters.exact_preseed_null_entry_total + d.counters.exact_preseed_startup_total +
+        d.counters.exact_preseed_unpublished_total + d.counters.exact_preseed_retired_zero_total +
+        d.counters.exact_preseed_retired_other_pid_total;
+}
+static void torn_reread_cases(void)
+{
+    /* Beyond the bound: still torn after 8 paced re-reads denies and counts. */
+    int torn_majors[] = {13, 14, 17, 18};
+    for (unsigned i=0; i<sizeof(torn_majors)/sizeof(torn_majors[0]); ++i) {
+        int major = torn_majors[i];
+        reset(major >= 14 && major <= 17 ? UNPUBLISHED : STARTUP, major);
+        torn_opens = 1000;
+        CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed &&
+              d.counters.exact_preseed_torn_exhausted_total == 1 &&
+              d.counters.exact_preseed_failures_total == 1 &&
+              d.counters.exact_preseed_no_command_total == 0 && proof_counters() == 0,
+              "torn beyond the bound denies and counts");
+        CHECK(sleeps == 8 && d.exact_probes.preseed_torn_pauses == 8 && mem_opens == 1 + 1 + 8,
+              "torn reread spends exactly the bounded pauses, one row read each");
+        CHECK(stat_closed == stat_opens, "torn denial closes pinned identity");
+        /* The budget belongs to one escalation attempt, not the daemon. */
+        sleeps = stat_opens = stat_closed = stat_reads = mem_opens = 0; /* a fresh escalation attempt */
+        CHECK(pgwt_exact_seed_all(&d, 9) != 0 && sleeps == 8 &&
+              d.counters.exact_preseed_torn_exhausted_total == 2,
+              "torn reread budget resets per escalation attempt");
+    }
+    /* Torn, then clean within the bound: the existing proof, unchanged. */
+    for (int major=13; major<=18; ++major) {
+        for (int torn=1; torn<=8; torn+=7) {
+            int kind = major >= 14 && major <= 17 ? UNPUBLISHED : STARTUP;
+            reset(kind, major);
+            torn_opens = 1 + torn; /* the coherent read, then `torn` preseed reads */
+            CHECK(pgwt_exact_seed_all(&d, 9) == 0 && have_seed && !stored.cmd_open &&
+                  stored.query_id == 0 && stored.query_quality == PGWT_QUERY_QUALITY_NONE,
+                  "torn then clean within the bound gives the existing proof");
+            CHECK(sleeps == torn && d.counters.exact_preseed_torn_exhausted_total == 0 &&
+                  d.counters.exact_preseed_failures_total == 0,
+                  "torn then clean re-reads only until clean, uncounted");
+            CHECK(proof_counters() == 1 && (kind == UNPUBLISHED ?
+                  d.counters.exact_preseed_unpublished_total == 1 :
+                  d.counters.exact_preseed_startup_total == 1),
+                  "torn then clean counts the same proof class as an untorn row");
+        }
+    }
+    /* Identity changes between pauses: the pinned re-read refuses. Stat
+     * reads: 1 classifier, 2 re-read pin, 3 first paced pin. The row is
+     * clean by then, so only the pin can refuse it. */
+    for (int major=13; major<=18; major+=5) {
+        reset(STARTUP, major); torn_opens = 2; start_change_on_read = 3;
+        CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed && sleeps == 1 &&
+              d.counters.exact_preseed_torn_exhausted_total == 0,
+              "torn reread under a changed identity pin denies");
+    }
+    /* An identity that cannot be pinned is never re-read. */
+    reset(STARTUP, 18); torn_opens = 1000; stat_eio_from = 2;
+    CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed && sleeps == 0 && stat_reads >= 2 &&
+          d.counters.exact_preseed_torn_exhausted_total == 0,
+          "torn reread requires a readable pin");
+    /* Live red control D on the host: the hook holds the counter odd past the budget. */
+    char hook_path[] = "/tmp/pgwt-preseed-torn-XXXXXX";
+    int hook_fd = mkstemp(hook_path);
+    CHECK(hook_fd >= 0, "create torn-hold selector");
+    FILE *hook_file = fdopen(hook_fd, "w");
+    CHECK(hook_file != NULL, "open torn-hold selector");
+    fprintf(hook_file, "42\n"); fclose(hook_file);
+    for (int major=14; major<=17; major+=3) {
+        reset(UNPUBLISHED, major);
+        setenv("PGWT_TEST_PRESEED_TORN_PID_FILE", hook_path, 1);
+        char log[4096];
+        capture_begin();
+        int result = pgwt_exact_seed_all(&d, 9);
+        capture_end(log, sizeof(log));
+        unsetenv("PGWT_TEST_PRESEED_TORN_PID_FILE");
+        CHECK(result != 0 && !have_seed && sleeps == 8 && mem_opens == 1 + 1 + 8 &&
+              d.counters.exact_preseed_torn_exhausted_total == 1 &&
+              d.counters.exact_preseed_failures_total == 1 &&
+              d.counters.exact_preseed_unpublished_total == 0,
+              "held odd change counter denies escalation red control D");
+        CHECK(count_lines(log, "TEST ONLY held status change counter odd PID 42") == 1 &&
+              count_lines(log, "denied: cannot coherently preseed PID 42") == 1,
+              "red control D logs its hook and the denial");
+    }
+    unlink(hook_path);
+    reset(UNPUBLISHED, 17);
+    CHECK(pgwt_exact_seed_all(&d, 9) == 0 && sleeps == 0,
+          "torn-hold hook is default off");
+    puts("torn reread: bound 8 x 0.5 ms, beyond-bound deny+count, clean-within-bound proofs, pin, red control D PASS");
+}
+static void command_open_route_cases(void)
+{
+    /* Published with the first command already open: the coherent reread
+     * seeds the open command; it is never a no-command proof. */
+    for (int major=14; major<=18; ++major) {
+        reset(RACE_OPEN, major);
+        CHECK(pgwt_exact_seed_all(&d, 9) == 0 && have_seed && stored.cmd_open &&
+              stored.query_id == 123 && stored.query_quality == PGWT_QUERY_QUALITY_REAL,
+              "published backend with an open command seeds the command");
+        CHECK(d.counters.exact_preseed_reread_total == 1 && mem_opens == 3 &&
+              d.counters.exact_preseed_no_command_total == 0 && proof_counters() == 0 &&
+              d.counters.exact_preseed_failures_total == 0,
+              "command-open route uses the one coherent reread, no proof");
+        reset(RACE_OPEN_FAIL, major);
+        CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed && mem_opens == 3 &&
+              d.counters.exact_preseed_reread_total == 1 &&
+              d.counters.exact_preseed_failures_total == 1,
+              "command-open reread failure rolls back");
+    }
+    deny(RACE_OPEN, 13, "PG13 command-open route remains excluded");
+    puts("command-open route: coherent reread seeds the open command, failure rolls back, PG13 excluded PASS");
+}
+static void refresh_diag_cases(void)
+{
+    struct { uint64_t addr; int shared, err; const char *line; } cases[] = {
+        {0, 1, EIO, "pid=42 ptr=0x0 errno=5 is_shared=none in_shm=0 shm=[0x2000,0x9000) suppressed=0"},
+        {0x6000, 0, 0, "pid=42 ptr=0x6000 errno=0 is_shared=0 in_shm=1 shm=[0x2000,0x9000) suppressed=0"},
+        {0x6000, -1, 0, "pid=42 ptr=0x6000 errno=0 is_shared=-1 in_shm=1 shm=[0x2000,0x9000) suppressed=0"},
+    };
+    char log[8192];
+    for (unsigned i=0; i<sizeof(cases)/sizeof(cases[0]); ++i) {
+        reset(UNPUBLISHED, 17); d.backends.entries[0].wp_addr = 0;
+        resolved_wait_addr = cases[i].addr; fresh_wait_shared = cases[i].shared;
+        resolve_errno = cases[i].err;
+        capture_begin();
+        int result = pgwt_exact_seed_all(&d, 9);
+        capture_end(log, sizeof(log));
+        CHECK(result != 0 && !have_seed && resolve_calls == 1 &&
+              d.counters.exact_preseed_wait_addr_refreshed_total == 0,
+              "non-shared refresh logs the diagnostic and denies");
+        CHECK(count_lines(log, "WARN: preseed wait-address refresh not shared: ") == 1 &&
+              strstr(log, cases[i].line) != NULL,
+              "non-shared refresh diagnostic carries pointer errno shared and range");
+    }
+    reset(UNPUBLISHED, 17); d.backends.entries[0].wp_addr = 0;
+    resolved_wait_addr = 0xa000; fresh_wait_shared = 0;
+    capture_begin();
+    int outside = pgwt_exact_seed_all(&d, 9);
+    capture_end(log, sizeof(log));
+    CHECK(outside != 0 && strstr(log, "ptr=0xa000 errno=0 is_shared=0 in_shm=0 shm=[0x2000,0x9000)") != NULL,
+          "non-shared refresh diagnostic carries pointer errno shared and range");
+    /* Rate limit: one line per second, with the suppressed count. */
+    reset(UNPUBLISHED, 17); d.backends.entries[0].wp_addr = 0;
+    resolved_wait_addr = 0x6000; fresh_wait_shared = 0;
+    capture_begin();
+    int denials = 0;
+    for (int i=0; i<4; ++i) {
+        if (i == 3) mono_now += 1000000000ULL;
+        stat_opens = stat_closed = stat_reads = mem_opens = 0; /* a fresh escalation attempt */
+        denials += pgwt_exact_seed_all(&d, 9) != 0;
+    }
+    capture_end(log, sizeof(log));
+    CHECK(denials == 4 && count_lines(log, "refresh not shared") == 2 &&
+          strstr(log, "suppressed=2") != NULL && d.exact_probes.refresh_diag_suppressed == 0,
+          "refresh diagnostic is rate limited");
+    /* Red control C performs no read, so it has nothing to report. */
+    reset(UNPUBLISHED, 17); d.backends.entries[0].wp_addr = 0;
+    setenv("PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH", "1", 1);
+    capture_begin();
+    int skipped = pgwt_exact_seed_all(&d, 9);
+    capture_end(log, sizeof(log));
+    unsetenv("PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH");
+    CHECK(skipped != 0 && !strstr(log, "refresh not shared"), "disabled refresh has no pointer to report");
+    /* A successful refresh never logs. */
+    reset(UNPUBLISHED, 17); d.backends.entries[0].wp_addr = 0; resolved_wait_addr = 0x6000;
+    capture_begin();
+    int refreshed = pgwt_exact_seed_all(&d, 9);
+    capture_end(log, sizeof(log));
+    CHECK(refreshed == 0 && !strstr(log, "refresh not shared"), "shared refresh logs no diagnostic");
+    puts("refresh diagnostic: pointer, errno, is_shared, mapping range, rate limit PASS");
+}
 int main(void)
 {
     int auxiliary_majors[] = {18, 17, 13};
@@ -1071,7 +1305,7 @@ int main(void)
         CHECK(stat_opens == 0 && stat_reads == 0 &&
               d.counters.exact_preseed_no_command_total == 0 &&
               d.exact_probes.preseed_no_command == 0, "control zero proof seeds and classification cost");
-        deny(LIVE, major, "live initialised backend rolls back");
+        live_command(LIVE, major, "live initialised backend rolls back");
         if (major == 13) {
             reset(WRONG_PID, major);
             CHECK(seed_no_command(&d, &d.backends.entries[0], 9) != 0 && !have_seed,
@@ -1098,8 +1332,8 @@ int main(void)
             CHECK(!have_seed && d.exact_probes.preseed_no_command == 0 &&
                   d.counters.exact_preseed_no_command_total == 1, "clear generation preserves lifetime proof count");
         }
-        deny(EXITING_VSIZE, major, "PF_EXITING with nonzero vsize rolls back");
-        deny(ZERO_VSIZE, major, "zero vsize without PF_EXITING rolls back");
+        live_command(EXITING_VSIZE, major, "PF_EXITING with nonzero vsize rolls back");
+        live_command(ZERO_VSIZE, major, "zero vsize without PF_EXITING rolls back");
         deny(EIO_READ, major, "EIO rolls back");
         deny(ZERO_READ, major, "zero-byte memory read without exit proof rolls back");
         deny(TORN, major, "torn change counter rolls back");
@@ -1166,6 +1400,9 @@ int main(void)
               "post-boundary exact edge remains authoritative");
     }
     retirement_seeds();
+    torn_reread_cases();
+    command_open_route_cases();
+    refresh_diag_cases();
     /* UNPUBLISHED only: zero and stale-private caches, no sampler tick. */
     for (int major=14; major<=17; ++major) {
         for (int stale=0; stale<=1; ++stale) {
@@ -1312,11 +1549,11 @@ int main(void)
           d.counters.exact_preseed_failures_total == 1,
           "failed reread rolls back after one attempt");
     deny(RACE_OK, 13, "PG13 publication race retry remains excluded");
-    int no_retry[] = {EIO_READ, TORN, WRONG_PID, STARTUP_OPEN, DB_ONLY, USER_ONLY, LIVE};
+    int no_retry[] = {EIO_READ, TORN, WRONG_PID, STARTUP_OPEN, DB_ONLY, USER_ONLY};
     for (unsigned i=0; i<sizeof(no_retry)/sizeof(no_retry[0]); i++) {
         reset(no_retry[i], 18);
         CHECK(pgwt_exact_seed_all(&d, 9) != 0 && d.counters.exact_preseed_reread_total == 0,
-              "only own-pid context closed race shape retries");
+              "only own-pid context race shape retries");
     }
     printf("preseed proof/rollback/late-attach: %u assertions PASS\n", checks);
     return 0;
@@ -1343,7 +1580,9 @@ def preseed_cases(mutants):
             "pgwt_pgbs_derive_sampled_activity", "read_sampled_attr_at_fd",
             "pgwt_pgbs_read_sampled_attr_at", "pgwt_pgbs_read_sampled_attr", "unpublished_slot", "pgwt_pgbs_read_preseed",
             "pinned_start_time", "pgwt_pgbs_preseed_pin", "pgwt_pgbs_retirement_proof", "pgwt_pgbs_read_retirement")),
-        *(extract(exact, n) for n in ("test_preseed_read_failure", "pgwt_exact_seed_backend", "seed_no_command",
+        *(extract(exact, n) for n in ("test_preseed_read_failure", "pgwt_exact_seed_backend",
+                                     "test_preseed_hold_torn", "preseed_row_read", "preseed_reread_torn",
+                                     "log_refresh_not_shared", "seed_no_command",
                                      "pgwt_exact_seed_all", "pgwt_exact_seed_clear")),
     ])
     control = (ROOT / "src/control.c").read_text()
@@ -1351,11 +1590,12 @@ def preseed_cases(mutants):
                     "exact_preseed_exiting_total", "exact_preseed_null_entry_total",
                     "exact_preseed_startup_total", "exact_preseed_retired_zero_total",
                     "exact_preseed_unpublished_total", "exact_preseed_reread_total",
-                    "exact_preseed_wait_addr_refreshed_total",
+                    "exact_preseed_wait_addr_refreshed_total", "exact_preseed_torn_exhausted_total",
                     "exact_preseed_retired_other_pid_total", "exact_preseed_failures_total",
                     "exact_preseed_overwrite_refusals_total", "exact_preseed_late_attach_failures_total"):
         assert f'cjson_add_uint64(root, "{counter}", ctr->{counter});' in control, counter
     assert 'cjson_add_uint64(root, "exact_preseed_wait_addr_refreshed_total", d->counters.exact_preseed_wait_addr_refreshed_total);' in control
+    assert 'cjson_add_uint64(root, "exact_preseed_torn_exhausted_total", d->counters.exact_preseed_torn_exhausted_total);' in control
     assert '"exact_preseed_no_command_entries"' in control
     assert 'd->exact_probes.preseed_generation == d->escalation.generation' in control
     variants = [("preseed_baseline", functions, None)]
@@ -1364,8 +1604,8 @@ def preseed_cases(mutants):
             ("m1_FAILED_as_UNPUBLISHED", "if (test_preseed_read_failure(be->pid))\n            rc = PGWT_PGBS_PRESEED_FAILED;",
              "if (test_preseed_read_failure(be->pid))\n            rc = PGWT_PGBS_PRESEED_UNPUBLISHED;",
              "FAIL established pg_sleep read failure rolls back red control A"),
-            ("refresh_drop_shared_check", "if (wait_addr && pgwt_addr_is_shared(be->pid, wait_addr) == 1)",
-             "if (wait_addr)", "FAIL fresh private wait address denied"),
+            ("refresh_drop_shared_check", "if (shared == 1) {",
+             "if (wait_addr) {", "FAIL non-shared refresh logs the diagnostic and denies"),
             ("refresh_prove_without_storing", "be->wp_addr = refreshed_wait_addr;",
              "(void)refreshed_wait_addr;", "FAIL refreshed shared wait address stored"),
             ("refresh_store_before_final_pin", "refreshed_wait_addr = wait_addr;",
@@ -1380,11 +1620,11 @@ def preseed_cases(mutants):
              "while (pgwt_exact_seed_backend(d, be->pid, generation, true) != 0) {} return 0;",
              "FAIL reread bounded to one attempt"),
             ("m5_no_reread", "return pgwt_exact_seed_backend(d, be->pid, generation, true);",
-             "return -1;", "FAIL publication race reread succeeds once without proof seed"),
+             "return -1;", "FAIL live published backend seeds its open command through the coherent reread"),
             ("classify_auxiliaries", "bool needs_attr = !be->meta_parsed ||",
              "bool needs_attr = true ||",
              "FAIL logger NULL MyBEEntry alive is not proof-seeded"),
-            ("every_failure_is_exit", "if (proof <= 0) return -1;", "if (proof <= 0) proof = 1;",
+            ("every_failure_is_exit", "    if (proof <= 0) {\n", "    if (proof <= 0) proof = 1;\n    if (false) {\n",
              "FAIL live initialised backend rolls back"),
             ("proof_counter_dropped", "d->counters.exact_preseed_no_command_total++;", ";",
              "FAIL proof seed counted lifetime and generation"),
@@ -1449,6 +1689,39 @@ def preseed_cases(mutants):
             ("retirement_wrong_recorded_address", "pgwt_pgbs_read_preseed(pid, 0, accepted->address, layout, &row)",
              "pgwt_pgbs_read_preseed(pid, 0, 0x2000, layout, &row)",
              "FAIL PG13 live mid-query injected wrong cached address rolls back"),
+            # #616 r6: torn re-read, command-open route, refresh diagnostic.
+            ("a1_reader_torn_as_unpublished", "rc = PGWT_PGBS_PRESEED_TORN; /* never a row, never UNPUBLISHED */",
+             "rc = PGWT_PGBS_PRESEED_UNPUBLISHED;", "FAIL torn beyond the bound denies and counts"),
+            ("a2_exhausted_torn_as_unpublished", "        return rc;\n    }\n    return PGWT_PGBS_PRESEED_TORN;",
+             "        return rc;\n    }\n    return PGWT_PGBS_PRESEED_UNPUBLISHED;",
+             "FAIL torn beyond the bound denies and counts"),
+            ("b1_torn_reread_unbounded", "while (d->exact_probes.preseed_torn_pauses < PGWT_PRESEED_TORN_PAUSES)",
+             "while (true)", "FAIL torn reread bounded"),
+            ("b2_torn_reread_without_pin", "if (pgwt_pgbs_preseed_pin(pinned, &now) != 0 || now != pin)",
+             "if (((void)now, (void)pin, false))", "FAIL torn reread under a changed identity pin denies"),
+            ("b3_torn_budget_not_per_attempt", "    d->exact_probes.preseed_torn_pauses = 0;\n", "",
+             "FAIL torn reread budget resets per escalation attempt"),
+            ("torn_counter_dropped", "d->counters.exact_preseed_torn_exhausted_total++;", "(void)0;",
+             "FAIL torn beyond the bound denies and counts"),
+            ("torn_hold_hook_inert", "    if (hold_torn && rc != PGWT_PGBS_PRESEED_FAILED &&",
+             "    if (false && hold_torn && rc != PGWT_PGBS_PRESEED_FAILED &&",
+             "FAIL held odd change counter denies escalation red control D"),
+            ("c1_command_open_skips_coherence", "return pgwt_exact_seed_backend(d, be->pid, generation, true);",
+             "return pgwt_pgbs_state_is_cmd_open(&d->backend_status_layout, row.state) ? "
+             "((void)pgwt_exact_seed_backend(d, be->pid, generation, true), 0) : "
+             "pgwt_exact_seed_backend(d, be->pid, generation, true);",
+             "FAIL command-open reread failure rolls back"),
+            ("c2_command_open_not_routed", "rc == PGWT_PGBS_PRESEED_ROW && row.databaseid && row.userid) {",
+             "rc == PGWT_PGBS_PRESEED_ROW && row.databaseid && row.userid &&\n"
+             "                 !pgwt_pgbs_state_is_cmd_open(&d->backend_status_layout, row.state)) {",
+             "FAIL live published backend seeds its open command through the coherent reread"),
+            ("diag_silent", "                        log_refresh_not_shared(d, be->pid, wait_addr, read_errno, shared);",
+             "                        (void)read_errno; (void)log_refresh_not_shared;",
+             "FAIL non-shared refresh diagnostic carries pointer errno shared and range"),
+            ("diag_lost_errno", "int read_errno = errno;", "int read_errno = 0;",
+             "FAIL non-shared refresh diagnostic carries pointer errno shared and range"),
+            ("diag_not_rate_limited", "        d->exact_probes.refresh_diag_suppressed++;\n        return;",
+             "        d->exact_probes.refresh_diag_suppressed++;", "FAIL refresh diagnostic is rate limited"),
             ("late_attach_overwrite", "if (!coherent && !auxiliary) {\n        uint32_t key", "if (!coherent && !auxiliary && require_coherent) {\n        uint32_t key",
              "FAIL late attach preserves coherent same-generation seed"),
         ]

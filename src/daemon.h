@@ -52,6 +52,7 @@ struct pgwt_counters {
     uint64_t exact_preseed_null_entry_total, exact_preseed_startup_total;
     uint64_t exact_preseed_unpublished_total, exact_preseed_reread_total;
     uint64_t exact_preseed_wait_addr_refreshed_total;
+    uint64_t exact_preseed_torn_exhausted_total;
     uint64_t exact_preseed_retired_zero_total, exact_preseed_retired_other_pid_total;
     uint64_t exact_preseed_failures_total;
     uint64_t exact_preseed_overwrite_refusals_total;

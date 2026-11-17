@@ -990,6 +990,78 @@ static bool test_preseed_read_failure(pid_t pid)
     return got == 1 && target == pid;
 }
 
+static bool test_preseed_hold_torn(pid_t pid)
+{
+    /* TEST ONLY, default off: the selected backend's status row reads as if
+     * its change counter stayed odd for longer than the paced re-read budget.
+     * The real reads still run; only their result is replaced. */
+    const char *path = getenv("PGWT_TEST_PRESEED_TORN_PID_FILE");
+    if (!path) return false;
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    int target = 0;
+    int got = fscanf(fp, "%d", &target);
+    fclose(fp);
+    return got == 1 && target == pid;
+}
+
+static int preseed_row_read(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
+                            bool hold_torn, struct pgwt_pgbs_snapshot *row)
+{
+    int rc = pgwt_pgbs_read_preseed(pid, d->my_be_entry_addr, addr,
+                                    &d->backend_status_layout, row);
+    if (hold_torn && rc != PGWT_PGBS_PRESEED_FAILED &&
+        rc != PGWT_PGBS_PRESEED_ABSENT)
+        rc = PGWT_PGBS_PRESEED_TORN;
+    return rc;
+}
+
+static int preseed_reread_torn(struct pgwt_daemon *d, pid_t pid, int pinned,
+                               uint64_t addr, bool hold_torn,
+                               struct pgwt_pgbs_snapshot *row)
+{
+    /* Bounded paced re-read of a torn row; the bound and its reason are at
+     * PGWT_PRESEED_TORN_PAUSES. Every re-read is preceded by the retained
+     * /proc identity: same handle, same start time, or the read is FAILED. */
+    uint64_t pin = 0, now = 0;
+    if (pgwt_pgbs_preseed_pin(pinned, &pin) != 0)
+        return PGWT_PGBS_PRESEED_FAILED;
+    while (d->exact_probes.preseed_torn_pauses < PGWT_PRESEED_TORN_PAUSES) {
+        d->exact_probes.preseed_torn_pauses++;
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = PGWT_PRESEED_TORN_PAUSE_NS};
+        nanosleep(&pause, NULL);
+        if (pgwt_pgbs_preseed_pin(pinned, &now) != 0 || now != pin)
+            return PGWT_PGBS_PRESEED_FAILED;
+        int rc = preseed_row_read(d, pid, addr, hold_torn, row);
+        if (rc != PGWT_PGBS_PRESEED_TORN)
+            return rc;
+    }
+    return PGWT_PGBS_PRESEED_TORN;
+}
+
+static void log_refresh_not_shared(struct pgwt_daemon *d, pid_t pid,
+                                   uint64_t pointer, int read_errno, int shared)
+{
+    /* Diagnostic only: the decision (deny) is already made by the caller. */
+    const struct PgBackendStatusLayout *l = &d->backend_status_layout;
+    uint64_t now = mono_ns();
+    if (d->exact_probes.refresh_diag_log_ns &&
+        now - d->exact_probes.refresh_diag_log_ns < PGWT_PRESEED_REFRESH_DIAG_NS) {
+        d->exact_probes.refresh_diag_suppressed++;
+        return;
+    }
+    fprintf(stderr, "WARN: preseed wait-address refresh not shared: pid=%d "
+            "ptr=0x%llx errno=%d is_shared=%s in_shm=%d "
+            "shm=[0x%llx,0x%llx) suppressed=%llu\n", pid,
+            (unsigned long long)pointer, read_errno,
+            shared == 1 ? "1" : shared == 0 ? "0" : shared == -1 ? "-1" : "none",
+            pointer >= l->shm_start && pointer < l->shm_end ? 1 : 0,
+            (unsigned long long)l->shm_start, (unsigned long long)l->shm_end,
+            (unsigned long long)d->exact_probes.refresh_diag_suppressed);
+    d->exact_probes.refresh_diag_log_ns = now;
+    d->exact_probes.refresh_diag_suppressed = 0;
+}
+
 static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
                             uint64_t generation)
 {
@@ -1000,6 +1072,7 @@ static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     int pinned = fd >= 0 ? fd : -errno;
     uint64_t refreshed_wait_addr = 0;
+    bool torn = false;
     int proof = pgwt_backend_no_command_fd(pinned, d->postmaster_pid);
     if (proof == 0 && d->backend_status_layout.major == 13 &&
         be->meta_parsed && be->meta.backend_type == PGWT_BT_CLIENT)
@@ -1012,22 +1085,34 @@ static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
             d->backend_status_layout.major <= 17 &&
             pgwt_pgbs_preseed_pin(pinned, &before_pin) == 0;
         uint64_t addr = be->pgbs_addr ? be->pgbs_addr : be->sampled_reader.status_addr;
-        int rc = pgwt_pgbs_read_preseed(be->pid, d->my_be_entry_addr, addr,
-                                        &d->backend_status_layout, &row);
+        bool hold_torn = test_preseed_hold_torn(be->pid);
+        if (hold_torn)
+            fprintf(stderr, "WARN: TEST ONLY held status change counter odd PID %d\n",
+                    be->pid);
+        int rc = preseed_row_read(d, be->pid, addr, hold_torn, &row);
+        if (rc == PGWT_PGBS_PRESEED_TORN)
+            rc = preseed_reread_torn(d, be->pid, pinned, addr, hold_torn, &row);
         if (test_preseed_read_failure(be->pid))
             rc = PGWT_PGBS_PRESEED_FAILED;
+        torn = rc == PGWT_PGBS_PRESEED_TORN;
         uint64_t wait_addr = 0;
         if (rc == PGWT_PGBS_PRESEED_UNPUBLISHED && pin_ok) {
             wait_addr = be->wp_addr;
             if (!wait_addr || pgwt_addr_is_shared(be->pid, wait_addr) != 1) {
                 /* TEST ONLY, default off: red control for the cold-cache
                  * startup-lock hold. Never wait for a sampler tick here. */
-                wait_addr = getenv("PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH") ? 0 :
-                    pgwt_resolve_backend_wait_addr(d, be->pid);
-                if (wait_addr && pgwt_addr_is_shared(be->pid, wait_addr) == 1)
+                bool skip = getenv("PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH") != NULL;
+                errno = 0;
+                wait_addr = skip ? 0 : pgwt_resolve_backend_wait_addr(d, be->pid);
+                int read_errno = errno;
+                int shared = wait_addr ? pgwt_addr_is_shared(be->pid, wait_addr) : -2;
+                if (shared == 1) {
                     refreshed_wait_addr = wait_addr;
-                else
+                } else {
+                    if (!skip)
+                        log_refresh_not_shared(d, be->pid, wait_addr, read_errno, shared);
                     wait_addr = 0;
+                }
             }
         }
         /* Resolution and mapping validation above are covered by this final
@@ -1046,18 +1131,26 @@ static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
                  wait_addr)
             proof = 7;
         else if (d->backend_status_layout.major >= 14 &&
-                 rc == PGWT_PGBS_PRESEED_ROW && row.databaseid && row.userid &&
-                 !pgwt_pgbs_state_is_cmd_open(&d->backend_status_layout, row.state)) {
-            /* The fallback observed publication after the coherent read.
-             * Retry only that coherent reader, once; never re-enter this
-             * classifier, and never convert a failed retry into a proof. */
+                 rc == PGWT_PGBS_PRESEED_ROW && row.databaseid && row.userid) {
+            /* The fallback observed publication after the coherent read, with
+             * the command closed or already open (the first statement began
+             * in between). Retry only that coherent reader, once: it seeds an
+             * open command exactly as for an established backend. Never
+             * re-enter this classifier, and never convert a failed retry into
+             * a proof. */
             if (fd >= 0) close(fd);
             d->counters.exact_preseed_reread_total++;
             return pgwt_exact_seed_backend(d, be->pid, generation, true);
         }
     }
     if (fd >= 0) close(fd);
-    if (proof <= 0) return -1;
+    if (proof <= 0) {
+        /* Torn through the paced re-reads, with liveness otherwise proven
+         * unchanged: the rollback is counted separately from read failures. */
+        if (proof == 0 && torn)
+            d->counters.exact_preseed_torn_exhausted_total++;
+        return -1;
+    }
     uint32_t key = (uint32_t)be->pid;
     struct pgwt_exact_seed seed = {
         .generation = generation, .snapshot_ts = mono_ns(),
@@ -1089,6 +1182,7 @@ int pgwt_exact_seed_all(struct pgwt_daemon *d, uint64_t generation)
 {
     d->exact_probes.preseed_generation = generation;
     d->exact_probes.preseed_no_command = 0;
+    d->exact_probes.preseed_torn_pauses = 0;
     /* Deterministic integration hook for anomaly retry coverage: fail exactly
      * one coherent preseed in this process, after link acquisition but before
      * publishing any generation seed. */

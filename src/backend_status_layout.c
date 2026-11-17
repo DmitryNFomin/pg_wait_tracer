@@ -1013,6 +1013,11 @@ static int read_field_value(int fd, uint64_t base,
     return 0;
 }
 
+/* 0: coherent snapshot. -1: a field read failed. PGWT_PGBS_SNAPSHOT_TORN:
+ * every attempt saw an odd or changed st_changecount (a writer inside its
+ * change section); the snapshot then holds only the last attempt's counters.
+ * Callers that test `== 0` / `!= 0` see both failures alike; only the preseed
+ * tells them apart. */
 static int read_snapshot_fd(int fd, uint64_t base,
                             const struct PgBackendStatusLayout *layout,
                             uint32_t wanted_mask,
@@ -1081,7 +1086,7 @@ static int read_snapshot_fd(int fd, uint64_t base,
             continue;
         return 0;
     }
-    return -1;
+    return PGWT_PGBS_SNAPSHOT_TORN;
 }
 
 static int open_mem(pid_t pid)
@@ -2365,7 +2370,10 @@ int pgwt_pgbs_read_preseed(pid_t pid, uint64_t my_be_entry_addr,
     rc = PGWT_PGBS_PRESEED_FAILED;
     uint32_t wanted = PGWT_PGBS_READ_CHANGECOUNT | PGWT_PGBS_READ_PROCPID |
         PGWT_PGBS_READ_DATABASEID | PGWT_PGBS_READ_USERID | PGWT_PGBS_READ_STATE;
-    if (base && read_snapshot_fd(fd, base, layout, wanted, snapshot, NULL, 0) == 0 &&
+    int snap = base ? read_snapshot_fd(fd, base, layout, wanted, snapshot, NULL, 0) : -1;
+    if (snap == PGWT_PGBS_SNAPSHOT_TORN)
+        rc = PGWT_PGBS_PRESEED_TORN; /* never a row, never UNPUBLISHED */
+    else if (snap == 0 &&
         (snapshot->read_mask & wanted) == wanted &&
         snapshot_untorn(snapshot->changecount_before, snapshot->changecount_after) &&
         snapshot->state <= (uint32_t)layout->state_max) {

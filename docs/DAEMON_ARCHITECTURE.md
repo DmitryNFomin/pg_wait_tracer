@@ -454,10 +454,37 @@ the following watchpoint attachment include the backend. The counter
 `exact_preseed_wait_addr_refreshed_total` counts these successful refreshes in
 both `metrics` and `status`; failed/private/unreadable pointers remain denials.
 PG13 and PG18 never enter this refresh path.
-If the fallback instead finds an own-pid row with database/user context and a
-closed command, the coherent reader is retried exactly once (PG14+).
+If the fallback instead finds an own-pid row with database/user context, the
+coherent reader is retried exactly once (PG14+), whether the command is closed
+or already open (the backend published and began its first statement after the
+failed coherent read). That reread seeds an open command exactly as for an
+established backend; it is never a no-command proof.
 `exact_preseed_reread_total` counts these attempts, including failed attempts;
 failure still rolls the generation back. Neither path changes wait seeding order.
+
+A torn status row (the change counter odd, or changing, through the reader's
+32 back-to-back attempts) is reported to the preseed as TORN, not as a read
+failure. The usual cause is a backend inside its one startup status write
+(PG17 `pgstat_bestart`, PG18 `pgstat_bestart_initial`) while descheduled or
+faulting in pages. On the preseed failure path only, the row is re-read after
+0.5 ms pauses, at most 8 pauses (4 ms) per escalation attempt, shared by all
+torn backends in that attempt; each re-read first confirms the retained
+`/proc/<pid>/stat` handle still has the same start time. A row that becomes
+untorn is classified by the unchanged proofs above; one still torn when the
+budget is spent rolls the escalation back and is counted in
+`exact_preseed_torn_exhausted_total` (`metrics` and `status`). The sampler and
+other status readers keep their back-to-back retries and never pause. The bound
+is a choice: a scheduler tick at HZ=250 is 4 ms, and the pause can only lengthen
+an escalation that would otherwise roll back. `PGWT_TEST_PRESEED_TORN_PID_FILE`
+(TEST ONLY, default off) makes the selected pid's row read as torn on every
+attempt; red control D in `tests/test_preseed_startup_live.py` uses it.
+
+When the one-shot wait-address refresh yields no shared address, the daemon
+logs at most one line per second, `WARN: preseed wait-address refresh not
+shared:`, with the pid, the pointer the resolver returned, the errno of that
+read, the `pgwt_addr_is_shared` result (`none` when the pointer is 0) and
+whether the value lies in the validated shared mapping range. The line only
+observes the denial; it does not change it.
 
 `tests/test_preseed_startup_live.py` holds a PG17 startup backend on the
 `pg_database` lock. Its TEST ONLY environment hooks are default off:

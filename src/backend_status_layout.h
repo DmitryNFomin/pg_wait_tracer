@@ -394,7 +394,10 @@ uint64_t pgwt_pgbs_resolve_entry(
     pid_t backend_pid, const struct PgBackendStatusLayout *layout);
 
 /* Failure-path reader: ROW (0), absent MyBEEntry (2), retired row (3),
- * UNPUBLISHED (4), failed (-1).
+ * UNPUBLISHED (4), torn (-2), failed (-1).
+ * TORN: the row address was read, but every bounded back-to-back attempt saw
+ * an odd or changing st_changecount. It proves nothing; only the preseed's
+ * paced re-read may retry it.
  * ROW includes startup context and passes the usual pid/counter/state checks.
  * RETIRED is a complete, coherent PG13 pid mismatch, not a proof without an
  * acceptance record. UNPUBLISHED is an untorn PID-zero own MyBEEntry slot on
@@ -402,12 +405,15 @@ uint64_t pgwt_pgbs_resolve_entry(
  * its pinned process identity and resolved shared wait address. PG13
  * resolution failure is unknown, never absence. */
 enum pgwt_pgbs_preseed_result {
+    PGWT_PGBS_PRESEED_TORN = -2, /* change counter odd/changing on every try */
     PGWT_PGBS_PRESEED_FAILED = -1,
     PGWT_PGBS_PRESEED_ROW = 0,
     PGWT_PGBS_PRESEED_RETIRED = 3, /* coherent complete row naming another pid */
     PGWT_PGBS_PRESEED_UNPUBLISHED = 4, /* PG14-17 own validated slot, pid zero */
     PGWT_PGBS_PRESEED_ABSENT = 2, /* 1 is reserved for ATTR_NO_CONTEXT */
 };
+/* read_snapshot_fd's distinct exhaustion result (a read failure is -1). */
+#define PGWT_PGBS_SNAPSHOT_TORN (-2)
 int pgwt_pgbs_read_preseed(pid_t pid, uint64_t my_be_entry_addr,
     uint64_t status_addr, const struct PgBackendStatusLayout *layout,
     struct pgwt_pgbs_snapshot *snapshot);

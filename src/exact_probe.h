@@ -94,10 +94,34 @@ struct pgwt_exact_probe_pair {
     void *done;
 };
 
+/* #616 preseed failure path only: a status row whose change counter stayed
+ * odd through read_snapshot_fd's 32 back-to-back attempts belongs to a writer
+ * inside its one startup status write (PG17 pgstat_bestart, PG18
+ * pgstat_bestart_initial). That section is a few dozen stores with no lock or
+ * syscall, so a reader only outlasts it when the writer is descheduled or
+ * faulting in fresh shared pages. Pause and re-read under the same pinned
+ * identity, at most PGWT_PRESEED_TORN_PAUSES pauses of
+ * PGWT_PRESEED_TORN_PAUSE_NS per escalation attempt: 8 x 0.5 ms = 4 ms in
+ * total, shared by every torn backend in that attempt. 4 ms is one scheduler
+ * tick at HZ=250 (four at HZ=1000), enough for a runnable writer to finish;
+ * it is also the most a torn row can add to the escalation command's latency,
+ * and only on a path that otherwise rolls the escalation back. A successful
+ * coherent preseed never pauses. The bound is a choice, not a measurement. */
+#define PGWT_PRESEED_TORN_PAUSES 8u
+#define PGWT_PRESEED_TORN_PAUSE_NS 500000L
+/* Non-shared refresh diagnostic: at most one line per second. */
+#define PGWT_PRESEED_REFRESH_DIAG_NS 1000000000ULL
+
 struct pgwt_exact_probe_bundle {
     struct pgwt_exact_probe_core core;
     uint64_t preseed_generation;
     unsigned preseed_no_command;
+    /* Paced torn-row re-read pauses spent in the current pgwt_exact_seed_all
+     * call; reset per escalation attempt (PGWT_PRESEED_TORN_PAUSES). */
+    unsigned preseed_torn_pauses;
+    /* Rate limit for the non-shared wait-address refresh diagnostic. */
+    uint64_t refresh_diag_log_ns;
+    uint64_t refresh_diag_suppressed;
     uint64_t query_offset;
     uint64_t activity_offset;
     bool sampled_warmup_reconciled;
