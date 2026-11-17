@@ -50,7 +50,7 @@
 
 ### ✅ Done (shipped through v0.13)
 
-- **Tiered-fidelity capture** — sampled always-on (~0% PG overhead), on-demand
+- **Tiered-fidelity capture** — sampled always-on (measured cost: [README Overhead](../README.md#overhead)), on-demand
   full-fidelity escalation, control socket, trace format v2→v3,
   anomaly-triggered escalation, escalation-budget accounting (rework A0–A6; T3).
 - **Web UI** — ECharts-only, pure builders + builder/visual-snapshot tests,
@@ -218,7 +218,7 @@ Its **core (Tracks A0–A6, B1–B5, E1–E3) shipped in v0.10** (master c027d3c
 - **Bugs found & fixed along the way:** Lock-class subtype mislabel on PG17+ (relation→advisory, real product bug — #8); the ClientRead idle/visible semantics decision (#10); pre-existing flaky live-test thresholds (test_overhead 15%-gate vs documented 6–30%; test_client_wait load-dependent DB-Time threshold) corrected during #23 validation.
 - **Deferred (not rework-blocking):** cooperative provider **IMPLEMENTATION** (extension track — A6 only froze the interface); historical-escalation annotations + mixed-fidelity sub-range shading in the UI (small server additions); idle-ClientRead %DB cosmetic (later fixed v0.11 / PR #25).
 
-**Goals.** **(A)** Run 24/7 with <0.5% overhead (sampled tier), escalate to full watchpoint tracing for bounded windows — manually or on anomaly — so "the data from 3am is already on disk." **(B)** No more manual UI testing after every change: regressions caught by CI; most UI logic testable without a browser; new views additive.
+**Goals.** **(A)** Capture continuously in the sampled tier and escalate to full watchpoint tracing for bounded windows — manually or on anomaly, including CPU saturation — allowing for full-mode cost while escalated (see [README Overhead](../README.md#overhead)). **(B)** No more manual UI testing after every change: regressions caught by CI; most UI logic testable without a browser; new views additive.
 
 **Non-goals.** No userspace rewrite (C daemon/server, Go client stay). No new charting framework — **ECharts becomes the only chart library**; ApexCharts (then rendering the main AAS chart) is dropped in B3 and its drag-select-window UX replaced by a custom selection overlay (~100 lines, testable). No client-side compute relocation (server keeps computing views). Cooperative tier (PG patch/extension hooks) is interface-only here; implementation belongs to the extension track. Prometheus exporter for AAS/sampled metrics is planned for later, out of scope — but A3's view semantics and the A0 control socket must not preclude it (stable metric names, queryable aggregates).
 
@@ -229,7 +229,7 @@ Its **core (Tracks A0–A6, B1–B5, E1–E3) shipped in v0.10** (master c027d3c
 ### Track A — Tiered-Fidelity Capture  **[DONE v0.10]** (A0–A6 all merged)
 
 #### A.0 Target architecture
-A single daemon holds: a **backend registry** (pid→PGPROC addr, query) fed by fork/exit lifecycle; **capture providers** — `sampled` (24/7), `full` (windows), `cooperative*` (stub); a **control socket + self-metrics** plane; an **escalation engine**; and an **event_writer v2** (typed blocks). `pgwt-server` connects to the control socket to escalate / read status. ASCII data-flow: PG backends → backend registry → capture providers → event_writer v2; pgwt-server ↔ control socket; escalation engine drives provider tiering.
+A single daemon holds: a **backend registry** (pid→PGPROC addr, query) fed by fork/exit lifecycle; **capture providers** — `sampled` (continuous), `full` (windows that incur full-mode cost; see [README Overhead](../README.md#overhead)), `cooperative*` (stub); a **control socket + self-metrics** plane; an **escalation engine**; and an **event_writer v2** (typed blocks). `pgwt-server` connects to the control socket to escalate / read status. ASCII data-flow: PG backends → backend registry → capture providers → event_writer v2; pgwt-server ↔ control socket; escalation engine drives provider tiering.
 
 **Provider contract** — one interface, three implementations, one schema:
 ```c
@@ -269,7 +269,7 @@ The existing watchpoint path becomes the `full` provider with **no behavioral ch
 - **Budget:** `--escalation-budget` (default **300s of full fidelity per hour**). Manual requests over budget are denied with reason; anomaly triggers respect it silently. This bounds worst-case production overhead by configuration, not hope.
 - **Anomaly triggers (A5):** rules on the sampled stream — `AAS > k × rolling_baseline for N ticks`, `lock-class fraction > threshold`. Hysteresis + cooldown so a flapping metric can't burst-burn the budget; every trigger writes a structured "escalation event" into the trace so the UI can show *why* full data exists.
 
-**D6 — Self-observability.** `metrics` (D4) is production-critical once 24/7. Estimated overhead = trap count × measured per-trap cost (calibrated at startup with a synthetic write loop) + sampler CPU from `/proc/self`. Exposed via control socket and recorded into the trace as periodic marker records.
+**D6 — Self-observability.** `metrics` (D4) supports continuous operation. Daemon CPU and trap-count estimates do not establish PostgreSQL overhead; use the workload-specific measurements in [README Overhead](../README.md#overhead), including full-mode cost during escalation. Exposed via control socket and recorded into the trace as periodic marker records.
 
 #### A.2 Phases
 
