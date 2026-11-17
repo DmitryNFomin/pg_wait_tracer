@@ -438,9 +438,16 @@ def run_arm(pm_pid, skip_store, churn=False):
                     after["lifecycle_init_lost_with_opportunity_total"] +
                     after["lifecycle_init_lost_no_opportunity_total"]), after
                 assert hint_delta > 0, "no bootstrap INIT hint was actually suppressed"
+                classification_error = None
                 if churn and not skip_store:
-                    known = classify_churn(text, {key: after[key] - before[key] for key in before
-                                                  if type(before[key]) is int}, pids, short_lived)
+                    try:
+                        known = classify_churn(text, {key: after[key] - before[key] for key in before
+                                                      if type(before[key]) is int}, pids, short_lived)
+                    except AssertionError as error:
+                        # Rejected exceptions use the original assertion order,
+                        # exception arguments and failing-PID diagnostics below.
+                        classification_error = error
+                has_known = bool(known["K1"] or known["K2"])
                 for key in ("ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
                             "state_map_full_total", "init_state_read_fail_total",
                             "wp_attach_failures_total"):
@@ -451,7 +458,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                         error = AssertionError((key, after[key]))
                         error.pids = failing
                         raise error
-                if not (churn and not skip_store):
+                if not has_known:
                     for key in ("with_opportunity", "unknown"):
                         if after[EXIT_CLASSES[key]] - before[EXIT_CLASSES[key]] != 0:
                             raise CohortFailure(f"{key} retirement delta must be zero",
@@ -469,7 +476,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                     assert not ok and "lifecycle_init_lost_with_opportunity_total=" in detail, detail
                     assert pids - attached, "control attached everything despite discarding all INIT facts"
                 else:
-                    if not churn:
+                    if not has_known:
                         if after["lifecycle_init_lost_with_opportunity_total"] != 0:
                             raise CohortFailure("with-opportunity INIT loss", set(map(int, re.findall(
                                 r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=0(?: |$)", text))))
@@ -477,6 +484,10 @@ def run_arm(pm_pid, skip_store, churn=False):
                     # Every attached member attaches once, including delayed hints.
                     for pid in pids & attached:
                         assert attach_counts[pid] == 1, pid
+                if classification_error is not None:
+                    # Keep additional classifier guards when the original
+                    # assertions alone cannot identify the rejected evidence.
+                    raise classification_error
                 arm = "store skipped" if skip_store else "short churn" if churn else "long-lived recovery"
                 print(f"  {arm}: "
                       f"{len(pids & attached)}/{len(pids)} attached, "

@@ -104,7 +104,8 @@ class KnownClassCases(unittest.TestCase):
                 deltas["wp_attach_exit_race_total"] = 1
                 data = (text + "\n" + lines, deltas, pids | {15990}, short | {15990})
                 self.assertEqual(self.classify(data)[0], 1)
-                with self.assertRaisesRegex(AssertionError, "unknown retirement is gated"):
+                first_class = "with_opportunity" if known else "unknown"
+                with self.assertRaisesRegex(AssertionError, f"{first_class} retirement delta must be zero"):
                     self.fake_arm(data, churn=True)
 
     def test_over_cap(self):
@@ -208,6 +209,17 @@ class KnownClassCases(unittest.TestCase):
         self.assertEqual(self.fake_arm(fixture(True, True), churn=True),
                          {"K1": {11}, "K2": {12}})
 
+    def test_unclassified_attach_failure_preserves_master_args(self):
+        text, deltas, pids, short = fixture()
+        text += ("\nWP-ATTACH-FAIL: pid=42 site=watchpoint_open errno=3 resolve_errno=0 "
+                 "liveness=unknown liveness_result=-1 liveness_errno=13")
+        deltas["wp_attach_failures_total"] = 1
+        deltas["wp_attach_failures_unknown_total"] = 1
+        with self.assertRaises(AssertionError) as raised:
+            self.fake_arm((text, deltas, pids | {42}, short | {42}), churn=True)
+        self.assertIs(type(raised.exception), AssertionError)
+        self.assertEqual(raised.exception.args, (("wp_attach_failures_total", 1),))
+
     def test_no_pending_bootstrap_stays_red(self):
         original = self.module.re.findall
         with patch.object(self.module.re, "findall", wraps=self.module.re.findall) as find:
@@ -262,6 +274,9 @@ def mutants():
         ("diagnostic requirement dropped", "if not valid:", "if False:", "test_partial_diagnostic"),
         ("third arm skipped", "    run_arm(pm_pid, skip_store=True)\n", "",
          "test_third_arm_failure_stays_red"),
+        ("unclassified attach args changed", "error = AssertionError((key, after[key]))",
+         "error = AssertionError(key, after[key])",
+         "test_unclassified_attach_failure_preserves_master_args"),
     )
     for name, old, new, case in definitions:
         assert SOURCE.count(old) == 1, name
@@ -275,7 +290,7 @@ def mutants():
         assert result.testsRun == 1 and len(result.failures) == 1 and not result.errors, (
             name, result.failures, result.errors)
         print(f"MUTANT CAUGHT: {name} -> {case}")
-    print("Mutants: 4/4 caught at intended assertions")
+    print(f"Mutants: {len(definitions)}/{len(definitions)} caught at intended assertions")
 
 
 if __name__ == "__main__":
