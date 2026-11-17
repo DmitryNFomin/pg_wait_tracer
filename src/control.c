@@ -148,6 +148,8 @@ static cJSON *build_status(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "exact_probe_generation",
                      d->escalation.generation);
     pgwt_exact_probe_add_attach_status(root, &d->exact_probes.core);
+    cjson_add_uint64(root, "exact_preseed_unpublished_total", d->counters.exact_preseed_unpublished_total);
+    cjson_add_uint64(root, "exact_preseed_reread_total", d->counters.exact_preseed_reread_total);
     cJSON_AddBoolToObject(root, "exact_probe_warmup_reconciled",
                           d->exact_probes.sampled_warmup_reconciled);
     cJSON_AddBoolToObject(root, "exact_cpu_active", d->exact_cpu_active);
@@ -345,6 +347,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "exact_preseed_exiting_total", ctr->exact_preseed_exiting_total);
     cjson_add_uint64(root, "exact_preseed_null_entry_total", ctr->exact_preseed_null_entry_total);
     cjson_add_uint64(root, "exact_preseed_startup_total", ctr->exact_preseed_startup_total);
+    cjson_add_uint64(root, "exact_preseed_unpublished_total", ctr->exact_preseed_unpublished_total);
+    cjson_add_uint64(root, "exact_preseed_reread_total", ctr->exact_preseed_reread_total);
     cjson_add_uint64(root, "exact_preseed_retired_zero_total", ctr->exact_preseed_retired_zero_total);
     cjson_add_uint64(root, "exact_preseed_retired_other_pid_total", ctr->exact_preseed_retired_other_pid_total);
     cjson_add_uint64(root, "exact_preseed_failures_total", ctr->exact_preseed_failures_total);

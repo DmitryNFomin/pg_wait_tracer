@@ -830,9 +830,15 @@ int pgwt_exact_resolve_attr(struct pgwt_daemon *d, pid_t pid,
     return have_edge || have_seed ? 0 : -1;
 }
 
+static bool test_preseed_read_failure(pid_t pid);
+
 int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
                             uint64_t generation, bool require_coherent)
 {
+    if (test_preseed_read_failure(pid)) {
+        fprintf(stderr, "WARN: TEST ONLY forced attribution read failure PID %d\n", pid);
+        return -1;
+    }
     if (!d->skel || pid <= 0 || generation == 0)
         return -1;
     uint64_t qid = 0;
@@ -970,6 +976,20 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
                                &key, &seed, BPF_ANY) == 0 ? 0 : -2;
 }
 
+static bool test_preseed_read_failure(pid_t pid)
+{
+    /* TEST ONLY: a mutable PID file lets a live test select an already
+     * established backend without disrupting daemon startup validation. */
+    const char *path = getenv("PGWT_TEST_PRESEED_READ_FAILURE_PID_FILE");
+    if (!path) return false;
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    int target = 0;
+    int got = fscanf(fp, "%d", &target);
+    fclose(fp);
+    return got == 1 && target == pid;
+}
+
 static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
                             uint64_t generation)
 {
@@ -986,16 +1006,38 @@ static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
             &be->sampled_reader.accepted, &d->backend_status_layout);
     if (proof == 0) {
         struct pgwt_pgbs_snapshot row;
+        uint64_t before_pin = 0, after_pin = 0;
+        bool pin_ok = d->backend_status_layout.major >= 14 &&
+            d->backend_status_layout.major <= 17 &&
+            pgwt_pgbs_preseed_pin(pinned, &before_pin) == 0;
         uint64_t addr = be->pgbs_addr ? be->pgbs_addr : be->sampled_reader.status_addr;
         int rc = pgwt_pgbs_read_preseed(be->pid, d->my_be_entry_addr, addr,
                                         &d->backend_status_layout, &row);
+        if (test_preseed_read_failure(be->pid))
+            rc = PGWT_PGBS_PRESEED_FAILED;
         int after = pgwt_backend_no_command_fd(pinned, d->postmaster_pid);
+        if (pin_ok)
+            pin_ok = pgwt_pgbs_preseed_pin(pinned, &after_pin) == 0 &&
+                     before_pin == after_pin;
         if (after != 0) proof = after;
         else if (rc == PGWT_PGBS_PRESEED_ABSENT) proof = 3;
         else if (rc == PGWT_PGBS_PRESEED_ROW &&
                  row.databaseid == 0 && row.userid == 0 &&
                  !pgwt_pgbs_state_is_cmd_open(&d->backend_status_layout, row.state))
             proof = 4;
+        else if (rc == PGWT_PGBS_PRESEED_UNPUBLISHED && pin_ok &&
+                 be->wp_addr && pgwt_addr_is_shared(be->pid, be->wp_addr) == 1)
+            proof = 7;
+        else if (d->backend_status_layout.major >= 14 &&
+                 rc == PGWT_PGBS_PRESEED_ROW && row.databaseid && row.userid &&
+                 !pgwt_pgbs_state_is_cmd_open(&d->backend_status_layout, row.state)) {
+            /* The fallback observed publication after the coherent read.
+             * Retry only that coherent reader, once; never re-enter this
+             * classifier, and never convert a failed retry into a proof. */
+            if (fd >= 0) close(fd);
+            d->counters.exact_preseed_reread_total++;
+            return pgwt_exact_seed_backend(d, be->pid, generation, true);
+        }
     }
     if (fd >= 0) close(fd);
     if (proof <= 0) return -1;
@@ -1012,6 +1054,8 @@ static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
     if (proof == 2) d->counters.exact_preseed_exiting_total++;
     if (proof == 3) d->counters.exact_preseed_null_entry_total++;
     if (proof == 4) d->counters.exact_preseed_startup_total++;
+    if (proof == 7) d->counters.exact_preseed_unpublished_total++;
+    if (proof == 7) be->exact_unpublished_generation = generation;
     if (proof == PGWT_PGBS_RETIRED_ZERO) d->counters.exact_preseed_retired_zero_total++;
     if (proof == PGWT_PGBS_RETIRED_OTHER_PID) d->counters.exact_preseed_retired_other_pid_total++;
     d->exact_probes.preseed_no_command++;

@@ -310,6 +310,12 @@ direct connection.
 - `sampled_attr_pg13_scan_fallbacks_total`: PG13 candidate-scan attempts when
   the computed route is unavailable; each use is counted
 - `wp_attach_failures_total`, `ringbuf_drops_total`, `backends_tracked`
+- `exact_preseed_unpublished_total`: successful PG14–17 no-command proofs
+  from an untorn PID-zero own status slot in the validated shared mapping and
+  struct stride, with unchanged pinned process identity and a shared wait address
+- `exact_preseed_reread_total`: one-shot coherent attribution rereads after the
+  fallback sees an own-pid, context-bearing, command-closed row (PG14+);
+  failed rereads still deny escalation. Both counters also appear in `status`.
 - `trace_events_written_total`, `trace_bytes_written_total`
 - `tier`, `escalation_active`, `escalation_seconds_remaining`,
   `escalation_budget_remaining_s`, `escalation_windows_total`,

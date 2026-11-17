@@ -652,6 +652,9 @@ def main():
                 assert result.returncode == 0, result
     check_bounded_failure_output()
     preseed_cases(args.mutants)
+    wait_seed_cases(args.mutants)
+    from test_preseed_startup_live import host_checks
+    host_checks()
     print("test_backend_attach_race: PASS")
 
 
@@ -671,14 +674,15 @@ struct pg_wait_tracer_bpf { struct { void *exact_seed_map, *exact_attr_map; } ma
 static struct pgwt_daemon d;
 static struct pgwt_exact_seed stored;
 static int have_seed, map_failure, stat_reads, stat_opens, mem_reads, first_read_fail;
-static int scenario, stat_closed, mem_closed, edge_present;
+static int scenario, stat_closed, mem_closed, edge_present, mem_opens, wait_shared;
 static unsigned start_change_on_read;
 static unsigned checks;
 enum { NORMAL, LIVE, GONE, ZOMBIE, DEAD, EXITING, EXITING_VSIZE, NULL_ENTRY,
        STARTUP, EIO_READ, ZERO_READ, TORN, WRONG_PID, ZERO_PID, DB_ONLY,
        USER_ONLY, STARTUP_OPEN, UNKNOWN, REUSED, BAD_STAT, MEM_ESRCH, MEM_EPERM,
        MEM_EFAULT, MISSING_FIELD, UNRESOLVED, BAD_STATE, FOREIGN, BAD_OPEN,
-       ENTRY_EIO, ENTRY_ZERO, UNKNOWN_AFTER, ZERO_VSIZE, OPEN_GONE };
+       ENTRY_EIO, ENTRY_ZERO, UNKNOWN_AFTER, ZERO_VSIZE, OPEN_GONE,
+       UNPUBLISHED, UNPUBLISHED_TORN, OUTSIDE, OFF_STRIDE, RACE_OK, RACE_FAIL };
 #define CHECK(x, msg) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL %s\n", msg); exit(1); } } while (0)
 static int fake_open(const char *path, int flags)
 {
@@ -691,6 +695,11 @@ static int fake_open(const char *path, int flags)
         return 101;
     }
     CHECK(!strcmp(path, "/proc/42/mem"), "only target memory opened");
+    ++mem_opens;
+    if (scenario == RACE_FAIL) {
+        CHECK(mem_opens <= 3, "reread bounded to one attempt");
+        if (mem_opens >= 3) { errno = EIO; return -1; }
+    }
     if (scenario == MEM_ESRCH || scenario == MEM_EPERM) {
         errno = scenario == MEM_ESRCH ? ESRCH : EPERM; return -1;
     }
@@ -738,14 +747,21 @@ static ssize_t fake_pread(int fd, void *buf, size_t size, off_t offset)
     int recorded_live = offset >= 0x3000 && offset < 0x3040;
     if (recorded_live) offset -= 0x1000;
     uint64_t value = 0;
-    if (offset == 0x1000) value = scenario == NULL_ENTRY || scenario == UNKNOWN_AFTER ? 0 : 0x2000;
+    if (scenario == OUTSIDE && offset >= 0xa000) offset -= 0x8000;
+    if (scenario == OFF_STRIDE && offset >= 0x2001) offset -= 1;
+    if (offset == 0x1000) value = scenario == NULL_ENTRY || scenario == UNKNOWN_AFTER ? 0 :
+        scenario == OUTSIDE ? 0xa000 : scenario == OFF_STRIDE ? 0x2001 : 0x2000;
     /* 0x1008 deliberately contains NULL: off-by-eight pointer mutant. */
     else if (offset == 0x1008) value = 0;
-    else if (offset == 0x2000) value = scenario == TORN ? 3 : 2;
-    else if (offset == 0x2004) value = recorded_live ? 42 : scenario == WRONG_PID ? 43 : scenario == ZERO_PID ? 0 : 42;
-    else if (offset == 0x2008) value = scenario == STARTUP || scenario == USER_ONLY || scenario == STARTUP_OPEN ? 0 : 1;
-    else if (offset == 0x200c) value = scenario == STARTUP || scenario == DB_ONLY || scenario == STARTUP_OPEN ? 0 : 10;
-    else if (offset == 0x2010) value = scenario == STARTUP ? 0 : scenario == BAD_STATE ? 99 : 3;
+    else if (offset == 0x2000) value = scenario == TORN || scenario == UNPUBLISHED_TORN ? 3 : 2;
+    else if (offset == 0x2004) value = recorded_live ? 42 : scenario == WRONG_PID ? 43 :
+        scenario == ZERO_PID || scenario == UNPUBLISHED || scenario == UNPUBLISHED_TORN ||
+        scenario == OUTSIDE || scenario == OFF_STRIDE ? 0 : 42;
+    else if (offset == 0x2008) value = scenario == STARTUP || scenario == USER_ONLY || scenario == STARTUP_OPEN ||
+        ((scenario == RACE_OK || scenario == RACE_FAIL) && mem_opens == 1) ? 0 : 1;
+    else if (offset == 0x200c) value = scenario == STARTUP || scenario == DB_ONLY || scenario == STARTUP_OPEN ||
+        ((scenario == RACE_OK || scenario == RACE_FAIL) && mem_opens == 1) ? 0 : 10;
+    else if (offset == 0x2010) value = scenario == STARTUP || scenario == RACE_OK || scenario == RACE_FAIL ? 0 : scenario == BAD_STATE ? 99 : 3;
     else if (offset == 0x2018) value = 123;
     else if (offset == 0x2020) value = 0; /* PG13 no activity text needed */
     else { CHECK(0, "known memory address"); }
@@ -783,6 +799,8 @@ static int bpf_map_get_next_key(int fd, const void *key, void *next)
 static int bpf_map_delete_elem(int fd, const void *key)
 { CHECK(fd == 1 && *(const uint32_t *)key == 42, "delete generation seed"); have_seed = 0; return 0; }
 static uint64_t mono_ns(void) { return 100; }
+int pgwt_addr_is_shared(pid_t pid, uint64_t addr)
+{ CHECK(pid == 42 && addr == 0x5000, "wait address belongs to backend"); return wait_shared; }
 static int get_config(struct pgwt_daemon *ctx, struct pgwt_exact_config *cfg)
 { (void)ctx; *cfg = (struct pgwt_exact_config){.generation=9, .attach_boundary_ns=90}; return 0; }
 struct pgwt_backend *pgwt_find_backend(struct pgwt_backend_table *table, pid_t pid)
@@ -816,7 +834,7 @@ static uint64_t fresh_generation;
 static unsigned maps_reads;
 static struct pgwt_pgbs_mapping pg13_main_mapping(pid_t pid, const struct PgBackendStatusLayout *layout)
 {
-    CHECK(pid == 7 && layout == &d.backend_status_layout, "fresh mapping belongs to postmaster");
+    CHECK((pid == 7 || pid == 42) && layout == &d.backend_status_layout, "fresh mapping belongs to postmaster");
     ++maps_reads;
     return (struct pgwt_pgbs_mapping){.lo=0x2000,.hi=0x9000,.identity=fresh_generation};
 }
@@ -829,12 +847,14 @@ static void reset(int test, int major)
     d.backends.count = 1;
     d.backends.entries[0] = (struct pgwt_backend){.pid=42, .is_alive=true,
         .meta_parsed=true, .meta={.backend_type=PGWT_BT_CLIENT},
+        .wp_addr=0x5000, .wp_addr_shared=1,
         .pgbs_addr=major == 13 && test != UNRESOLVED ? 0x2000 : 0};
     struct PgBackendStatusLayout *l = &d.backend_status_layout;
     l->major = major; l->validation = PGWT_PGBS_VALIDATION_VALIDATED;
     l->pg13_recovery = PGWT_PGBS_PG13_READY;
     l->shm_generation = fresh_generation = 77; maps_reads = 0;
     l->shm_start=0x2000; l->shm_end=0x9000; l->generation_postmaster=7;
+    l->status_anchor=0x2040; l->struct_size=64;
     l->state_running = 3; l->state_fastpath = 4; l->state_max = 6;
     l->st_changecount=(struct pgwt_pgbs_field){.offset=0,.width=4,.present=true};
     l->st_procpid=(struct pgwt_pgbs_field){.offset=4,.width=4,.present=true};
@@ -844,6 +864,7 @@ static void reset(int test, int major)
     l->st_query_id=(struct pgwt_pgbs_field){.offset=24,.width=8,.present=true};
     l->st_activity_raw=(struct pgwt_pgbs_field){.offset=32,.width=8,.present=true};
     start_change_on_read = 0;
+    mem_opens=0; wait_shared=1;
     scenario=test; have_seed=map_failure=stat_reads=stat_opens=mem_reads=stat_closed=mem_closed=edge_present=0;
     first_read_fail = test == LIVE || test == GONE || test == ZOMBIE || test == DEAD ||
         test == EXITING || test == EXITING_VSIZE || test == UNKNOWN || test == REUSED ||
@@ -1120,6 +1141,77 @@ int main(void)
               "post-boundary exact edge remains authoritative");
     }
     retirement_seeds();
+    for (int major=14; major<=17; major++) {
+        reset(UNPUBLISHED, major);
+        CHECK(pgwt_exact_seed_all(&d, 9) == 0 && have_seed &&
+              stored.query_id == 0 && !stored.cmd_open &&
+              stored.query_quality == PGWT_QUERY_QUALITY_NONE,
+              "PG14-17 unpublished own slot seeds no command");
+        CHECK(d.counters.exact_preseed_unpublished_total == 1 &&
+              d.counters.exact_preseed_no_command_total == 1 &&
+              d.exact_probes.preseed_no_command == 1 &&
+              d.backends.entries[0].exact_unpublished_generation == 9,
+              "unpublished proof counted with generation marker");
+    }
+    deny(UNPUBLISHED, 13, "PG13 unpublished proof forbidden");
+    deny(UNPUBLISHED, 18, "PG18 unpublished proof forbidden");
+    reset(NORMAL, 17);
+    char hook_path[] = "/tmp/pgwt-preseed-hook-XXXXXX";
+    int hook_fd = mkstemp(hook_path);
+    CHECK(hook_fd >= 0, "create temporary read-failure selector");
+    FILE *hook_file = fdopen(hook_fd, "w");
+    CHECK(hook_file != NULL, "open selector stream");
+    fprintf(hook_file, "42\n"); fclose(hook_file);
+    setenv("PGWT_TEST_PRESEED_READ_FAILURE_PID_FILE", hook_path, 1);
+    int hook_result = pgwt_exact_seed_all(&d, 9);
+    unsetenv("PGWT_TEST_PRESEED_READ_FAILURE_PID_FILE"); unlink(hook_path);
+    CHECK(hook_result != 0 && !have_seed && d.counters.exact_preseed_failures_total == 1,
+          "established pg_sleep read failure rolls back red control A");
+    deny(EIO_READ, 17, "FAILED is not UNPUBLISHED red control A");
+    deny(WRONG_PID, 17, "unpublished cannot name another pid");
+    deny(UNPUBLISHED_TORN, 17, "unpublished torn row rolls back");
+    deny(OUTSIDE, 17, "unpublished pointer outside mapping rolls back");
+    deny(OFF_STRIDE, 17, "unpublished off-stride pointer rolls back");
+    reset(UNPUBLISHED, 17); start_change_on_read=4;
+    CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed,
+          "unpublished changed proc pin rolls back");
+    reset(UNPUBLISHED, 17); d.backends.entries[0].wp_addr=0;
+    CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed,
+          "unpublished unresolved wait address rolls back");
+    reset(UNPUBLISHED, 17); wait_shared=0;
+    CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed,
+          "unpublished local wait address rolls back");
+    reset(UNPUBLISHED, 17); wait_shared=-1;
+    CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed,
+          "unpublished unknown wait mapping rolls back");
+    reset(UNPUBLISHED, 17); fresh_generation++;
+    CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed,
+          "unpublished stale mapping generation rolls back");
+    reset(UNPUBLISHED, 17); map_failure=1;
+    CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed &&
+          d.counters.exact_preseed_unpublished_total == 0 &&
+          d.backends.entries[0].exact_unpublished_generation == 0,
+          "failed unpublished seed write publishes no proof or marker");
+    for (int major=17; major<=18; major++) {
+        reset(RACE_OK, major);
+        CHECK(pgwt_exact_seed_all(&d, 9) == 0 && have_seed &&
+              d.counters.exact_preseed_reread_total == 1 && mem_opens == 3 &&
+              !stored.cmd_open && !stored.query_id &&
+              d.counters.exact_preseed_no_command_total == 0,
+              "publication race reread succeeds once without proof seed");
+    }
+    reset(RACE_FAIL, 18);
+    CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed && mem_opens == 3 &&
+          d.counters.exact_preseed_reread_total == 1 &&
+          d.counters.exact_preseed_failures_total == 1,
+          "failed reread rolls back after one attempt");
+    deny(RACE_OK, 13, "PG13 publication race retry remains excluded");
+    int no_retry[] = {EIO_READ, TORN, WRONG_PID, STARTUP_OPEN, DB_ONLY, USER_ONLY, LIVE};
+    for (unsigned i=0; i<sizeof(no_retry)/sizeof(no_retry[0]); i++) {
+        reset(no_retry[i], 18);
+        CHECK(pgwt_exact_seed_all(&d, 9) != 0 && d.counters.exact_preseed_reread_total == 0,
+              "only own-pid context closed race shape retries");
+    }
     printf("preseed proof/rollback/late-attach: %u assertions PASS\n", checks);
     return 0;
 }
@@ -1142,15 +1234,16 @@ def preseed_cases(mutants):
             "open_mem", "pgwt_pgbs_state_is_cmd_open", "snapshot_untorn",
             "snapshot_coherent_identity", "snapshot_usable", "pgwt_pgbs_derive_sampled_attr",
             "pgwt_pgbs_derive_sampled_activity", "read_sampled_attr_at_fd",
-            "pgwt_pgbs_read_sampled_attr_at", "pgwt_pgbs_read_sampled_attr", "pgwt_pgbs_read_preseed",
-            "pinned_start_time", "pgwt_pgbs_retirement_proof", "pgwt_pgbs_read_retirement")),
-        *(extract(exact, n) for n in ("pgwt_exact_seed_backend", "seed_no_command",
+            "pgwt_pgbs_read_sampled_attr_at", "pgwt_pgbs_read_sampled_attr", "unpublished_slot", "pgwt_pgbs_read_preseed",
+            "pinned_start_time", "pgwt_pgbs_preseed_pin", "pgwt_pgbs_retirement_proof", "pgwt_pgbs_read_retirement")),
+        *(extract(exact, n) for n in ("test_preseed_read_failure", "pgwt_exact_seed_backend", "seed_no_command",
                                      "pgwt_exact_seed_all", "pgwt_exact_seed_clear")),
     ])
     control = (ROOT / "src/control.c").read_text()
     for counter in ("exact_preseed_no_command_total", "exact_preseed_gone_total",
                     "exact_preseed_exiting_total", "exact_preseed_null_entry_total",
                     "exact_preseed_startup_total", "exact_preseed_retired_zero_total",
+                    "exact_preseed_unpublished_total", "exact_preseed_reread_total",
                     "exact_preseed_retired_other_pid_total", "exact_preseed_failures_total",
                     "exact_preseed_overwrite_refusals_total", "exact_preseed_late_attach_failures_total"):
         assert f'cjson_add_uint64(root, "{counter}", ctr->{counter});' in control, counter
@@ -1159,6 +1252,19 @@ def preseed_cases(mutants):
     variants = [("preseed_baseline", functions, None)]
     if mutants:
         mutations = [
+            ("m1_FAILED_as_UNPUBLISHED", "rc == PGWT_PGBS_PRESEED_UNPUBLISHED && pin_ok",
+             "(rc == PGWT_PGBS_PRESEED_UNPUBLISHED || rc == PGWT_PGBS_PRESEED_FAILED) && pin_ok",
+             "FAIL established pg_sleep read failure rolls back red control A"),
+            ("m2_drop_unpublished_pid_zero", "snapshot->procpid == 0 && unpublished_slot(pid, base, layout)",
+             "unpublished_slot(pid, base, layout)", "FAIL unpublished cannot name another pid"),
+            ("m3_drop_unpublished_mapping_stride", "unpublished_slot(pid, base, layout)",
+             "(layout->major >= 14 && layout->major <= 17 && (unpublished_slot(pid, base, layout) || true))",
+             "FAIL unpublished pointer outside mapping rolls back"),
+            ("m4_unbounded_reread", "return pgwt_exact_seed_backend(d, be->pid, generation, true);",
+             "while (pgwt_exact_seed_backend(d, be->pid, generation, true) != 0) {} return 0;",
+             "FAIL reread bounded to one attempt"),
+            ("m5_no_reread", "return pgwt_exact_seed_backend(d, be->pid, generation, true);",
+             "return -1;", "FAIL publication race reread succeeds once without proof seed"),
             ("classify_auxiliaries", "bool needs_attr = !be->meta_parsed ||",
              "bool needs_attr = true ||",
              "FAIL logger NULL MyBEEntry alive is not proof-seeded"),
@@ -1252,6 +1358,100 @@ def preseed_cases(mutants):
                 assert result.returncode == 0, result
     print(f"preseed: baseline PASS; {len(variants)-1} mutants killed")
 
+
+
+WAIT_SEED_HARNESS = r'''
+#include "daemon.h"
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+struct pg_wait_tracer_bpf { struct { void *state_map; } maps; };
+static struct pgwt_daemon d;
+static struct pgwt_pid_state written;
+static int updates, opens, reads, closes, checks;
+#define CHECK(x, msg) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL %s\n", msg); exit(1); } } while (0)
+#define PGWT_TEST_STALE_WEI (((uint32_t)PG_WAIT_TIMEOUT << 24) | 2)
+static int fake_open(const char *path, int flags)
+{ CHECK(!strcmp(path, "/proc/42/mem") && flags == O_RDONLY, "wait seed target memory"); ++opens; return 100; }
+static ssize_t fake_pread(int fd, void *buf, size_t size, off_t offset)
+{ CHECK(fd == 100 && size == 4 && offset == 0x5000, "read actual shared wait word");
+  uint32_t lock = 0x03000001; memcpy(buf, &lock, size); ++reads; return (ssize_t)size; }
+static int fake_close(int fd) { CHECK(fd == 100, "close wait memory"); ++closes; return 0; }
+#define open fake_open
+#define pread fake_pread
+#define close fake_close
+struct pgwt_backend *pgwt_find_backend(struct pgwt_backend_table *table, pid_t pid)
+{ return table->count == 1 && pid == 42 ? &table->entries[0] : NULL; }
+static int bpf_map__fd(void *map) { (void)map; return 1; }
+static int bpf_map_lookup_elem(int fd, const void *key, void *value)
+{ (void)fd; (void)key; (void)value; return -1; }
+#define BPF_ANY 0
+static int bpf_map_update_elem(int fd, const void *key, const void *value, int flags)
+{ CHECK(fd == 1 && *(const uint32_t *)key == 42 && flags == BPF_ANY, "actual wait seed map");
+  ++updates; memcpy(&written, value, sizeof(written)); return 0; }
+static void report_state_map_full(struct pgwt_daemon *ctx, pid_t pid)
+{ (void)ctx; (void)pid; CHECK(0, "wait seed map unexpectedly full"); }
+void pgwt_event_full_name(uint32_t event, char *buf, size_t size)
+{ (void)event; snprintf(buf, size, "test-event"); }
+@FUNCTION@
+static void seed(int expected, bool sweep, const char *message)
+{
+    opens=reads=closes=updates=0;
+    memset(&written, 0, sizeof(written));
+    CHECK(preseed_state_map(&d, 42, 0x5000, 100, sweep) == 0, message);
+    CHECK(updates == expected && opens == expected && reads == expected && closes == expected, message);
+    if (expected)
+        CHECK(written.last_event == 0x03000001 && written.last_ts == 100 &&
+              written.wait_event_addr == 0x5000 && written.wp_live &&
+              !written.cmd_open && !written.last_query_id,
+              "unpublished no-command proof preserves real in-flight Lock wait");
+}
+int main(void)
+{
+    static struct pg_wait_tracer_bpf skel;
+    d.skel=&skel; d.backends.count=1; d.escalation.generation=9;
+    d.backends.entries[0].pid=42;
+    d.backends.entries[0].exact_unpublished_generation=9;
+    seed(1, false, "unpublished real wait is seeded by default");
+    setenv("PGWT_TEST_SKIP_UNPUBLISHED_WAIT_SEED", "1", 1);
+    seed(0, false, "red control B skips actual wait seed");
+    seed(1, true, "red control B retains sweep repair");
+    d.backends.entries[0].exact_unpublished_generation=8;
+    seed(1, false, "red control B requires same generation");
+    d.backends.entries[0].exact_unpublished_generation=0;
+    seed(1, false, "red control B requires unpublished proof");
+    unsetenv("PGWT_TEST_SKIP_UNPUBLISHED_WAIT_SEED");
+    seed(1, false, "established backend wait seeding preserved");
+    printf("unpublished wait seed: 6 cases, %d assertions PASS; red control B hook fired on host\n", checks);
+    return 0;
+}
+'''
+
+
+def wait_seed_cases(mutants):
+    source = function((ROOT / "src/backend.c").read_text(), "preseed_state_map")
+    variants = [("wait_seed_baseline", source, None)]
+    if mutants:
+        old = 'if (!sweep_reseed && getenv("PGWT_TEST_SKIP_UNPUBLISHED_WAIT_SEED")) {'
+        assert source.count(old) == 1
+        variants.append(("wait_seed_control_B_disabled", source.replace(old, "if (false) {"),
+                         "FAIL red control B skips actual wait seed"))
+    with tempfile.TemporaryDirectory(prefix="pgwt-wait-seed-") as temporary:
+        for label, body, intended in variants:
+            cfile, binary = Path(temporary) / f"{label}.c", Path(temporary) / label
+            cfile.write_text(WAIT_SEED_HARNESS.replace("@FUNCTION@", body))
+            subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-std=gnu11", "-Wall",
+                            "-Wextra", "-Werror", "-I" + str(ROOT / "src"),
+                            *shlex.split(os.environ.get("CFLAGS", "")), str(cfile), "-o", str(binary)], check=True)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            if intended:
+                assert result.returncode == 1 and intended in result.stderr, result
+                print(f"{label}: KILLED (built, reached intended assertion: {intended})")
+            else:
+                assert result.returncode == 0, result
+                print(result.stdout, end="")
 
 
 def live_churn(args):

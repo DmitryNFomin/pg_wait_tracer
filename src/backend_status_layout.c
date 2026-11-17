@@ -2326,6 +2326,22 @@ uint64_t pgwt_pgbs_resolve_entry(
     return base;
 }
 
+static bool unpublished_slot(pid_t pid, uint64_t base,
+    const struct PgBackendStatusLayout *layout)
+{
+    /* Congruence to a runtime-validated row proves the struct stride. Check
+     * the target's current shared mapping against that retained mapping too. */
+    if (layout->major < 14 || layout->major > 17 || !layout->struct_size ||
+        !layout->status_anchor || !layout->shm_generation ||
+        base < layout->shm_start || base >= layout->shm_end ||
+        layout->struct_size > layout->shm_end - base ||
+        base % layout->struct_size != layout->status_anchor % layout->struct_size)
+        return false;
+    struct pgwt_pgbs_mapping map = pg13_main_mapping(pid, layout);
+    return map.identity == layout->shm_generation &&
+           map.lo == layout->shm_start && map.hi == layout->shm_end;
+}
+
 int pgwt_pgbs_read_preseed(pid_t pid, uint64_t my_be_entry_addr,
     uint64_t status_addr, const struct PgBackendStatusLayout *layout,
     struct pgwt_pgbs_snapshot *snapshot)
@@ -2357,6 +2373,8 @@ int pgwt_pgbs_read_preseed(pid_t pid, uint64_t my_be_entry_addr,
             rc = PGWT_PGBS_PRESEED_ROW;
         else if (layout->major == 13)
             rc = PGWT_PGBS_PRESEED_RETIRED;
+        else if (snapshot->procpid == 0 && unpublished_slot(pid, base, layout))
+            rc = PGWT_PGBS_PRESEED_UNPUBLISHED;
     }
 done:
     close(fd);
@@ -2390,6 +2408,11 @@ int pgwt_pgbs_retirement_proof(const struct pgwt_pgbs_acceptance *accepted,
 }
 
 static int pinned_start_time(int fd, uint64_t *start_time);
+
+int pgwt_pgbs_preseed_pin(int stat_fd, uint64_t *start_time)
+{
+    return pinned_start_time(stat_fd, start_time);
+}
 
 int pgwt_pgbs_read_retirement(pid_t pid, pid_t postmaster_pid, int stat_fd,
     struct pgwt_pgbs_acceptance *accepted,
@@ -3266,6 +3289,16 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
 
     if (observed == 0 && layout->major == 13)
         pg13_record_anchor(layout, controlled_pid, postmaster_pid, idle_base);
+    if (observed == 0 && layout->major >= 14 && layout->major <= 17) {
+        /* Retain a stride anchor while the independently observed backend is
+         * alive. These fields do not enable PG13's computed resolver. */
+        layout->status_anchor = idle_base;
+        struct pgwt_pgbs_mapping map = pg13_main_mapping(postmaster_pid, layout);
+        layout->shm_start = map.lo;
+        layout->shm_end = map.hi;
+        layout->shm_generation = map.identity;
+        layout->generation_postmaster = postmaster_pid;
+    }
 
     /* Finish the final statement, then deliver EOF and drain psql's small
      * result stream before reaping it.  Closing stdout first would give psql

@@ -168,6 +168,14 @@ static void report_state_map_full(struct pgwt_daemon *d, pid_t pid)
 static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
                              uint64_t attach_ts, bool sweep_reseed)
 {
+    if (!sweep_reseed && getenv("PGWT_TEST_SKIP_UNPUBLISHED_WAIT_SEED")) {
+        struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+        if (be && be->exact_unpublished_generation &&
+            be->exact_unpublished_generation == d->escalation.generation) {
+            fprintf(stderr, "WARN: TEST ONLY skip unpublished wait seed PID %d\n", pid);
+            return 0;
+        }
+    }
     char mem_path[64];
     snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
     int mem_fd = open(mem_path, O_RDONLY);

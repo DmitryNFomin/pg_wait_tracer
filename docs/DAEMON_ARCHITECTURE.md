@@ -434,7 +434,23 @@ query ID 0, command closed and quality NONE
 only after a failed coherent read and positive proof from a pinned process
 identity: gone/Z/X, PF_EXITING with zero virtual size, a successfully read NULL
 MyBEEntry on PG14+, or a coherent own-pid startup row with database and user 0
-and no command open. PG13 clients also qualify when a coherent, complete row
+and no command open.
+
+On PG14–17, an UNPUBLISHED row also proves no command: the backend's non-NULL
+MyBEEntry points inside the runtime-validated shared status mapping on the
+validated struct stride, and a complete untorn row has `st_procpid == 0`.
+The retained `/proc` identity must have the same start time before and after,
+and the backend's wait address must be resolved and shared. Another pid,
+PG13/PG18, torn or failed reads, off-stride pointers and unknown identity
+never qualify. `exact_preseed_unpublished_total` counts successful proof seeds
+in both `metrics` and `status`. This seeds command/query attribution only;
+`preseed_state_map` still seeds the actual in-flight startup wait independently.
+If the fallback instead finds an own-pid row with database/user context and a
+closed command, the coherent reader is retried exactly once (PG14+).
+`exact_preseed_reread_total` counts these attempts, including failed attempts;
+failure still rolls the generation back. Neither path changes wait seeding order.
+
+PG13 clients also qualify when a coherent, complete row
 previously accepted by the sampler for that pid incarnation now names zero or
 another pid. The acceptance record contains the row address, pid, process start
 time and shared-memory generation; candidate addresses and computed hints do

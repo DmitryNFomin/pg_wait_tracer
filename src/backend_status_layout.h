@@ -67,8 +67,9 @@ struct PgBackendStatusLayout {
     uint32_t struct_size;
     uint32_t activity_buffer_size; /* validated track_activity_query_size */
     uint64_t status_anchor; /* validated row in the shared status array */
-    /* PG13 only. Offsets are header-derived hypotheses; the status batch
-     * remains the sole identity acceptor. All proofs belong to shm_generation. */
+    /* PG13 resolver fields. Offsets are header-derived hypotheses; the status
+     * batch remains the sole identity acceptor. The mapping identity/range is
+     * also retained for PG14-17's unpublished proof; all proofs belong to it. */
     uint64_t my_backend_id_addr;
     int32_t status_anchor_backend_id; /* retained array offset, only a row-address hint */
     uint32_t pgproc_pid_offset, pgproc_backend_id_offset;
@@ -392,19 +393,26 @@ int pgwt_pgbs_read_sampled_attr_at(
 uint64_t pgwt_pgbs_resolve_entry(
     pid_t backend_pid, const struct PgBackendStatusLayout *layout);
 
-/* Failure-path reader: ROW (0), absent MyBEEntry (2), retired row (3), failed (-1).
+/* Failure-path reader: ROW (0), absent MyBEEntry (2), retired row (3),
+ * UNPUBLISHED (4), failed (-1).
  * ROW includes startup context and passes the usual pid/counter/state checks.
  * RETIRED is a complete, coherent PG13 pid mismatch, not a proof without an
- * acceptance record. PG13 resolution failure is unknown, never absence. */
+ * acceptance record. UNPUBLISHED is an untorn PID-zero own MyBEEntry slot on
+ * the validated PG14-17 shared mapping/stride; the caller must still validate
+ * its pinned process identity and resolved shared wait address. PG13
+ * resolution failure is unknown, never absence. */
 enum pgwt_pgbs_preseed_result {
     PGWT_PGBS_PRESEED_FAILED = -1,
     PGWT_PGBS_PRESEED_ROW = 0,
     PGWT_PGBS_PRESEED_RETIRED = 3, /* coherent complete row naming another pid */
+    PGWT_PGBS_PRESEED_UNPUBLISHED = 4, /* PG14-17 own validated slot, pid zero */
     PGWT_PGBS_PRESEED_ABSENT = 2, /* 1 is reserved for ATTR_NO_CONTEXT */
 };
 int pgwt_pgbs_read_preseed(pid_t pid, uint64_t my_be_entry_addr,
     uint64_t status_addr, const struct PgBackendStatusLayout *layout,
     struct pgwt_pgbs_snapshot *snapshot);
+/* Read start time from the retained /proc identity, never by reopening pid. */
+int pgwt_pgbs_preseed_pin(int stat_fd, uint64_t *start_time);
 
 /* Pure PG13 retirement gate. A retained observation has already passed the
  * row checks; identity and generation must still pass on every use. */
