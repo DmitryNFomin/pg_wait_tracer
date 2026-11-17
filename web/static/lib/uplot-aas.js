@@ -86,8 +86,8 @@ import {
 } from './format.js';
 import {
     buildFidelityShading, buildEscalationAnnotation, fidelityOf, fidelityLabel,
-    SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
     ESC_MANUAL_COLOR, ESC_ANOMALY_COLOR, ESC_MANUAL_BORDER, ESC_ANOMALY_BORDER,
+    fidelityBandStyle, NOT_CAPTURED_BAND_COLOR, NOT_CAPTURED_BORDER,
 } from './builders/fidelity.js';
 
 /* ns→ms at the spec boundary — the ONE conversion site, same rule as the
@@ -102,8 +102,7 @@ export const AREA_FILL_ALPHA = 0.85;
 
 /* N-CPUs reference line color (same as the ECharts markLine). */
 export const NCPUS_COLOR = '#E53935';
-export const NOT_CAPTURED_BAND_COLOR = 'rgba(136, 136, 136, 0.10)';
-export const NOT_CAPTURED_BORDER = 'rgba(136, 136, 136, 0.45)';
+export { NOT_CAPTURED_BAND_COLOR, NOT_CAPTURED_BORDER };
 
 /* ── y-axis policy (Track U Phase U2, review P7) ─────────────────────────────
  * yMax = max(maxAas*1.2, min(numCpus*1.5, maxAas*4), 1) — the capacity
@@ -175,7 +174,7 @@ function identitySeries(data) {
                 return id != null ? id : null;
             }),
             values: order.map(o =>
-                buckets.map(b => +(b.aas[o.idx] || 0).toFixed(4))),
+                buckets.map(b => b?.aas?.[o.idx] == null ? null : +b.aas[o.idx].toFixed(4))),
         };
     }
     // AAS_CLASS_ORDER (#187), not WAIT_CLASSES: 'offcpu' stacks right after
@@ -186,7 +185,7 @@ function identitySeries(data) {
         colors: AAS_CLASS_ORDER.map(c => c.color),
         ids: AAS_CLASS_ORDER.map(() => null),   // class drills go by name
         values: AAS_CLASS_ORDER.map(wc =>
-            buckets.map(b => +(b[wc.key] || 0).toFixed(4))),
+            buckets.map(b => b?.[wc.key] == null ? null : +b[wc.key].toFixed(4))),
     };
 }
 
@@ -213,7 +212,11 @@ export function stackSeries(values, hidden) {
         if (hidden[i]) {
             stacked.push(vals.slice());          // recipe: raw pass-through
         } else {
-            stacked.push(vals.map((v, j) => (acc[j] += v)));
+            stacked.push(vals.map((v, j) => {
+                // An unknown lower edge also leaves the cumulative upper edge unknown.
+                acc[j] = v == null || acc[j] == null ? null : acc[j] + v;
+                return acc[j];
+            }));
             stackIdxs.push(i + 1);
         }
     });
@@ -361,7 +364,7 @@ export function buildUplotSpec(data, opts) {
     const hiddenSet = new Set(opts.hiddenNames || []);
     const hidden = names.map(n => hiddenSet.has(n));
 
-    const xs = buckets.map(b => nsToMs(b.t));
+    const xs = buckets.map(b => b?.t == null ? null : nsToMs(b.t));
     const { stacked, bands, stackIdxs } = stackSeries(values, hidden);
     const alignedData = [xs].concat(stacked);
 
@@ -377,8 +380,8 @@ export function buildUplotSpec(data, opts) {
     // Window / axis extents (ns) — the same derivation as buildAasOption:
     // win falls back to the bucket span (Node tests, degenerate callers);
     // axisRange = opts.axis ∪ win, never narrower than the window.
-    const xMinNs = buckets.length ? buckets[0].t : 0;
-    const xMaxNs = buckets.length ? buckets[buckets.length - 1].t : NS_PER_MS;
+    const xMinNs = buckets.find(b => b?.t != null)?.t ?? 0;
+    const xMaxNs = buckets.findLast(b => b?.t != null)?.t ?? NS_PER_MS;
     const win = opts.win || { from: xMinNs, to: xMaxNs };
     let axisFromNs = (opts.axis && opts.axis.from != null) ? opts.axis.from : win.from;
     let axisToNs = (opts.axis && opts.axis.to != null) ? opts.axis.to : win.to;
@@ -402,6 +405,7 @@ export function buildUplotSpec(data, opts) {
         stroke: colors[i],
         fill: withAlpha(colors[i], AREA_FILL_ALPHA),
         width: 1,
+        spanGaps: false,
         points: { show: false },
         show: !hidden[i],
     })));
@@ -753,8 +757,8 @@ export function hitTest(spec, xMs, yAas) {
 export function overlayGeometry(data, opts, scaleWindow) {
     opts = opts || {};
     const buckets = (data && data.buckets) || [];
-    const xMinNs = buckets.length ? buckets[0].t : 0;
-    const xMaxNs = buckets.length ? buckets[buckets.length - 1].t : NS_PER_MS;
+    const xMinNs = buckets.find(b => b?.t != null)?.t ?? 0;
+    const xMaxNs = buckets.findLast(b => b?.t != null)?.t ?? NS_PER_MS;
     const win = opts.win || { from: xMinNs, to: xMaxNs };
     let axisFromNs = (opts.axis && opts.axis.from != null) ? opts.axis.from : win.from;
     let axisToNs = (opts.axis && opts.axis.to != null) ? opts.axis.to : win.to;
@@ -768,13 +772,14 @@ export function overlayGeometry(data, opts, scaleWindow) {
 
     const shading = buildFidelityShading(data, { from: axisFromNs, to: axisToNs });
     for (const b of shading.bands) {
-        const mixed = b.kind === 'mixed';
+        const style = fidelityBandStyle(b.kind);
         rects.push({
             kind: b.kind,
             x0: nsToMs(b.from != null ? b.from : axisFromNs),
             x1: nsToMs(b.to != null ? b.to : axisToNs),
-            fill: mixed ? MIXED_BAND_COLOR : SAMPLED_BAND_COLOR,
-            stroke: mixed ? MIXED_BORDER : SAMPLED_BORDER,
+            fill: style.fill,
+            stroke: style.border,
+            label: style.label,
             dash: [4, 4],
         });
     }

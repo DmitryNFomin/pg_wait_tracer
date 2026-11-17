@@ -116,7 +116,7 @@ test('diff strip autoscale is intentionally scoped to visible qualitative lane',
 function classBuckets(n) {
     const out = [];
     for (let i = 0; i < n; i++) {
-        out.push({ t: 1000 + i, cpu: 1.0, io: 0.5, lock: 0.1, lwlock: 0.2,
+        out.push({ t: 1000 + i, cpu: 1.0, offcpu: 0, io: 0.5, lock: 0.1, lwlock: 0.2,
             ipc: 0, client: 0, timeout: 0, bufferpin: 0, activity: 0,
             extension: 0, unknown: 0 });
     }
@@ -192,7 +192,7 @@ test('class mode: alignedData is [xsMs, cum per wait class] in identity order', 
     // ns -> ms exactly once at the spec boundary: t=1000..1002 ns.
     assert.deepEqual(spec.alignedData[0], [0.001, 0.001001, 0.001002]);
     // AAS_CLASS_ORDER (#187), not WAIT_CLASSES: cpu, offcpu, io, lock,
-    // lwlock, ... — classBuckets has no 'offcpu' key (defaults to 0), so
+    // lwlock, ... — classBuckets explicitly reports offcpu=0, so
     // cumulative: cpu 1.0, +offcpu 0, +io 0.5, +lock 0.1, +lwlock 0.2, rest +0.
     approx(spec.alignedData[1][0], 1.0);
     approx(spec.alignedData[2][0], 1.0);
@@ -564,6 +564,7 @@ test('sampled window: one dashed band over the full rendered strip extent', () =
     assert.deepEqual(geo.rects[0], {
         kind: 'sampled', x0: 1e9, x1: 4e9,
         fill: SAMPLED_BAND_COLOR, stroke: SAMPLED_BORDER, dash: [4, 4],
+        label: 'Sampled (estimated)',
     });
     assert.deepEqual(geo.vlines, []);
     assert.deepEqual(geo.hlines, []);

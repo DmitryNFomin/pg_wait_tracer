@@ -21,12 +21,12 @@ const WIN = { from: 1000, to: 2000 };
 
 // ── fidelity token helpers ───────────────────────────────────────────────────
 
-test('fidelityOf: defaults to exact; passes through known tokens', () => {
+test('fidelityOf: absent defaults to exact; unknown is incomplete', () => {
     assert.equal(fidelityOf(null), 'exact');
     assert.equal(fidelityOf({}), 'exact');
     assert.equal(fidelityOf({ fidelity: 'sampled' }), 'sampled');
     assert.equal(fidelityOf({ fidelity: 'mixed' }), 'mixed');
-    assert.equal(fidelityOf({ fidelity: 'bogus' }), 'exact');
+    assert.equal(fidelityOf({ fidelity: 'bogus' }), 'incomplete');
 });
 
 test('isUnavailable: only true for the structured marker', () => {
@@ -116,10 +116,9 @@ test('shading: mixed window WITH sub-ranges → bands only over sampled parts', 
 // The existing sub-range test above hand-writes a partition of sampled/exact
 // only; the real producer partitions the WHOLE requested window, so it also
 // emits "none" ranges for the parts with no coverage at all (the aas default
-// window is expanded well past the data). Those must be left unshaded -- a
-// gap with no data is not sampled, and banding it sampled would claim
-// estimates over time nothing was recorded for.
-test('shading: producer-shaped ranges (none + exact + sampled) band ONLY the sampled part', () => {
+// window is expanded well past the data). Shade those as Not captured,
+// distinct from sampled estimates.
+test('shading: producer-shaped ranges band uncaptured and sampled parts distinctly', () => {
     const data = {
         fidelity: 'mixed',
         fidelity_ranges: [
@@ -130,16 +129,19 @@ test('shading: producer-shaped ranges (none + exact + sampled) band ONLY the sam
         ],
     };
     const s = buildFidelityShading(data, WIN);
-    assert.equal(s.bands.length, 1);
-    assert.deepEqual(s.bands[0], { from: 1500, to: 1800, kind: 'sampled' });
+    assert.deepEqual(s.bands, [
+        { from: 1000, to: 1200, kind: 'none' },
+        { from: 1500, to: 1800, kind: 'sampled' },
+        { from: 1800, to: 2000, kind: 'none' },
+    ]);
     // The whole-window 'mixed' fallback must NOT also be drawn -- that is the
     // over-shading #322 exists to remove.
     assert.ok(!s.bands.some(b => b.kind === 'mixed'),
         'no whole-window mixed band once sub-ranges are available: ' +
         JSON.stringify(s.bands));
-    assert.equal(s.markArea.data.length, 1);
-    assert.equal(s.markArea.data[0][0].xAxis, 1500);
-    assert.equal(s.markArea.data[0][1].xAxis, 1800);
+    assert.equal(s.markArea.data.length, 3);
+    assert.equal(s.markArea.data[1][0].xAxis, 1500);
+    assert.equal(s.markArea.data[1][1].xAxis, 1800);
     assert.equal(s.disclaimer, MIXED_DISCLAIMER);
     assert.equal(s.disclaimer, 'totals may not fully reconcile across the switch');
 });
@@ -154,7 +156,7 @@ test('shading: disclaimer is shown for SEVERAL sampled sub-ranges, not only one'
             { from: 1800, to: 2000, fidelity: 'none' },
         ],
     }, WIN);
-    assert.equal(s.bands.length, 2);
+    assert.equal(s.bands.length, 3);
     assert.equal(s.disclaimer, MIXED_DISCLAIMER);
 });
 
@@ -179,11 +181,8 @@ test('shading: disclaimer is absent without mixed sampled sub-ranges', () => {
     }
 });
 
-// Bypass case for the same consumer: a partition with NO sampled range (a
-// mixed label whose ranges carry none/exact only) must fall back to the
-// whole-window mixed band rather than silently drawing nothing. "Cannot
-// locate the estimated part" has to over-shade, never under-shade.
-test('shading: mixed label with no sampled sub-range falls back to the whole-window band', () => {
+// Known missing coverage is shaded over its own bounds.
+test('shading: mixed label with none/exact ranges bands the uncaptured part', () => {
     const s = buildFidelityShading({
         fidelity: 'mixed',
         fidelity_ranges: [
@@ -192,7 +191,7 @@ test('shading: mixed label with no sampled sub-range falls back to the whole-win
         ],
     }, WIN);
     assert.equal(s.bands.length, 1);
-    assert.deepEqual(s.bands[0], { from: 1000, to: 2000, kind: 'mixed' });
+    assert.deepEqual(s.bands[0], { from: 1000, to: 1500, kind: 'none' });
 });
 
 test('bandsToMarkArea: null for empty; dashed border per kind', () => {

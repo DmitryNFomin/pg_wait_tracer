@@ -23,7 +23,7 @@
 import {
     buildUnavailablePanel, buildEscalateControl, buildMetricsPanel,
     buildEscalateResult, fidelityOf, fidelityLabel, buildCompareFidelity,
-    SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
+    INCOMPLETE_FIDELITY, INCOMPLETE_CAPTURE_MESSAGE, fidelityBandStyle,
 } from './builders/fidelity.js';
 import {
     controlEscalate, controlDeescalate, ControlUnavailable,
@@ -38,7 +38,8 @@ import { esc, fmtCount } from './format.js';
  * carries a compact chip that reuses the AAS chip's model surface
  * (fidelityOf/fidelityLabel) and its exact colors (the SAMPLED/MIXED band
  * fills + dashed borders from builders/fidelity.js), so "amber-dash =
- * sampled estimate" reads the same everywhere. Hidden for exact windows —
+ * sampled estimate" reads the same everywhere. Incomplete captures get a
+ * visible disclosure with the shared uncaptured style. Hidden for exact windows —
  * the common case stays noise-free, matching the AAS chip.
  *
  * buildPaneFidelity(data) -> null | { fidelity, label, fill, border, title }
@@ -46,14 +47,15 @@ import { esc, fmtCount } from './format.js';
  * styles: pane chrome ships with the component, no stylesheet dependency). */
 export function buildPaneFidelity(data) {
     const fid = fidelityOf(data);
-    if (fid !== 'sampled' && fid !== 'mixed') return null;
+    if (fid === 'exact' || fid === 'none') return null;
     const sampled = fid === 'sampled';
+    const style = fidelityBandStyle(fid);
     return {
         fidelity: fid,
-        label: fidelityLabel(fid),
-        fill: sampled ? SAMPLED_BAND_COLOR : MIXED_BAND_COLOR,
-        border: sampled ? SAMPLED_BORDER : MIXED_BORDER,
-        title: sampled
+        label: fid === INCOMPLETE_FIDELITY ? INCOMPLETE_CAPTURE_MESSAGE : fidelityLabel(fid),
+        fill: style.fill,
+        border: style.border,
+        title: fid === INCOMPLETE_FIDELITY ? INCOMPLETE_CAPTURE_MESSAGE : sampled
             ? 'This window is sampled-tier: counts and times in this pane ' +
               'are scaled estimates, not exact measurements.'
             : 'This window mixes sampled and exact capture: numbers in this ' +
@@ -115,6 +117,7 @@ export function baselineUnavailableHtml(unavailable) {
  * the exact "N of M". Never fabricated client-side. */
 export function buildPercentileBasis(data) {
     const fid = fidelityOf(data);
+    if (fid === INCOMPLETE_FIDELITY) return { exact: null, total: null, text: INCOMPLETE_CAPTURE_MESSAGE };
     if (fid === 'exact' || fid === 'none') return null;
     const rows = (data && data.rows) || [];
     if (!rows.length) return null;

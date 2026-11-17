@@ -62,6 +62,7 @@ import { fullyCoversStrip } from '../lib/stripcache.js';
 import { CancelledError } from '../lib/transport.js';
 import {
     SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
+    fidelityBandStyle,
 } from '../lib/builders/fidelity.js';
 import { attachSelection } from '../lib/selection.js';
 import { esc, fmtDuration, fmtTime, classFilterName } from '../lib/format.js';
@@ -1204,6 +1205,13 @@ function renderFidelityChip(model, ctx) {
             sampledSwatch + 'sampled</span>' +
             '<span style="display:inline-flex;align-items:center;gap:5px">' +
             mixedSwatch + 'mixed window</span>';
+    }
+    for (const kind of new Set(model.shading.bands.map(b => b.kind))) {
+        if (kind === 'sampled' || kind === 'mixed') continue;
+        const style = fidelityBandStyle(kind);
+        html += '<span style="display:inline-flex;align-items:center;gap:5px">' +
+            '<span style="width:14px;height:10px;background:' + style.fill +
+            ';border:1px dashed ' + style.border + '"></span>' + esc(style.label) + '</span>';
     }
     if (model.escalation) {
         html += '<span style="color:' +
