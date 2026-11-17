@@ -2,7 +2,7 @@
 """Exercise the real overhead gate with host-only processes, no PostgreSQL/BPF.
 
 TRACER is the gate's test-only executable override. PATH stubs supply the
-workload, SQL, /proc reads and short attach sleeps; the benchmark itself is
+workload, SQL, /proc reads and inter-run sleeps; the benchmark itself is
 neither copied nor mocked. All generated files live in TemporaryDirectory.
 """
 import csv
@@ -21,6 +21,18 @@ ROOT = Path(__file__).resolve().parents[1]
 ATTACHED = "INFO: capture provider: full (exact fidelity)"
 
 
+def find_bash():
+    # The existing benchmark uses associative arrays (bash >= 4).
+    return next((candidate for candidate in dict.fromkeys(
+        [shutil.which("bash"), "/opt/homebrew/bin/bash", "/usr/local/bin/bash"])
+        if candidate and Path(candidate).is_file() and subprocess.run(
+            [candidate, "-c", '[[ ${BASH_VERSINFO[0]} -ge 4 ]]'],
+            capture_output=True).returncode == 0), None)
+
+
+BASH = find_bash()
+
+
 class OverheadHarness(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="pgwt-overhead-control-")
@@ -28,7 +40,6 @@ class OverheadHarness(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.bin = self.directory / "bin"
         self.bin.mkdir()
-        os.mkfifo(self.directory / "attach-ready")
         self.log = self.directory / "server.log"
         self.log.write_text("server log evidence sentinel\n")
         self.stat = self.directory / "stat"
@@ -39,21 +50,16 @@ class OverheadHarness(unittest.TestCase):
                         TRACER=str(self.bin / "tracer"), TMPDIR=str(self.directory),
                         CONTROL_DIR=str(self.directory),
                         REAL_AWK=shutil.which("awk"), REAL_SLEEP=shutil.which("sleep"))
-        # The existing benchmark uses associative arrays (bash >= 4).
-        self.bash = next((candidate for candidate in dict.fromkeys(
-            [shutil.which("bash"), "/opt/homebrew/bin/bash", "/usr/local/bin/bash"])
-            if candidate and Path(candidate).is_file() and subprocess.run(
-                [candidate, "-c", '[[ ${BASH_VERSINFO[0]} -ge 4 ]]'],
-                capture_output=True).returncode == 0), None)
-        self.assertIsNotNone(self.bash, "overhead gate requires bash >= 4")
+        if BASH is None:
+            self.skipTest("overhead gate requires bash >= 4")
+        self.bash = BASH
         self.stub("nproc", "print(4)\n")
         self.stub("pgrep", "raise SystemExit(1)\n")
         self.stub("sleep", """
-import os, sys
-from pathlib import Path
-if sys.argv[1] == '2':
-    # Synchronize startup rather than relying on host process scheduling.
-    (Path(os.environ['CONTROL_DIR']) / 'attach-ready').read_text()
+import sys, time
+if sys.argv[1] == '0.2':
+    # Readiness polling uses real time, including the 3-second slow start.
+    time.sleep(0.2)
 """)
         self.stub("readlink", """
 import os, sys
@@ -98,7 +104,7 @@ if '/proc/meminfo' in args:
 os.execv(os.environ['REAL_AWK'], [os.environ['REAL_AWK'], *args])
 """)
         self.stub("tracer", f"""
-import os, signal, sys
+import os, signal, sys, time
 from pathlib import Path
 base = Path(os.environ['CONTROL_DIR'])
 (base / 'tracer.pid').write_text(str(os.getpid()))
@@ -108,18 +114,30 @@ if scenario == 'dead':
     for line in range(30):
         print('tracer diagnostic ' + str(line), file=sys.stderr)
     print('tracer startup failure sentinel', file=sys.stderr, flush=True)
-    with (base / 'attach-ready').open('w') as ready:
-        ready.write('ready')
-        ready.flush()
-        os._exit(7)
+    os._exit(7)
 if scenario == 'sleep':
-    (base / 'attach-ready').write_text('ready')
     os.execv(os.environ['REAL_SLEEP'], [os.environ['REAL_SLEEP'], '60'])
-print({ATTACHED!r}, file=sys.stderr, flush=True)
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 if scenario == 'bad_stop':
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(7))
-(base / 'attach-ready').write_text('ready')
+def attach_client(*_):
+    if scenario != 'no_client':
+        print('INFO: PID 123 initialized (client), real watchpoint at 0xabc',
+              file=sys.stderr, flush=True)
+    else:
+        print('INFO: PID 124 initialized (autovacuum), real watchpoint at 0xabc',
+              file=sys.stderr, flush=True)
+    if scenario in ('live_attach_fail', 'gone_attach_fail', 'exiting_attach_fail'):
+        liveness = scenario.split('_')[0]
+        print('WP-ATTACH-FAIL: pid=125 site=init errno=3 resolve_errno=0 '
+              'liveness=' + liveness + ' liveness_result=0 liveness_errno=0 exit_proof=1',
+              file=sys.stderr, flush=True)
+    (base / ('client-ready-' + str(os.getpid()))).write_text('ready')
+signal.signal(signal.SIGUSR1, attach_client)
+if scenario == 'slow_start':
+    time.sleep(3)
+(base / ('provider-ready-' + str(os.getpid()))).write_text('ready')
+print({ATTACHED!r}, file=sys.stderr, flush=True)
 while True:
     signal.pause()
 """)
@@ -135,6 +153,14 @@ assert sys.argv[sys.argv.index('-P') + 1] == '5', 'progress must be enabled'
 counter = base / 'measured.count'
 run = int(counter.read_text()) + 1 if counter.exists() else 1
 counter.write_text(str(run))
+if run > 3:
+    pid = int((base / 'tracer.pid').read_text())
+    assert (base / ('provider-ready-' + str(pid))).exists(), 'pgbench started before provider readiness'
+    os.kill(pid, signal.SIGUSR1)
+    deadline = time.monotonic() + 2
+    while not (base / ('client-ready-' + str(pid))).exists():
+        assert time.monotonic() < deadline, 'client attachment stub timed out'
+        time.sleep(0.01)
 print('progress: 5.0 s, progress evidence run ' + str(run), file=sys.stderr)
 if scenario == 'no_tps' or (scenario == 'no_tps_tracer' and run == 4):
     print('no TPS sentinel', file=sys.stderr)
@@ -210,7 +236,7 @@ if scenario == 'pgbench_exit':
                     self.assertIn(ATTACHED, prefix.with_suffix('.stderr').read_text())
 
     def test_b_dead_tracer_is_a_liveness_error_with_stderr(self):
-        self.assert_error(self.run_gate('dead'), 'ERROR: tracer liveness: not running after attach sleep', 3)
+        self.assert_error(self.run_gate('dead'), 'ERROR: tracer liveness: not running while waiting for provider readiness', 3)
         self.assertIn('Tracer stderr (last 20 lines):', self.output)
         self.assertIn('tracer startup failure sentinel', self.output)
         self.assertNotIn('tracer diagnostic 0\n', self.output)
@@ -283,6 +309,36 @@ if scenario == 'pgbench_exit':
         self.assertIn('STALL: baseline, 4 clients, run 1: 100 TPS < 25% of other-run median 650', self.output)
         self.assertIn('STALL: tracer, 4 clients, run 1: 80 TPS < 25% of other-run median 520', self.output)
 
+    def test_p_provider_without_client_watchpoint_is_an_error(self):
+        self.assert_error(self.run_gate('no_client'),
+                          'ERROR: tracer liveness: no client real watchpoint initialized', 4)
+        self.assertIn(ATTACHED, self.output)
+        self.assertIn('initialized (autovacuum)', self.output)
+
+    def test_q_live_watchpoint_attach_failure_is_an_error(self):
+        self.assert_error(self.run_gate('live_attach_fail'),
+                          'ERROR: tracer liveness: live backend watchpoint attach failed', 4)
+        self.assertIn('initialized (client), real watchpoint', self.output)
+        self.assertIn('liveness=live ', self.output)
+
+    def test_r_gone_watchpoint_attach_failure_is_not_an_error(self):
+        self.assertEqual(self.run_gate('gone_attach_fail'), 0, self.output)
+        self.assertIn('PASS (10-30%', self.output)
+        self.assertIn('liveness=gone ', (self.evidence / '4-tracer-1.stderr').read_text())
+
+    def test_s_exiting_watchpoint_attach_failure_is_not_an_error(self):
+        self.assertEqual(self.run_gate('exiting_attach_fail'), 0, self.output)
+        self.assertIn('PASS (10-30%', self.output)
+        self.assertIn('liveness=exiting ', (self.evidence / '4-tracer-1.stderr').read_text())
+
+    def test_t_slow_provider_readiness_precedes_pgbench(self):
+        self.assertEqual(self.run_gate('slow_start'), 0, self.output)
+        self.assertIn('PASS (10-30%', self.output)
+
 
 if __name__ == '__main__':
+    if BASH is None:
+        # Like other host Python tests, SKIP is a successful exit for check.sh.
+        print('SKIP: overhead gate controls require bash >= 4')
+        sys.exit(0)
     unittest.main(verbosity=2)

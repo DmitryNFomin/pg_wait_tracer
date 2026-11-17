@@ -198,16 +198,51 @@ capture_pg_log() {
     fi
 }
 
-check_tracer() {
+check_tracer_alive() {
     local stage=$1
     if ! kill -0 "$tracer_pid" 2>/dev/null; then
         echo "ERROR: tracer liveness: not running $stage" >&2
         return 1
     fi
+}
+
+wait_tracer_ready() {
+    local attempt
+    # Provider startup precedes pgbench. Poll for at most 20 seconds; this
+    # waits for readiness without retrying any workload measurement.
+    for ((attempt=0; attempt<=100; attempt++)); do
+        check_tracer_alive 'while waiting for provider readiness' || return 1
+        if grep -qxF 'INFO: capture provider: full (exact fidelity)' "$tracer_stderr"; then
+            return 0
+        fi
+        if [[ "$attempt" -lt 100 ]]; then
+            sleep 0.2
+        fi
+    done
+    echo 'ERROR: tracer liveness: full-mode attach signal missing after 20s readiness wait' >&2
+    return 1
+}
+
+check_tracer() {
+    local stage=$1
+    check_tracer_alive "$stage" || return 1
     # src/daemon.c:1857-1859, after provider->start and the backend scan;
     # src/provider_full.c names this provider 'full' with EXACT fidelity.
     if ! grep -qxF 'INFO: capture provider: full (exact fidelity)' "$tracer_stderr"; then
         echo "ERROR: tracer liveness: full-mode attach signal missing $stage" >&2
+        return 1
+    fi
+    # Provider startup alone does not prove a backend watchpoint attached:
+    # full_start() is a no-op (src/provider_full.c:21-25). Require the verbose
+    # client success from src/backend.c:1297-1300 before stopping each run.
+    if ! grep -qE '^INFO: PID [0-9]+ initialized \(client\), real watchpoint at 0x[[:xdigit:]]+$' "$tracer_stderr"; then
+        echo "ERROR: tracer liveness: no client real watchpoint initialized $stage" >&2
+        return 1
+    fi
+    # src/backend.c:358-363 distinguishes a live attach failure from an exit
+    # race (gone/exiting). Only the live failure makes this run invalid.
+    if grep -qE '^WP-ATTACH-FAIL: .*liveness=live([[:space:]]|$)' "$tracer_stderr"; then
+        echo "ERROR: tracer liveness: live backend watchpoint attach failed $stage" >&2
         return 1
     fi
 }
@@ -351,8 +386,7 @@ for CLIENTS in "${CLIENT_COUNTS[@]}"; do
         "$TRACER" --mode full --verbose --pid "$PM_PID" --interval 5 --duration $((DURATION + WARMUP + 30)) \
             --view time_model > /dev/null 2> "$tracer_stderr" &
         tracer_pid=$!
-        sleep 2  # let tracer attach all backends
-        check_tracer 'after attach sleep'
+        wait_tracer_ready
 
         run_pgbench "$CLIENTS" "$EVIDENCE_DIR/$CLIENTS-tracer-$i"
         tps=$TPS

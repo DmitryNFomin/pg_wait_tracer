@@ -298,9 +298,6 @@ run tests/test_uprobe_mask_gate.py
 step "runner known-failing scope and summary self-test (#760)"
 run python3 -B tests/test_run_all_known_failing.py
 
-step "overhead gate liveness and stall evidence controls (#951)"
-run python3 -B tests/test_overhead_harness.py
-
 # Runner-image pin guard (2026-10-22). GitHub rolled `ubuntu-latest` to Ubuntu
 # 26.04 and four gating jobs went red at once (run 39765852420): Playwright
 # 1.60.0 has no chromium for ubuntu26.04-x64, setup-python handed the
@@ -490,6 +487,9 @@ step "cross-validate tolerance derivation + bypass suite (issues #294/#306/#321)
 run bash tests/test_xval_tolerance_derivation.sh
 
 if [[ $FAST -eq 0 ]]; then
+    step "overhead gate liveness and stall evidence controls (#951)"
+    run python3 -B tests/test_overhead_harness.py
+
     # ── Port allocation (so two `make check` runs on this Mac don't collide) ─
     # One free base per run, laid out at FIXED OFFSETS below so every mock
     # server this run spawns gets a run-private port; no lock (that would
