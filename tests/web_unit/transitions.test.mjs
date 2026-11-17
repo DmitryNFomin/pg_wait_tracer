@@ -1639,6 +1639,22 @@ function viewHarness456(t) {
     };
 }
 
+test('unknown fidelity and none ranges render as incomplete and Not captured in the transition strip', t => {
+    const h = viewHarness456(t);
+    h.ctx.timeRange.from = 100;
+    h.ctx.timeRange.to = 300;
+    const payload = { ...replay456(), fidelity: 'future-pause-verdict', fidelity_ranges: [
+        { from: 100, to: 200, fidelity: 'none' },
+        { from: 200, to: 300, fidelity: 'future-pause-verdict' },
+    ] };
+    h.view.mount(h.root, h.view.build({ transitions: payload }, h.ctx), h.ctx);
+    const chip = h.elements.get('dfg-fidelity-chip');
+    assert.equal(chip.style.display, '');
+    assert.match(chip.innerHTML, /Incomplete capture/);
+    assert.match(chip.innerHTML, /Not captured/);
+    assert.doesNotMatch(chip.innerHTML, /future-pause-verdict|Exact|>sampled</);
+});
+
 test('#808 mixed fidelity chip and strip refresh, clear for exact, and preserve unavailable', t => {
     const h = viewHarness456(t);
     h.ctx.timeRange.from = 100;

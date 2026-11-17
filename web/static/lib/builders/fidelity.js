@@ -22,6 +22,10 @@ export const MIXED_BAND_COLOR   = 'rgba(120, 144, 255, 0.10)'; // indigo wash
 export const SAMPLED_BORDER     = 'rgba(255, 193, 7, 0.45)';
 export const MIXED_BORDER       = 'rgba(120, 144, 255, 0.45)';
 export const MIXED_DISCLAIMER = 'totals may not fully reconcile across the switch';
+export const INCOMPLETE_FIDELITY = 'incomplete';
+export const INCOMPLETE_CAPTURE_MESSAGE = 'Incomplete capture: some of this window was not captured.';
+export const NOT_CAPTURED_BAND_COLOR = 'rgba(136, 136, 136, 0.10)';
+export const NOT_CAPTURED_BORDER = 'rgba(136, 136, 136, 0.45)';
 
 /* Escalation annotation colors: manual vs anomaly are visually distinct. */
 export const ESC_MANUAL_COLOR  = 'rgba(79, 195, 247, 0.14)';   // cyan
@@ -40,22 +44,23 @@ export function isUnavailable(data) {
         typeof data.unavailable === 'string'));
 }
 
-/* Normalize a response's fidelity token to one of exact|sampled|mixed|none.
- * Defaults to "exact" when absent so legacy/transition-only responses (and the
- * protocol-drift fixture) keep their current, unshaded look. */
+/* Only an absent token gets the legacy exact presentation. A new or malformed
+ * verdict cannot establish complete capture. */
 export function fidelityOf(data) {
+    if (!data || !Object.prototype.hasOwnProperty.call(data, 'fidelity')) return 'exact';
     const f = data && data.fidelity;
     if (f === 'sampled' || f === 'mixed' || f === 'none' || f === 'exact') return f;
-    return 'exact';
+    return INCOMPLETE_FIDELITY;
 }
 
 /* Human label for a fidelity token (used in the AAS legend / status). */
 export function fidelityLabel(fid) {
-    switch (fid) {
+    switch (fidelityOf(fid === undefined ? null : { fidelity: fid })) {
         case 'sampled': return 'Sampled (estimated)';
         case 'mixed':   return 'Mixed (sampled + exact)';
         case 'none':    return 'No data';
-        default:        return 'Exact';
+        case 'exact':   return 'Exact';
+        default:        return 'Incomplete capture';
     }
 }
 
@@ -63,7 +68,8 @@ function evidencePhrase(fid) {
     if (fid === 'sampled') return 'sampled estimates';
     if (fid === 'mixed') return 'mixed estimates';
     if (fid === 'none') return 'no data';
-    return 'exact';
+    if (fid === 'exact') return 'exact';
+    return 'incomplete capture';
 }
 
 /* D4/D7 compare-header evidence model. Unlike the ordinary per-pane badge,
@@ -74,12 +80,16 @@ export function buildCompareFidelity(dataA, dataB, opts) {
     const a = fidelityOf(dataA);
     const unavailable = !!(opts.baselinePredates || opts.baselineUnavailable);
     const b = unavailable ? 'none' : fidelityOf(dataB);
+    const mismatch = a === INCOMPLETE_FIDELITY || b === INCOMPLETE_FIDELITY ||
+        (a !== b && b !== 'none');
     return {
         a: { fidelity: a, label: fidelityLabel(a) },
         b: { fidelity: b, label: fidelityLabel(b) },
-        mismatch: a !== b && b !== 'none',
-        warning: a !== b && b !== 'none'
-            ? 'Δ compares ' + evidencePhrase(a) + ' against ' + evidencePhrase(b)
+        mismatch,
+        warning: mismatch
+            ? (b === 'none'
+                ? "No comparison: the baseline has no data; this window's capture is incomplete."
+                : 'Δ compares ' + evidencePhrase(a) + ' against ' + evidencePhrase(b))
             : null,
         baselinePredates: !!opts.baselinePredates,
         baselineUnavailable: !!opts.baselineUnavailable,
@@ -92,20 +102,19 @@ export function buildCompareFidelity(dataA, dataB, opts) {
  *
  * buildFidelityShading(data, win) → {
  *   fidelity,            // the window's fidelity token
- *   bands: [{ from, to, kind }],   // time ranges to shade (ns), kind=sampled|mixed
+ *   bands: [{ from, to, kind }],   // time ranges to shade (ns), including gaps
  *   markArea,            // ECharts markArea.data spec (array of [start,end] pairs)
  *                        //   with itemStyle — fed straight into a series markArea
- *   showLegend,          // whether the sampled/exact legend chip is relevant
+ *   showLegend,          // whether the fidelity legend chip is relevant
  *   disclaimer,          // MIXED_DISCLAIMER for mixed with sampled sub-ranges;
  *                        // null otherwise, including the whole-window fallback
  * }
  *
  * The server gives a single fidelity per window. For a "mixed" window it can
  * also (optionally) provide `fidelity_ranges`: an array of
- * { from, to, fidelity } sub-ranges so the band covers only the sampled parts.
- * When that detail is absent we band the whole window with the "mixed" style —
- * "show the band only over the sampled sub-ranges IF AVAILABLE, else mark the
- * window mixed" (REWORK_PLAN B5).
+ * { from, to, fidelity } sub-ranges. Shade sampled, mixed and uncaptured time
+ * distinctly; a new verdict is incomplete. Without detail, shade the whole
+ * non-exact window using its verdict.
  */
 export function buildFidelityShading(data, win) {
     win = win || {};
@@ -115,24 +124,21 @@ export function buildFidelityShading(data, win) {
 
     const bands = [];
 
-    if (fidelity === 'sampled') {
-        bands.push({ from: xMin, to: xMax, kind: 'sampled' });
-    } else if (fidelity === 'mixed') {
-        const ranges = Array.isArray(data && data.fidelity_ranges)
-            ? data.fidelity_ranges : null;
-        const sampledSub = ranges
-            ? ranges.filter(r => r && r.fidelity === 'sampled')
-            : null;
-        if (sampledSub && sampledSub.length) {
-            for (const r of sampledSub) {
-                bands.push({ from: r.from, to: r.to, kind: 'sampled' });
-            }
-        } else {
-            // No sub-range detail: mark the whole window mixed.
-            bands.push({ from: xMin, to: xMax, kind: 'mixed' });
+    const ranges = Array.isArray(data && data.fidelity_ranges) ? data.fidelity_ranges : [];
+    for (const r of ranges) {
+        if (!r) continue;
+        const kind = fidelityOf(r);
+        if (kind !== 'exact') {
+            bands.push({ from: r.from, to: r.to, kind });
         }
     }
-    // exact / none → no shading.
+    if (fidelity === 'mixed' && !bands.some(b => b.kind === 'sampled' || b.kind === 'mixed')) {
+        // Keep the mixed fallback behind the more specific uncaptured bands.
+        // Those ranges do not locate the sampled part of a mixed window.
+        bands.unshift({ from: xMin, to: xMax, kind: 'mixed' });
+    } else if (!bands.length && fidelity !== 'exact') {
+        bands.push({ from: xMin, to: xMax, kind: fidelity });
+    }
 
     const markArea = bandsToMarkArea(bands);
 
@@ -140,10 +146,18 @@ export function buildFidelityShading(data, win) {
         fidelity,
         bands,
         markArea,
-        showLegend: fidelity === 'sampled' || fidelity === 'mixed',
+        showLegend: bands.length > 0,
         disclaimer: fidelity === 'mixed' && bands.some(b => b.kind === 'sampled')
             ? MIXED_DISCLAIMER : null,
     };
+}
+
+/* Shared by chart bands and their legends, including uncaptured ranges. */
+export function fidelityBandStyle(kind) {
+    if (kind === 'sampled') return { fill: SAMPLED_BAND_COLOR, border: SAMPLED_BORDER, label: 'Sampled (estimated)' };
+    if (kind === 'mixed') return { fill: MIXED_BAND_COLOR, border: MIXED_BORDER, label: 'Mixed (sampled + exact)' };
+    return { fill: NOT_CAPTURED_BAND_COLOR, border: NOT_CAPTURED_BORDER,
+        label: kind === 'none' ? 'Not captured' : fidelityLabel(INCOMPLETE_FIDELITY) };
 }
 
 /* Turn shading bands into an ECharts markArea.data array. Each entry is a
@@ -154,11 +168,14 @@ export function bandsToMarkArea(bands) {
     if (!bands || !bands.length) return null;
     const data = [];
     for (const b of bands) {
-        const fill   = b.kind === 'mixed' ? MIXED_BAND_COLOR : SAMPLED_BAND_COLOR;
-        const border = b.kind === 'mixed' ? MIXED_BORDER : SAMPLED_BORDER;
+        const { fill, border, label } = fidelityBandStyle(b.kind);
         const start = { itemStyle: { color: fill,
                                      borderColor: border, borderWidth: 1,
                                      borderType: 'dashed' } };
+        if (b.kind === 'none' || b.kind === INCOMPLETE_FIDELITY) {
+            start.name = label;
+            start.label = { position: 'insideTop', distance: 4, color: '#ddd', fontSize: 10 };
+        }
         const end = {};
         if (b.from != null) start.xAxis = b.from;
         if (b.to != null) end.xAxis = b.to;
