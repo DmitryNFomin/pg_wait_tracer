@@ -58,19 +58,19 @@ test('incomplete sides always cause a compare mismatch including identical token
     ]) {
         const model = buildComparePaneFidelity(a, b, opts);
         assert.equal(model.mismatch, true, 'INCOMPLETE_COMPARE_IS_MISMATCH');
-        assert.match(model.warning, /incomplete capture/, 'COMPARE_PHRASE_IS_INCOMPLETE');
+        assert.match(model.warning, /incomplete capture|capture is incomplete/, 'COMPARE_PHRASE_IS_INCOMPLETE');
         assert.match(compareFidelityHtml(model), /Incomplete capture/);
     }
 });
 
-test('pane and percentile helpers disclose incomplete capture with the agreed wording', () => {
+test('pane badge discloses incomplete capture with the agreed wording', () => {
     const badge = buildPaneFidelity(unknown);
     assert.equal(INCOMPLETE_CAPTURE_MESSAGE, message);
     assert.ok(badge, 'INCOMPLETE_PANE_BADGE_IS_VISIBLE');
     assert.equal(badge.label, message, 'INCOMPLETE_PANE_BADGE_IS_VISIBLE');
     assert.equal(badge.title, message);
     assert.match(paneFidelityBadgeHtml(badge), /Incomplete capture: some of this window was not captured\./);
-    assert.equal(buildPercentileBasis(unknown).text, message);
+    assert.equal(buildPercentileBasis(unknown), null);
     const unavailable = buildUnavailablePanel(unknown);
     assert.equal(unavailable.fidelity, INCOMPLETE_FIDELITY);
     assert.match(unavailable.hint, /incomplete capture/);
@@ -114,7 +114,7 @@ test('none and incomplete ranges have labeled shading in every chart model', () 
     assert.equal(ec.option.series.find(s => s.name === AAS_ANNOTATION_SERIES).markArea.data.length, 4);
     const up = buildUplotSpec(data, { win: WIN });
     assert.deepEqual(up.overlays.rects.map(b => b.label),
-        ['Not captured', 'Incomplete capture', 'Incomplete capture', 'Sampled (estimated)']);
+        ['Not captured', 'Incomplete capture', 'Incomplete capture', undefined]);
     for (const fidelity of ['none', unknown.fidelity]) {
         assert.equal(buildFidelityShading({ fidelity }, WIN).bands.length, 1);
     }
@@ -140,7 +140,8 @@ for (const mode of ['classes', 'events']) {
         const spec = buildUplotSpec(data, { win: WIN });
         assert.deepEqual(spec.rawValues[0], [1.2346, null, null, 0, 2],
             `UPLOT_${mode.toUpperCase()}_GAP_NOT_ZERO`);
-        assert.deepEqual(spec.alignedData[1], [1.2346, null, null, 0, 2]);
+        assert.deepEqual(spec.alignedData[1], mode === 'classes'
+            ? [1.2346, 0, 0, 0, 2] : [1.2346, null, null, 0, 2]);
         assert.equal(spec.uplotOpts.series[1].spanGaps, false, 'UPLOT_DOES_NOT_INTERPOLATE');
     });
     test(`${mode} tolerates null buckets and empty series`, () => {
@@ -155,7 +156,7 @@ for (const mode of ['classes', 'events']) {
     });
 }
 
-test('uPlot cumulative edges keep gaps through the visible stack', () => {
-    assert.deepEqual(stackSeries([[1, null, 0], [2, 3, 0]], []).stacked,
-        [[1, null, 0], [3, null, 0]], 'STACK_DOES_NOT_COERCE_NULL_TO_ZERO');
+test('uPlot cumulative edges skip missing classes and preserve wholly missing buckets', () => {
+    assert.deepEqual(stackSeries([[1, null, 0, null], [2, 3, 0, null]], []).stacked,
+        [[1, 0, 0, null], [3, 3, 0, null]], 'STACK_SKIPS_MISSING_CLASS');
 });

@@ -87,7 +87,9 @@ export function buildCompareFidelity(dataA, dataB, opts) {
         b: { fidelity: b, label: fidelityLabel(b) },
         mismatch,
         warning: mismatch
-            ? 'Δ compares ' + evidencePhrase(a) + ' against ' + evidencePhrase(b)
+            ? (b === 'none'
+                ? "No comparison: the baseline has no data; this window's capture is incomplete."
+                : 'Δ compares ' + evidencePhrase(a) + ' against ' + evidencePhrase(b))
             : null,
         baselinePredates: !!opts.baselinePredates,
         baselineUnavailable: !!opts.baselineUnavailable,
@@ -130,7 +132,11 @@ export function buildFidelityShading(data, win) {
             bands.push({ from: r.from, to: r.to, kind });
         }
     }
-    if (!bands.length && fidelity !== 'exact') {
+    if (fidelity === 'mixed' && !bands.some(b => b.kind === 'sampled' || b.kind === 'mixed')) {
+        // Keep the mixed fallback behind the more specific uncaptured bands.
+        // Those ranges do not locate the sampled part of a mixed window.
+        bands.unshift({ from: xMin, to: xMax, kind: 'mixed' });
+    } else if (!bands.length && fidelity !== 'exact') {
         bands.push({ from: xMin, to: xMax, kind: fidelity });
     }
 

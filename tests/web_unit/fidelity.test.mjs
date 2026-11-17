@@ -181,8 +181,8 @@ test('shading: disclaimer is absent without mixed sampled sub-ranges', () => {
     }
 });
 
-// Known missing coverage is shaded over its own bounds.
-test('shading: mixed label with none/exact ranges bands the uncaptured part', () => {
+// Missing coverage does not locate the sampled part of a mixed window.
+test('shading: mixed label with no sampled sub-range falls back to whole-window band', () => {
     const s = buildFidelityShading({
         fidelity: 'mixed',
         fidelity_ranges: [
@@ -190,8 +190,11 @@ test('shading: mixed label with none/exact ranges bands the uncaptured part', ()
             { from: 1500, to: 2000, fidelity: 'exact' },
         ],
     }, WIN);
-    assert.equal(s.bands.length, 1);
-    assert.deepEqual(s.bands[0], { from: 1000, to: 1500, kind: 'none' });
+    assert.deepEqual(s.bands, [
+        { from: 1000, to: 2000, kind: 'mixed' },
+        { from: 1000, to: 1500, kind: 'none' },
+    ], 'MIXED_FALLBACK_PRESERVES_NONE_RANGE');
+    assert.equal(s.disclaimer, null);
 });
 
 test('bandsToMarkArea: null for empty; dashed border per kind', () => {

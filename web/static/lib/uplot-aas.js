@@ -87,7 +87,7 @@ import {
 import {
     buildFidelityShading, buildEscalationAnnotation, fidelityOf, fidelityLabel,
     ESC_MANUAL_COLOR, ESC_ANOMALY_COLOR, ESC_MANUAL_BORDER, ESC_ANOMALY_BORDER,
-    fidelityBandStyle, NOT_CAPTURED_BAND_COLOR, NOT_CAPTURED_BORDER,
+    fidelityBandStyle, NOT_CAPTURED_BAND_COLOR, NOT_CAPTURED_BORDER, INCOMPLETE_FIDELITY,
 } from './builders/fidelity.js';
 
 /* ns→ms at the spec boundary — the ONE conversion site, same rule as the
@@ -206,6 +206,11 @@ function identitySeries(data) {
 export function stackSeries(values, hidden) {
     const nBuckets = values.length ? values[0].length : 0;
     const acc = new Array(nBuckets).fill(0);
+    // Missing classes have zero thickness wherever another visible class is
+    // present. Keep numeric lower edges so they cannot clip away that class.
+    // Only a bucket with no visible observations is a gap in the whole stack.
+    const present = Array.from({ length: nBuckets }, (_, j) =>
+        values.some((vals, i) => !hidden[i] && vals[j] != null));
     const stacked = [];
     const stackIdxs = [];
     values.forEach((vals, i) => {
@@ -213,9 +218,8 @@ export function stackSeries(values, hidden) {
             stacked.push(vals.slice());          // recipe: raw pass-through
         } else {
             stacked.push(vals.map((v, j) => {
-                // An unknown lower edge also leaves the cumulative upper edge unknown.
-                acc[j] = v == null || acc[j] == null ? null : acc[j] + v;
-                return acc[j];
+                if (v != null) acc[j] += v;
+                return present[j] ? acc[j] : null;
             }));
             stackIdxs.push(i + 1);
         }
@@ -779,7 +783,7 @@ export function overlayGeometry(data, opts, scaleWindow) {
             x1: nsToMs(b.to != null ? b.to : axisToNs),
             fill: style.fill,
             stroke: style.border,
-            label: style.label,
+            ...(b.kind === 'none' || b.kind === INCOMPLETE_FIDELITY ? { label: style.label } : {}),
             dash: [4, 4],
         });
     }

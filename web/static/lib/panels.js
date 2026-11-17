@@ -117,8 +117,8 @@ export function baselineUnavailableHtml(unavailable) {
  * the exact "N of M". Never fabricated client-side. */
 export function buildPercentileBasis(data) {
     const fid = fidelityOf(data);
-    if (fid === INCOMPLETE_FIDELITY) return { exact: null, total: null, text: INCOMPLETE_CAPTURE_MESSAGE };
-    if (fid === 'exact' || fid === 'none') return null;
+    // Incomplete capture is already disclosed by the pane badge.
+    if (fid === INCOMPLETE_FIDELITY || fid === 'exact' || fid === 'none') return null;
     const rows = (data && data.rows) || [];
     if (!rows.length) return null;
 

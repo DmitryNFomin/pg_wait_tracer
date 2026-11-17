@@ -564,7 +564,6 @@ test('sampled window: one dashed band over the full rendered strip extent', () =
     assert.deepEqual(geo.rects[0], {
         kind: 'sampled', x0: 1e9, x1: 4e9,
         fill: SAMPLED_BAND_COLOR, stroke: SAMPLED_BORDER, dash: [4, 4],
-        label: 'Sampled (estimated)',
     });
     assert.deepEqual(geo.vlines, []);
     assert.deepEqual(geo.hlines, []);

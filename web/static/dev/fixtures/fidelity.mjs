@@ -6,7 +6,7 @@
  * builder function to exercise:
  *   states['<kebab-name>'] = {
  *     description, tags,
- *     fn: 'shading' | 'annotation' | 'unavailable' | 'metrics' | 'escalate',
+ *     fn: 'shading' | 'annotation' | 'unavailable' | 'metrics' | 'escalate' | 'pane' | 'compare',
  *     args: [...],   // the function's positional arguments, pure data
  *   }
  * The gallery renders shading/annotation models as a band track over the
@@ -149,5 +149,23 @@ export const states = {
         tags: ['FEEDBACK', 'SEMANTICS', 'compare'],
         fn: 'compare',
         args: [{ fidelity: 'exact' }, null, { baselinePredates: true }],
+    },
+    'pane-unknown': {
+        description: 'A future fidelity token displays the incomplete capture badge in the pane.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        fn: 'pane',
+        args: [{ fidelity: 'future-pause-verdict' }],
+    },
+    'compare-unknown': {
+        description: 'An unknown fidelity token is named Incomplete capture in the compare header.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity', 'compare'],
+        fn: 'compare',
+        args: [{ fidelity: 'future-pause-verdict' }, { fidelity: 'exact' }, {}],
+    },
+    'compare-unknown-unavailable': {
+        description: 'Incomplete capture and an unavailable baseline explain why there is no comparison.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity', 'compare'],
+        fn: 'compare',
+        args: [{ fidelity: 'future-pause-verdict' }, null, { baselineUnavailable: true }],
     },
 };
