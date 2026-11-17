@@ -296,7 +296,7 @@ direct connection.
 
 | Command | Request | Response (summary) |
 |---------|---------|--------------------|
-| `status` | `{"cmd":"status"}` | `mode`, `tier` (`sampled`/`escalated`), `escalation_supported`, `escalation_seconds_remaining`, `escalation_budget_remaining_s`, `escalation_reason`, `uptime_s`, `backends`, `pg_pid`, `version` |
+| `status` | `{"cmd":"status"}` | `mode`, `tier` (`sampled`/`escalated`), `escalation_supported`, `escalation_seconds_remaining`, `escalation_budget_remaining_s`, `escalation_reason`, `uptime_s`, `backends`, `pg_pid`, `version`, PG13 `sampled_attr_pg13_route` (`computed`/`scan`) |
 | `metrics` | `{"cmd":"metrics"}` | self-observability counters (below) |
 | `escalate` | `{"cmd":"escalate","duration_s":N}` | `escalated`, `granted_s`, `seconds_remaining`, `budget_remaining_s` — or `ok:false` + `error` + `budget_remaining_s` when over budget / not tiered |
 | `deescalate` | `{"cmd":"deescalate"}` | closes the window now (idempotent); errors if not `--mode tiered` |
@@ -305,6 +305,10 @@ direct connection.
 
 - `events_total`, `events_per_sec`, `lifecycle_events_total`
 - `samples_total`, `samples_per_sec`, `sample_read_faults_total`
+- `sampled_attr_tick_read_failures_total`: failed at-tick status reads, including
+  rows that have not initialised yet
+- `sampled_attr_pg13_scan_fallbacks_total`: PG13 candidate-scan attempts when
+  the computed route is unavailable; each use is counted
 - `wp_attach_failures_total`, `ringbuf_drops_total`, `backends_tracked`
 - `trace_events_written_total`, `trace_bytes_written_total`
 - `tier`, `escalation_active`, `escalation_seconds_remaining`,
@@ -312,6 +316,48 @@ direct connection.
   `escalation_denied_total`
 - `anomaly_fires_total`, `anomaly_near_total`, `anomaly_dropped_budget_total`,
   `anomaly_dropped_cooldown_total`, `anomaly_baseline_aas`
+
+`wp_attach_exit_race_total` counts failed watchpoint operations only when errno
+is ESRCH and the pinned original task is gone, Z/X, or has both PF_EXITING and
+zero vsize. PF_EXITING proof is logged as `liveness=exiting` in
+`WP-ATTACH-FAIL` (`exit_proof=1` for gone/Z/X, `2` for PF_EXITING).
+ESRCH alone remains `wp_attach_failures_total`. Other errnos
+remain failures even when the target has gone. The liveness subsets are
+`wp_attach_failures_live_total`, `wp_attach_failures_gone_total`
+and `wp_attach_failures_unknown_total`. Gone targets with a non-ESRCH errno
+remain real failures in the gone subset.
+
+In watchpoint capture, `lifecycle_exit_before_attach_total` counts retirements
+without a completed real attachment or retained INIT evidence. It excludes
+watchpoint failures already counted in `wp_attach_failures_total`, counted
+enrollment refusals (including those without a registry entry), and counted
+live FORK conflicts with a retained exit-race entry. Each backend has one
+failure or retirement class. Its three once-per-retirement classes are:
+
+- `lifecycle_exit_before_attach_with_opportunity_total`: missed attachment,
+  opportunity observed (gated): a registry entry exists, bootstrap was armed,
+  and the post-arm check ran.
+- `lifecycle_exit_before_attach_unknown_total`: opportunity unknown (gated):
+  the required entry/armed/post-arm evidence is incomplete and there is no
+  positive first-handling exclusion. Bootstrap-open, startup-scan and direct
+  attach exit races without that evidence belong here.
+- `lifecycle_exit_before_attach_no_opportunity_total`: exited before the tracer
+  could attach (reported): no registry entry because first handling positively
+  found the target gone. Bounded refusal bookkeeping overflow denies this
+  exclusion; a PID without retained evidence of a counted failure stays unknown.
+
+Each counted PID emits `EXIT-BEFORE-ATTACH` with the class, entry/armed status,
+post-arm pointer, shared-address result and errnos, plus global no-state and
+wait-read counter deltas since enrollment (availability is explicit). These
+are diagnostic deltas, not per-PID attribution. No INIT timestamp or duration
+is invented. Retained INIT evidence keeps the existing INIT rule and counters.
+An exit proof supplies the `wp_attach_exit_race_total` reason; it never proves
+unavoidable loss or no opportunity. That reason may coexist with an INIT-loss
+class or a retirement class. `wp_attach_failures_total`, observed-opportunity
+retirements and unknown-opportunity retirements gate `DAEMON_INTEGRITY_COUNTERS`.
+The no-opportunity retirement class is reported. A live FORK conflicting with
+a retained startup exit-race entry is conservatively counted as an enrollment
+failure, including possible PID reuse; a proven exit is not retried.
 
 ## Operating Modes
 
@@ -1449,6 +1495,80 @@ percentage points** on one gate box and **2.1** on another (pgbench, 8
 clients, 60 s windows). See [Cross-validation: sampling vs
 exact](#cross-validation-sampling-vs-exact) below for the full per-rate
 table and what still drives the gap.
+
+On PostgreSQL 13, a backend is **attributed from the first tick at which the
+backend's status row is initialised**, provided its shared ranges and enrolled
+process identity can be verified. The row address is computed from
+`PGPROC.backendId` and a validated anchor, independent of its distance from
+that anchor. Pending readers are retried every tick: at most two discovery
+`process_vm_readv` calls through the postmaster, each with at most 1,024 ranges,
+and zero discovery calls in steady state. The existing coherent status batch
+still checks equal even change counters, the row PID, state, activity pointer
+and the enrolled start time at first acceptance. Samples before initialisation
+remain counted in `sampled_attr_tick_read_failures_total`.
+
+The retained scan is a counted fallback only while the computed array base is
+unavailable. With a known base, an unset backend ID or rejected computed hint
+stays pending and is retried on the next tick. The scan shares the two-call
+discovery budget, attempts one pending reader per tick in rotation, and never
+accepts pid-only decoys. `status` reports
+`sampled_attr_pg13_route` as `computed` or `scan` for the current discovery route;
+`metrics` reports `sampled_attr_pg13_scan_fallbacks_total`. The postmaster's shared
+mapping identity (including its backing inode) is checked once per daemon
+interval, even with no pending readers; steady-state sampling ticks do no maps
+I/O. A shared-memory rebuild retains the validated offsets and anchor but clears
+the array base, row addresses and mapping proofs. At the same address range,
+attribution resumes through the coherent batch's identity checks without opening
+any validation connection. An absent mapping leaves `pgbackend_layout_validation`
+as `revalidating`; samples remain unattributed and counted in
+`sampled_attr_tick_read_failures_total` until an interval check finds it again.
+A mapping that remains absent or unreadable for 30 seconds latches `degraded`
+at the next daemon interval and requests **restart the daemon**. This also bounds
+revalidation when a relocated segment has a different backing name; mapping size
+or name alone never establishes a new status-array address.
+A changed address range latches `degraded` for this postmaster, increments
+`sampled_attr_pg13_recovery_degraded_total` once, and leaves samples unattributed.
+`pgbackend_layout_reason` explains the state; for a changed range, **restart the
+daemon**. PostgreSQL 14 and later keep their existing resolution path.
+
+The registered live status-batch test runs a PG13 far-row arm by default (PG14–16
+remain excluded). Its private cluster has `max_connections=1100`. It holds 520 idle
+sessions while the daemon validates its anchor, retires 32 sessions near that
+anchor to stay below the 1,024-process registry cap, and opens 500 more. Each of
+200 new connections runs `SELECT pg_sleep(0.05)` in a verified reused slot more
+than 513 rows from the actual validation anchor. SQL `pg_locks.virtualtransaction`
+provides the backend IDs independently of daemon address calculations. At 100 Hz,
+every churn PID must have a persisted attributed sample within two tick periods
+(20 ms) of its SQL `backend_start`; max and nearest-rank p99 are reported. Missing
+attribution fails the same timing gate. A five-second no-churn window requires
+zero read failures, and the run requires route `computed` and zero scan fallbacks.
+
+The same `perf trace -S` capture supplies syscall counts and user callchains.
+Status and discovery calls must read through the postmaster; no tick may have
+more than two discovery calls. The existing wait-word batch uses a backend PID
+and is identified separately by its callchain. Missing callchains, lost events
+or disagreement with the summary census fail evidence collection. This needs a
+perf build with DWARF user unwinding and symbols in the tracer binary.
+
+Run on each PG13 Linux gate box, from the candidate checkout after building it
+(`PG13_PID` selects that runner's PostgreSQL binary; its cluster stays untouched):
+
+```sh
+sudo python3 -B tests/test_sampler_batch_live.py --pid "$PG13_PID" \
+  --pg13-far-rows --evidence-dir /tmp/pgwt866-pg13-candidate
+sudo python3 -B tests/test_sampler_batch_live.py --pid "$PG13_PID" \
+  --pg13-far-rows --master-tracer /tmp/pgwt-0b1d7dd6/pg_wait_tracer \
+  --require-negative-control --evidence-dir /tmp/pgwt866-pg13-paired
+```
+
+The second command needs a tracer built from **0b1d7dd6 on that same box**.
+It reruns the identical workload and timing assertion and must print
+`pre-fix PG13 negative control: RED at first attribution ...`; setup, route or
+syscall errors alone cannot qualify the negative control. Evidence directories
+must be new and outside the repository. Use `--syscalls-only` for the original
+per-backend file-I/O negative control against master; that is a different binary
+and assertion. Mac-only plan inspection: `python3 -B
+tests/test_sampler_batch_live.py --pg13-far-rows --dry-run --pg-version 13`.
 
 `PGWT_SAMPLER_NICE` accepts an integer from -20 through 19 (the standard
 `nice` range) to request the daemon's own process niceness. Unset or empty

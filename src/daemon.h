@@ -39,9 +39,14 @@ struct pgwt_percpu_transport;
 struct pgwt_counters {
     uint64_t events_total;             /* trace events consumed from event_ringbuf */
     uint64_t lifecycle_events_total;   /* fork/init/exit/query_text events */
-    uint64_t wp_attach_failures_total; /* attach/enable failure on live or unknown target;
+    uint64_t wp_attach_failures_total; /* operation failure without ESRCH + exit proof;
                                       * includes bootstrap and validation refusals */
-    uint64_t wp_attach_exit_race_total; /* attach/enable failure with original target gone */
+    uint64_t wp_attach_exit_race_total; /* ESRCH with pinned gone/Z/X or PF_EXITING + zero vsize proof */
+    /* Live/gone/unknown subsets of failed hardware operations, excluding lifecycle
+     * eligibility refusals and proven ESRCH exit races. */
+    uint64_t wp_attach_failures_live_total;
+    uint64_t wp_attach_failures_unknown_total;
+    uint64_t wp_attach_failures_gone_total; /* non-ESRCH failure on a gone target */
     uint64_t prev_events_total;        /* events_total at previous timer tick */
     double   events_per_sec;           /* recent rate, refreshed each tick */
 
@@ -56,6 +61,9 @@ struct pgwt_counters {
      * short, foreign pid, out-of-range state). Not the command gate and not
      * comparable with noncmd_cpu_samples_total (#693). */
     uint64_t sampled_attr_tick_read_failures_total;
+    uint64_t sampled_attr_pg13_scan_fallbacks_total; /* counted scan attempts */
+    /* Idle CLIENT samples with successful status + wait reads and db/user. */
+    uint64_t sampled_attr_tick_idle_samples_total;
     /* Coherent, identity-confirmed at-tick reads whose attribution context is
      * absent (st_databaseid OR st_userid InvalidOid — see
      * PGWT_PGBS_ATTR_NO_CONTEXT). Expected to equal (backends without a full
@@ -105,6 +113,10 @@ struct pgwt_counters {
     uint64_t writer_push_fail_total; /* every rejected event/sample push call */
     uint64_t init_state_read_fail_total; /* sticky unknown INIT accounting */
     uint64_t state_map_full_total;     /* userspace state_map inserts failed (map full, CAP-1) */
+    uint64_t lifecycle_exit_before_attach_total; /* sum of the three retirement classes */
+    uint64_t lifecycle_exit_before_attach_with_opportunity_total; /* entry observed; gated */
+    uint64_t lifecycle_exit_before_attach_no_opportunity_total; /* first handling found gone; reported */
+    uint64_t lifecycle_exit_before_attach_unknown_total; /* no entry/proof; gated */
     uint64_t lifecycle_init_lost_total; /* INIT evidence/missing state, never attached */
     uint64_t lifecycle_init_lost_with_opportunity_total; /* lost minus no-opportunity; gates integrity */
     uint64_t lifecycle_init_lost_no_opportunity_total; /* init_ts > last sweep start */
@@ -261,6 +273,12 @@ enum pgwt_format {
 };
 
 struct pgwt_daemon {
+    pid_t lifecycle_first_gone_pid; /* positive first-handling exclusion, only during cleanup */
+    /* Failed enrollment can leave no registry entry. Keep that evidence until
+     * EXIT so a later gone check cannot masquerade as first handling. */
+    pid_t lifecycle_refused_pids[MAX_BACKENDS];
+    int lifecycle_refused_count;
+    bool lifecycle_refused_overflow; /* sticky: never claim no opportunity after overflow */
     /* BPF */
     struct pg_wait_tracer_bpf *skel;
     struct ring_buffer *rb;          /* lifecycle ringbuf consumer */
@@ -411,6 +429,7 @@ struct pgwt_daemon {
      * left every trace root-only on a host without that group. */
     const char *trace_group;
     struct pgwt_event_writer *event_writer;     /* NULL if disabled */
+    struct pgwt_evidence_capture *evidence_capture; /* NULL unless pilot opted in */
     struct pgwt_summary_writer *summary_writer; /* NULL if disabled */
     struct pgwt_query_text_capture *query_text_capture; /* NULL if disabled */
     struct pgwt_pgss_resolver *pgss_resolver;            /* PG14+ async text */
@@ -451,6 +470,8 @@ struct pgwt_daemon {
      * from tick: tick advances only after handle_timer completes, so it cannot
      * tell "never entered" from "entered and stalled before completion". */
     bool        debug_dump_state;
+    /* Opt-in overrun control, cached at init; zero adds no delay. */
+    uint32_t    debug_sample_tick_delay_us;
     uint64_t    debug_loop_iterations;
     uint64_t    debug_timer_entries;
     uint64_t    debug_timer_expirations;

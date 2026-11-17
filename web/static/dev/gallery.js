@@ -47,7 +47,7 @@ import {
     buildFidelityShading, buildEscalationAnnotation, buildUnavailablePanel,
     buildMetricsPanel, buildEscalateControl, buildCompareFidelity,
 } from '../lib/builders/fidelity.js';
-import { compareFidelityHtml } from '../lib/panels.js';
+import { compareFidelityHtml, buildPaneFidelity, paneFidelityBadgeHtml } from '../lib/panels.js';
 import { buildTableModel, mountTable } from '../lib/table.js';
 import { buildDeltaComparison } from '../lib/builders/compare.js';
 import {
@@ -274,6 +274,9 @@ function renderFidelity(body, foot, state) {
         hint.textContent = model.budgetText +
             ' · canEscalate=' + model.canEscalate +
             ' · canDeescalate=' + model.canDeescalate;
+    } else if (state.fn === 'pane') {
+        const card = div('panel-card', body);
+        card.innerHTML = paneFidelityBadgeHtml(buildPaneFidelity(...args));
     } else if (state.fn === 'compare') {
         const model = buildCompareFidelity(...args);
         const card = div('panel-card', body);

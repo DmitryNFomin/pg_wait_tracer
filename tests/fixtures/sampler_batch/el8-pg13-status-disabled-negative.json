@@ -1,0 +1,29 @@
+{
+ "calls": {
+  "close": 1564,
+  "open": 0,
+  "openat": 1354,
+  "pread64": 446,
+  "process_vm_readv": 3751,
+  "threads": 1
+ },
+ "errors": [
+  "vm/tick=16.746 > 5",
+  "idle attributed samples=0 (required positive)",
+  "read-failure rate=1.000000 > 0.001"
+ ],
+ "idle_cohort_samples_lower_bound": 0,
+ "label": "status-disabled-negative",
+ "major": 13,
+ "per_tick": {
+  "close": 6.982142857142857,
+  "openat": 6.044642857142857,
+  "pread64": 1.9910714285714286,
+  "process_vm_readv_max": 16.745535714285715,
+  "process_vm_readv_min": 17.86190476190476
+ },
+ "population": 508,
+ "read_failures": 105840,
+ "ticks": 210,
+ "ticks_spanning": 224
+}

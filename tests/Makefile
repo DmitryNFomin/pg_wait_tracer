@@ -19,13 +19,14 @@ LIBBPF_INC ?=
 LIBBPF_LIB ?= -lbpf
 
 TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
-            test_trace_v2 test_sampler test_sample_weight bench_sample_weight test_anomaly test_escalation_budget \
+            test_evidence_capture \
+            test_trace_v2 test_sampler test_sampler_dispatch test_sample_weight bench_sample_weight test_anomaly test_escalation_budget \
             test_wp_attr \
             test_trace_perms \
             test_exact_probe \
             test_effective_cores \
             test_coop test_bucket \
-            test_backend_status_layout \
+            test_backend_status_layout test_sampled_attr_io test_sampled_attr_lifetime \
             test_synthetic_query \
             test_pgss_resolver \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
@@ -110,6 +111,17 @@ test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(
 
 test_backend_init: test_backend_init.c ../src/backend_init.c ../src/backend_init.h ../src/backend.h ../src/pg_wait_tracer.h
 	$(CC) $(CFLAGS) -o $@ test_backend_init.c ../src/backend_init.c
+
+# Host-only: compile the real fd dispatch, consume, FORK/enrollment and sampler
+# target loop with the existing initialized-backend I/O fixture. No BPF build.
+test_sampler_dispatch: test_sampler_dispatch.c test_sampled_attr_io.c \
+                       build_sampler_dispatch.py test_sampled_attr_io.py \
+                       ../src/daemon.c ../src/backend.c ../src/sampler.c \
+                       ../src/backend_status_layout.c ../src/backend_init.c \
+                       ../src/discovery.c ../src/control.c ../src/cmdline.c \
+                       ../src/spawn.c ../src/anomaly.c ../src/idle_rule.c \
+                       $(wildcard ../src/*.h)
+	CC='$(CC)' CFLAGS='$(CFLAGS)' python3 -B build_sampler_dispatch.py --output $@
 
 # Exercise the production lifecycle functions, replacing only hardware opens
 # and state reads/deletes. Capture objects exist after the parent build.
@@ -456,6 +468,14 @@ test_effective_cores: test_effective_cores.c ../src/effective_cores.c
 # tables plus the pure coherency/degrade validator.
 test_backend_status_layout: test_backend_status_layout.c \
                             ../src/backend_status_layout.c ../src/spawn.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+# Production I/O is injected by the test's translation-unit include, so this
+# syscall budget runs on macOS as well as Linux without touching /proc.
+test_sampled_attr_io: test_sampled_attr_io.c ../src/backend_status_layout.c ../src/spawn.c
+	$(CC) $(CFLAGS) -o $@ test_sampled_attr_io.c ../src/spawn.c
+
+test_sampled_attr_lifetime: test_sampled_attr_lifetime.c ../src/backend_status_layout.c ../src/spawn.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_synthetic_query: test_synthetic_query.c ../src/synthetic_query.c
@@ -1236,3 +1256,6 @@ test_writer_failure: test_writer_failure.c $(BUILD)/event_writer.o
 .PHONY: pilot-route
 pilot-route:
 	python3 -B test_pilot_route.py
+
+test_evidence_capture: test_evidence_capture.c ../src/evidence_capture.c ../src/evidence_capture.h ../src/counter_vector.h ../src/core/evidence_codec.c ../src/core/evidence_codec.h ../src/core/evidence_replay.c ../src/core/evidence_replay.h ../src/core/wait_metrics.c ../src/core/pgwt_core.h
+	$(CC) $(CFLAGS) -I../src -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)

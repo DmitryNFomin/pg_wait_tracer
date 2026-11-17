@@ -12,6 +12,7 @@ struct fixture {
     int unpublished_first_read;
     int retire_first_read;
     uint64_t addr, ts, exit_init_ts;
+    bool before_attach;
 };
 
 static int read_state(void *ctx, pid_t pid, struct pgwt_pid_state *out)
@@ -176,36 +177,47 @@ int main(void)
 
     reset(&f);
     f.unpublished_first_read = 1;
-    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts));
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts, &f.before_attach));
     assert(f.exit_init_ts == 123456789);
     assert(f.reads == 2 && f.attaches == 0); /* raced EXIT is recognised, not recovered */
     reset(&f);
-    f.state.init_stored = 0;
-    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts));
+    f.state = (struct pgwt_pid_state){0};
+    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts, &f.before_attach));
+    assert(f.before_attach && f.exit_init_ts == 0);
+    f.bt.entries[0].wp_attach_exit_race = true;
+    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state,
+                               &f.exit_init_ts, &f.before_attach));
+    assert(f.before_attach); /* exit proof does not establish opportunity */
+    f.bt.entries[0].wp_attach_exit_race = false;
+    f.state.init_ts = 123;
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state,
+                              &f.exit_init_ts, &f.before_attach));
+    assert(!f.before_attach && f.exit_init_ts == 123);
+    f.state.init_ts = 0;
     f.state.init_store_failed = 1;
-    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts));
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts, &f.before_attach));
     assert(attach(&f, 42, 0x12345678, 123) == 0); /* another attach path succeeds */
-    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts));
+    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts, &f.before_attach));
 
     reset(&f);
     f.read_error = -ENOENT;
     assert(sweep(&f) == 0 && f.attaches == 0);
-    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts));
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts, &f.before_attach));
     /* Missing fork-seeded state plus a delivered hint is not an INIT loss. */
     assert(attach(&f, 42, 0x12345678, 123) == 0);
-    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts));
-    assert(!pgwt_exit_init_lost(NULL, 42, &f, read_state, &f.exit_init_ts)); /* repeated cleanup */
+    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts, &f.before_attach));
+    assert(!pgwt_exit_init_lost(NULL, 42, &f, read_state, &f.exit_init_ts, &f.before_attach)); /* repeated cleanup */
     reset(&f);
     f.read_error = -ENOENT;
     f.bt.entries[0].bootstrap_fd = -1;
     f.bt.entries[0].init_ts = 123; /* delivered hint, failed real attach */
-    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts));
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts, &f.before_attach));
     f.read_error = 0;
     f.state = (struct pgwt_pid_state){0}; /* failed attach preseed made an entry */
-    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts));
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts, &f.before_attach));
     reset(&f);
     f.read_error = -EIO;
-    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts));
+    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state, &f.exit_init_ts, &f.before_attach));
 
     puts("backend INIT sweep: PASS (pending batches, timestamp, duplicate, exit races, missing state)");
     return 0;

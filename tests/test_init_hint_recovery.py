@@ -13,13 +13,14 @@ Run only on Linux as root: tests/run_all.sh registers this in its live tier.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from collections import Counter
+from collections import Counter, deque
 import json
 import os
 from pathlib import Path
 import re
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -28,6 +29,240 @@ from demo_rehearsal_lib import daemon_integrity_ok
 
 TRACER = Path(__file__).resolve().parents[1] / "pg_wait_tracer"
 TICK_SECONDS = 1
+ATTACH_COUNTERS = ("wp_attach_failures_total", "wp_attach_exit_race_total",
+                   "wp_attach_failures_live_total", "wp_attach_failures_unknown_total",
+                   "wp_attach_failures_gone_total")
+EXIT_BEFORE_ATTACH = "lifecycle_exit_before_attach_total"
+EXIT_CLASSES = {key: f"lifecycle_exit_before_attach_{key}_total" for key in
+                ("with_opportunity", "no_opportunity", "unknown")}
+DIAGNOSTIC_LINES = 40
+DIAGNOSTIC_WIDTH = 512
+# Temporary #933 exception; remove with the A2 PR.
+# max observed 1 per run in 20 runs on master bc554a73 (Ubuntu 6.8 PG18,
+# tests/results/session-20261117/i933-churn-cap); cap 2 = observed max + 1;
+# regression tripwire, not a rate bound.
+KNOWN_CLASS_CAP = 2
+KNOWN_CLASS_EXIT = 93
+
+
+def print_failure_diagnostics(text, after, failing_pids=()):
+    # Bound general streams; failing PIDs below retain every matching line.
+    for prefix, title in (("INIT-LOST:", "INIT loss diagnostics (CLOCK_MONOTONIC)"),
+                          ("WP-ATTACH-FAIL:", "Watchpoint attach diagnostics"),
+                          ("EXIT-BEFORE-ATTACH:", "Exit before attach diagnostics"),
+                          ("ERROR: cannot validate lifecycle target", "Lifecycle target refusals")):
+        lines = deque(maxlen=DIAGNOSTIC_LINES)
+        total = 0
+        for line in text.splitlines():
+            if line.startswith(prefix):
+                total += 1
+                lines.append(line[:DIAGNOSTIC_WIDTH])
+        print(f"{title} (last {len(lines)} of {total}, max {DIAGNOSTIC_WIDTH} chars/line):")
+        print("\n".join(lines))
+    if after is not None:
+        print({name: after[name] for name in (
+            "lifecycle_init_lost_total", "lifecycle_init_lost_with_opportunity_total",
+            "lifecycle_init_lost_no_opportunity_total",
+            "lifecycle_init_lost_untraced_ns_total", "init_state_read_fail_total",
+            EXIT_BEFORE_ATTACH, *EXIT_CLASSES.values(), *ATTACH_COUNTERS)})
+    # One scan regardless of cohort size. Generic failures have no identified
+    # PID; only their bounded streams above are printed.
+    selected = set(failing_pids)
+    matching = {}
+    for line in text.splitlines():
+        for pid in set(map(int, re.findall(r"(?:\bpid=|\bPID )(\d+)\b", line))) & selected:
+            matching.setdefault(pid, []).append(line)
+    for pid in sorted(matching):
+        print(f"Daemon lines for failing PID {pid}:")
+        print("\n".join(matching[pid]))
+
+
+class CohortFailure(AssertionError):
+    def __init__(self, message, pids):
+        super().__init__(f"{message}: {sorted(pids)[:DIAGNOSTIC_LINES]} (total {len(pids)})")
+        self.pids = set(pids)
+
+
+def exit_race_diagnostics(text):
+    counts = Counter()
+    for line in text.splitlines():
+        if not line.startswith("WP-ATTACH-FAIL:"):
+            continue
+        fields = dict(re.findall(r"(\w+)=([^ ]+)", line))
+        if (fields.get("errno") == "3" and fields.get("exit_proof") in ("1", "2") and
+                fields.get("liveness") in ("gone", "exiting")):
+            counts[int(fields["pid"])] += 1
+    return counts
+
+
+def attach_failure_pids(text):
+    # Preserve real failures even when the same PID also has an exit-race
+    # operation. Validation/allocation/reuse refusals have no WP line.
+    failures = Counter(map(int, re.findall(r"^WP-ATTACH-FAIL: pid=(\d+) ", text, re.M)))
+    failures.subtract(exit_race_diagnostics(text))
+    result = {pid for pid, count in failures.items() if count > 0}
+    for pattern in (r"ERROR: cannot validate lifecycle target PID (\d+):",
+                    r"WARN: max backends \(\d+\) reached, cannot track PID (\d+)",
+                    r"ERROR: live FORK PID (\d+) conflicts with retained attach exit race"):
+        result.update(map(int, re.findall(pattern, text)))
+    return result
+
+
+def retirement_diagnostics(text):
+    result = {key: Counter() for key in EXIT_CLASSES}
+    labels = {"with": "with_opportunity", "no": "no_opportunity", "unknown": "unknown"}
+    for line in text.splitlines():
+        if line.startswith("EXIT-BEFORE-ATTACH:"):
+            fields = dict(re.findall(r"(\w+)=([^ ]+)", line))
+            key = labels.get(fields.get("opportunity"), "unknown")
+            result[key][int(fields["pid"])] += 1
+    return result
+
+
+def check_cohort(text, pids, short_lived, before, after):
+    """Opportunity evidence decides acceptance; lifetime never excuses loss."""
+    def require(ok, message, failing):
+        if not ok:
+            raise CohortFailure(message, failing)
+
+    attached = Counter(map(int, re.findall(r"INFO: PID (\d+) initialized \(", text)))
+    init_classes = [Counter(map(int, re.findall(
+        rf"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity={value}(?: |$)", text)))
+        for value in (0, 1)]
+    with_init, no_init = init_classes
+    retirement = retirement_diagnostics(text)
+    before_attach = sum(retirement.values(), Counter())
+    race = exit_race_diagnostics(text)
+    for counts in (attached, *init_classes, race, before_attach):
+        duplicates = {pid for pid in pids if counts[pid] > 1}
+        require(not duplicates, "duplicate outcome diagnostic", duplicates)
+    # Exit race is a reason, independent of the loss/opportunity outcome.
+    # In particular retained INIT + exit proof is legal per PID.
+    outcomes = (attached, *init_classes, before_attach)
+    overlap = {pid for pid in pids if sum(pid in c for c in outcomes) > 1}
+    overlap |= pids & set(attached) & set(race)
+    require(not overlap, "overlapping retirement classes", overlap)
+    require(not (pids & set(with_init)), "with-opportunity INIT loss", pids & set(with_init))
+    for key in ("with_opportunity", "unknown"):
+        require(not (pids & set(retirement[key])), f"{key} retirement is gated",
+                pids & set(retirement[key]))
+        delta = after[EXIT_CLASSES[key]] - before[EXIT_CLASSES[key]]
+        require(delta == 0, f"{key} retirement delta must be zero", set(retirement[key]))
+    missing = pids - set(attached) - set(no_init) - set(retirement["no_opportunity"])
+    require(not missing, "backend has no counted outcome", missing)
+    for counts, counter in ((no_init, "lifecycle_init_lost_no_opportunity_total"),
+                            (with_init, "lifecycle_init_lost_with_opportunity_total"),
+                            (race, "wp_attach_exit_race_total"),
+                            (before_attach, EXIT_BEFORE_ATTACH),
+                            *((retirement[key], name) for key, name in EXIT_CLASSES.items())):
+        total = sum(counts.values())
+        delta = after[counter] - before[counter]
+        # A numerical mismatch alone cannot identify a guilty PID. Do not
+        # feed the whole cohort to the failure printer.
+        require(total - before[counter] == delta and delta >= 0,
+                f"{counter} delta does not match PID diagnostics", set())
+    return attached, no_init, race, before_attach
+
+
+def classify_churn(text, deltas, pids, short_lived):
+    """Pure, fail-closed classification; validate every remaining cohort check.
+
+    Only the two complete measured signatures may be removed from the strict
+    cohort check. Counter reconciliation covers the entire daemon stream, so
+    an unrelated PID or an undiagnosed increment cannot hide behind them.
+    """
+    records = {prefix: {} for prefix in
+               ("INIT-LOST:", "WP-ATTACH-FAIL:", "EXIT-BEFORE-ATTACH:")}
+    for line in text.splitlines():
+        prefix = line.split(" ", 1)[0]
+        if prefix not in records:
+            continue
+        pairs = re.findall(r"(\w+)=([^ ]+)", line)
+        fields = dict(pairs)
+        if (len(pairs) != len(fields) or not fields.get("pid", "").isdigit()):
+            raise CohortFailure("partial or ambiguous diagnostic", set())
+        pid = int(fields["pid"])
+        records[prefix].setdefault(pid, []).append(fields)
+
+    retirement = retirement_diagnostics(text)
+    init_with = Counter(map(int, re.findall(
+        r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=0(?: |$)", text)))
+    k1 = set(retirement["with_opportunity"])
+    k2 = set(init_with)
+    known = k1 | k2
+    if not known <= pids & short_lived or k1 & k2:
+        raise CohortFailure("unknown or overlapping known-class outcome", known)
+    if len(known) > KNOWN_CLASS_CAP:
+        raise CohortFailure("known-class cap exceeded", known)
+
+    def exact(fields, expected, numeric=()):
+        return (all(fields.get(key) == value for key, value in expected.items()) and
+                all(fields.get(key, "").isdigit() for key in numeric))
+
+    for pid in known:
+        init = records["INIT-LOST:"].get(pid, [])
+        wp = records["WP-ATTACH-FAIL:"].get(pid, [])
+        retired = records["EXIT-BEFORE-ATTACH:"].get(pid, [])
+        valid = False
+        if pid in k1 and len(retired) == 1 and not init and not wp:
+            fields = retired[0]
+            valid = exact(fields, {
+                "opportunity": "with", "entry_present": "1", "bootstrap_armed": "1",
+                "post_arm_checked": "1", "addr_shared": "0", "resolve_errno": "0",
+                "shared_errno": "0", "counter_deltas_valid": "1",
+                "lifecycle_init_no_state_delta": "0", "wait_read_fail_delta": "0"})
+            valid = valid and bool(re.fullmatch(r"0x[0-9a-fA-F]+", fields.get("post_arm_ptr", "")))
+            valid = valid and int(fields["post_arm_ptr"], 16) > 0
+        elif pid in k2 and len(init) == len(wp) == 1 and not retired:
+            fields = init[0]
+            valid = exact(fields, {"clock": "CLOCK_MONOTONIC", "no_opportunity": "0",
+                                   "exit_ts_source": "record"},
+                          ("init_ts", "exit_ts", "last_sweep_start_ns", "batch_start_ns",
+                           "batch_records", "since_epoll_return_ns"))
+            valid = valid and 0 < int(fields["init_ts"]) < int(fields["exit_ts"])
+            valid = valid and exact(wp[0], {
+                "site": "watchpoint_open", "errno": "3", "resolve_errno": "0",
+                "liveness": "exiting", "liveness_result": "1", "liveness_errno": "0",
+                "exit_proof": "2"})
+        if not valid:
+            raise CohortFailure("missing, partial or duplicate known-class diagnostic", {pid})
+    attached = set(map(int, re.findall(r"INFO: PID (\d+) initialized \(", text)))
+    if known & attached:
+        raise CohortFailure("overlapping attached and known-class outcome", known & attached)
+    failures = attach_failure_pids(text)
+    if failures:
+        raise CohortFailure("watchpoint attach failure", failures)
+    for key in (*ATTACH_COUNTERS[:1], *ATTACH_COUNTERS[2:],
+                "ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
+                "state_map_full_total", "init_state_read_fail_total"):
+        if deltas[key] != 0:
+            raise CohortFailure(f"{key} must be zero", set())
+    # Require exact agreement before subtracting any diagnosed outcome.
+    for key, count in ((EXIT_CLASSES["with_opportunity"], len(k1)),
+                       ("lifecycle_init_lost_with_opportunity_total", len(k2))):
+        if deltas[key] != count:
+            raise CohortFailure(f"{key} does not match known-class PIDs", known)
+    if deltas["lifecycle_init_lost_total"] != (
+            deltas["lifecycle_init_lost_with_opportunity_total"] +
+            deltas["lifecycle_init_lost_no_opportunity_total"]):
+        raise CohortFailure("INIT loss counters disagree", set())
+    remaining = dict(deltas)
+    for key, count in ((EXIT_BEFORE_ATTACH, len(k1)),
+                       (EXIT_CLASSES["with_opportunity"], len(k1)),
+                       ("lifecycle_init_lost_total", len(k2)),
+                       ("lifecycle_init_lost_with_opportunity_total", len(k2)),
+                       ("wp_attach_exit_race_total", len(k2))):
+        remaining[key] -= count
+    kept = []
+    for line in text.splitlines():
+        prefix = line.split(" ", 1)[0]
+        match = re.search(r"\bpid=(\d+)\b", line)
+        if prefix in records and match and int(match[1]) in known:
+            continue
+        kept.append(line)
+    check_cohort("\n".join(kept), pids - known, short_lived - known,
+                 dict.fromkeys(remaining, 0), remaining)
+    return {"K1": k1, "K2": k2}
 
 
 def ctl(directory):
@@ -48,8 +283,8 @@ def ctl(directory):
                 "lifecycle_init_lost_no_opportunity_total",
                 "lifecycle_init_lost_untraced_ns_total",
                 "ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
-                "state_map_full_total", "wp_attach_failures_total",
-                "wp_attach_exit_race_total"):
+                "state_map_full_total", "init_state_read_fail_total",
+                EXIT_BEFORE_ATTACH, *EXIT_CLASSES.values(), *ATTACH_COUNTERS):
         assert type(metrics.get(key)) is int and metrics[key] >= 0, (key, metrics)
     return metrics
 
@@ -147,6 +382,7 @@ def short_cohort():
 
 
 def run_arm(pm_pid, skip_store, churn=False):
+    known = {"K1": set(), "K2": set()}
     with tempfile.TemporaryDirectory(prefix="pgwt_init_hint_") as tmp:
         directory = Path(tmp)
         log = directory / "daemon.stderr"
@@ -164,6 +400,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                  "-T", str(directory), "-i", str(TICK_SECONDS), "--duration", "90", "-q", "-v"],
                 stdout=subprocess.DEVNULL, stderr=err, env=env)
             after = None
+            pids = set()
             try:
                 wait_for(proc, lambda: (directory / "pgwt.sock").exists(), 45,
                          "daemon control socket did not become ready")
@@ -171,14 +408,25 @@ def run_arm(pm_pid, skip_store, churn=False):
                 pids, short_lived = short_cohort() if churn else (cohort(), set())
                 # Await the already-generated EXIT acknowledgements, not a
                 # second stimulus or a re-capture after a failed assertion.
+                unretired = set()
                 def retired():
+                    nonlocal unretired
                     text = log.read_text()
                     exited = {int(pid) for pid in re.findall(r"INFO: PID (\d+) exited \(", text)}
-                    return pids <= exited
-                wait_for(proc, retired, 10, "not every cohort EXIT was handled")
+                    raced = set(exit_race_diagnostics(text))
+                    before_attach = {int(pid) for pid in re.findall(r"EXIT-BEFORE-ATTACH: pid=(\d+) ", text)}
+                    init_lost = set(map(int, re.findall(r"INIT-LOST: [^\n]*pid=(\d+) ", text)))
+                    unretired = pids - exited - raced - before_attach - init_lost
+                    return not unretired
+                try:
+                    wait_for(proc, retired, 10, "not every cohort EXIT was handled")
+                except AssertionError as error:
+                    if unretired:
+                        raise CohortFailure(str(error), unretired) from error
+                    raise
                 after = ctl(directory)
                 text = log.read_text()
-                assert "PGWT_TEST_DROP_INIT_HINT" in text, text
+                assert "PGWT_TEST_DROP_INIT_HINT" in text, "missing INIT hint-drop hook diagnostic"
                 hint_delta = after["lifecycle_init_hint_drops_total"] - before["lifecycle_init_hint_drops_total"]
                 lost_delta = after["lifecycle_init_lost_total"] - before["lifecycle_init_lost_total"]
                 with_opportunity_delta = (after["lifecycle_init_lost_with_opportunity_total"] -
@@ -187,9 +435,31 @@ def run_arm(pm_pid, skip_store, churn=False):
                     after["lifecycle_init_lost_with_opportunity_total"] +
                     after["lifecycle_init_lost_no_opportunity_total"]), after
                 assert hint_delta > 0, "no bootstrap INIT hint was actually suppressed"
+                if churn and not skip_store:
+                    try:
+                        known = classify_churn(text, {key: after[key] - before[key] for key in before
+                                                      if type(before[key]) is int}, pids, short_lived)
+                    except AssertionError:
+                        # Rejected exceptions use the original assertion order,
+                        # exception arguments and failing-PID diagnostics below.
+                        # If master accepts the run, no exception is needed.
+                        pass
+                has_known = bool(known["K1"] or known["K2"])
                 for key in ("ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
-                            "state_map_full_total", "wp_attach_failures_total"):
-                    assert after[key] == 0, (key, after[key])
+                            "state_map_full_total", "init_state_read_fail_total",
+                            "wp_attach_failures_total"):
+                    if after[key] != 0:
+                        failing = set()
+                        if key == "wp_attach_failures_total":
+                            failing = attach_failure_pids(text)
+                        error = AssertionError((key, after[key]))
+                        error.pids = failing
+                        raise error
+                if not has_known:
+                    for key in ("with_opportunity", "unknown"):
+                        if after[EXIT_CLASSES[key]] - before[EXIT_CLASSES[key]] != 0:
+                            raise CohortFailure(f"{key} retirement delta must be zero",
+                                                set(retirement_diagnostics(text)[key]))
                 attach_counts = Counter(int(pid) for pid in re.findall(r"INFO: PID (\d+) initialized \(", text))
                 attached = set(attach_counts)
                 pending = {int(pid) for pid in re.findall(r"fork detected PID (\d+), bootstrap watchpoint attached", text)}
@@ -197,19 +467,17 @@ def run_arm(pm_pid, skip_store, churn=False):
                 if churn:
                     assert short_lived & pending, "no pending bootstrap backend lived for less than one tick"
                 if skip_store:
-                    assert "PGWT_TEST_SKIP_INIT_STORE" in text, text
+                    assert "PGWT_TEST_SKIP_INIT_STORE" in text, "missing INIT store-skip hook diagnostic"
                     assert with_opportunity_delta > 0, "skipping INIT stores did not raise with-opportunity losses"
                     ok, detail = daemon_integrity_ok(after)
                     assert not ok and "lifecycle_init_lost_with_opportunity_total=" in detail, detail
                     assert pids - attached, "control attached everything despite discarding all INIT facts"
                 else:
-                    assert after["lifecycle_init_lost_with_opportunity_total"] == 0, after
-                    no_opportunity = {int(pid) for pid in re.findall(
-                        r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=1(?: |$)", text)}
-                    assert not (attached & no_opportunity), "attached backend counted lost"
-                    assert pids <= attached | no_opportunity, (
-                        f"backends not attached or counted without opportunity: "
-                        f"{sorted(pids - attached - no_opportunity)}")
+                    if not has_known:
+                        if after["lifecycle_init_lost_with_opportunity_total"] != 0:
+                            raise CohortFailure("with-opportunity INIT loss", set(map(int, re.findall(
+                                r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=0(?: |$)", text))))
+                        check_cohort(text, pids, short_lived, before, after)
                     # Every attached member attaches once, including delayed hints.
                     for pid in pids & attached:
                         assert attach_counts[pid] == 1, pid
@@ -218,26 +486,32 @@ def run_arm(pm_pid, skip_store, churn=False):
                       f"{len(pids & attached)}/{len(pids)} attached, "
                       f"hint drops +{hint_delta}, INIT lost +{lost_delta}, "
                       f"attach exit races {after['wp_attach_exit_race_total']}, "
+                      f"exit before attach {after[EXIT_BEFORE_ATTACH]}, "
+                      f"retirement classes { {key: after[name] for key, name in EXIT_CLASSES.items()} }, "
                       f"with opportunity {after['lifecycle_init_lost_with_opportunity_total']}, "
                       f"no opportunity {after['lifecycle_init_lost_no_opportunity_total']}, "
                       f"untraced ns {after['lifecycle_init_lost_untraced_ns_total']}, "
                       f"{len(short_lived & pending)} pending backends shorter than a tick")
-            except Exception:
+            except Exception as error:
                 text = log.read_text()
-                print("INIT loss diagnostics (CLOCK_MONOTONIC):")
-                print("\n".join(line for line in text.splitlines()
-                                if line.startswith("INIT-LOST:")))
-                if after is not None:
-                    print({name: after[name] for name in (
-                        "lifecycle_init_lost_total",
-                        "lifecycle_init_lost_with_opportunity_total",
-                        "lifecycle_init_lost_no_opportunity_total",
-                        "lifecycle_init_lost_untraced_ns_total",
-                        "wp_attach_failures_total", "wp_attach_exit_race_total")})
-                print(text)
+                print_failure_diagnostics(text, after, getattr(error, "pids", ()))
                 raise
             finally:
                 stop(proc)
+    return known
+
+
+def run_arms(pm_pid):
+    run_arm(pm_pid, skip_store=False)
+    known = run_arm(pm_pid, skip_store=False, churn=True)
+    run_arm(pm_pid, skip_store=True)
+    count = len(known["K1"] | known["K2"])
+    if count:
+        print(f"KNOWN-CLASS #933 arm=churn K1={sorted(known['K1'])} "
+              f"K2={sorted(known['K2'])} count={count} cap={KNOWN_CLASS_CAP}")
+        return KNOWN_CLASS_EXIT
+    print("test_init_hint_recovery: PASS")
+    return 0
 
 
 def main():
@@ -247,11 +521,8 @@ def main():
     assert os.geteuid() == 0, "live test requires root"
     pm_pid = args.pid or find_postmaster()
     assert pm_pid, "PostgreSQL postmaster not found"
-    run_arm(pm_pid, skip_store=False)
-    run_arm(pm_pid, skip_store=False, churn=True)
-    run_arm(pm_pid, skip_store=True)
-    print("test_init_hint_recovery: PASS")
+    return run_arms(pm_pid)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

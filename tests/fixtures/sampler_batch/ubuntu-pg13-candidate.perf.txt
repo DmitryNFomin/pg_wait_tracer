@@ -1,0 +1,19 @@
+     0.000 ( 0.053 ms): 12346 openat(dfd: CWD, filename: 0x8790ea20)                                = 52
+     0.105 ( 0.022 ms): 12346 pread64(fd: 52, buf: 0x7ffe8790ea18, count: 8, pos: 104867596925952)  = 8
+     0.141 ( 0.015 ms): 12346 close(fd: 52)                                                         = 0
+     0.382 ( 0.787 ms): 12346 process_vm_readv(pid: 11794 (postgres), lvec: 0x63efa681a470, liovcnt: 1024, rvec: 0x63efa6822380, riovcnt: 1024) = 328704
+     1.222 ( 0.675 ms): 12346 process_vm_readv(pid: 11794 (postgres), lvec: 0x63efa681e470, liovcnt: 992, rvec: 0x63efa6826380, riovcnt: 992) = 318432
+     2.289 ( 0.329 ms): 12346 process_vm_readv(pid: 11796 (postgres), lvec: 0x63efa6777ec0, liovcnt: 508, rvec: 0x63efa6779e90, riovcnt: 508) = 2032
+ Summary of events:
+
+ pg_wait_tracer (12346), 5453 events, 100.0%
+
+   syscall            calls  errors  total       min       avg       max       stddev
+                                     (msec)    (msec)    (msec)    (msec)        (%)
+   --------------- --------  ------ -------- --------- --------- ---------     ------
+   process_vm_readv      677      0   373.242     0.012     0.551     1.084      1.54%
+   openat               918    223    40.866     0.010     0.045     0.164      1.61%
+   close                908      0    22.947     0.006     0.025     0.213      2.01%
+   pread64              223      0     5.978     0.013     0.027     0.080      1.94%
+
+

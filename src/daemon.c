@@ -7,6 +7,7 @@
 #include "event_writer.h"
 #include "map_reader.h"
 #include "capture_counters.h"
+#include "evidence_capture.h"
 #include "output.h"
 #include "perf_event.h"
 #include "provider_coop.h"
@@ -208,7 +209,7 @@ static int process_lifecycle_event(void *ctx, void *data, size_t data_sz)
     struct pgwt_daemon *d = ctx;
     struct pgwt_lifecycle_event *ev = data;
 
-    (void)data_sz;
+    pgwt_evidence_capture_observe(d->evidence_capture, data, data_sz);
 
     d->counters.lifecycle_events_total++;
 
@@ -454,6 +455,11 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
             return;
         }
     }
+
+    /* Crash recovery can rebuild PG13 shared memory under the live postmaster.
+     * Retry absent mappings here, never with a client or on the sampling tick. */
+    if (pgwt_sampler_refresh_pg13_generation(d) != 0)
+        pgwt_pgbs_log(&d->backend_status_layout);
 
     /* Stage 3 refreshes capacity at sampler cadence when the anomaly engine
      * is armed, so the CUSUM consumes every material-change signal. Other
@@ -777,6 +783,26 @@ static void arm_sample_timer_jittered(struct pgwt_daemon *d)
     }
 }
 
+static void configure_sample_tick_delay(struct pgwt_daemon *d)
+{
+    d->debug_sample_tick_delay_us = 0;
+    const char *value = getenv("PGWT_DEBUG_SAMPLE_TICK_DELAY_US");
+    if (!value)
+        return;
+    char *end = NULL;
+    errno = 0;
+    unsigned long delay = strtoul(value, &end, 10);
+    if (errno || value[0] < '0' || value[0] > '9' || *end != '\0' ||
+        delay == 0 || delay > 1000000UL) {
+        fprintf(stderr, "WARN: ignoring invalid PGWT_DEBUG_SAMPLE_TICK_DELAY_US=%s "
+                "(expected integer 1..1000000)\n", value);
+        return;
+    }
+    d->debug_sample_tick_delay_us = (uint32_t)delay;
+    fprintf(stderr, "WARN: PGWT_DEBUG_SAMPLE_TICK_DELAY_US=%u — delaying each "
+            "sample tick after capture (DEBUG ONLY)\n", d->debug_sample_tick_delay_us);
+}
+
 static void handle_sample_timer(struct pgwt_daemon *d)
 {
     uint64_t expirations = 0;
@@ -804,6 +830,16 @@ static void handle_sample_timer(struct pgwt_daemon *d)
         started_ns = pgwt_debug_block_begin(d);
         d->provider->poll(d);
         pgwt_debug_block_end(d, "capture_provider_poll", 0, started_ns);
+    }
+    /* Gate-fires control: a FORK arriving during this opt-in tick tail is
+     * queued while the re-armed timer expires, reproducing the ordering race.
+     * One sleep only; an interrupt may shorten the diagnostic delay. */
+    if (d->debug_sample_tick_delay_us) {
+        struct timespec delay = {
+            .tv_sec = d->debug_sample_tick_delay_us / 1000000U,
+            .tv_nsec = (long)(d->debug_sample_tick_delay_us % 1000000U) * 1000L,
+        };
+        nanosleep(&delay, NULL);
     }
 }
 
@@ -1097,6 +1133,7 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
      * duration probes key off this bool; when unset they do no syscalls and
      * emit nothing. Reset the per-run counters for daemon-mode re-attach. */
     d->debug_dump_state = getenv("PGWT_DEBUG_DUMP_STATE") != NULL;
+    configure_sample_tick_delay(d);
     d->debug_loop_iterations = 0;
     d->debug_timer_entries = 0;
     d->debug_timer_expirations = 0;
@@ -1823,11 +1860,57 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
 
     if (!d->quiet)
         pgwt_print_header(d);
+    /* Set up the optional writer only after every fatal initialisation step.
+     * Failed daemon startup must never publish an empty evidence capture.
+     * Call even without -T so an explicit opt-in explains why it is off. */
+    d->evidence_capture = pgwt_evidence_capture_init(d->trace_dir, d->pg_major_version);
     return 0;
 
 fail:
     pgwt_daemon_cleanup(d);
     return -1;
+}
+
+/* Keep fd dispatch independent of epoll's returned order. The host test
+ * drives this same function with a timer ahead of a queued lifecycle fd. */
+static void dispatch_ready_fd(struct pgwt_daemon *d, int fd,
+                              int rb_fd, int event_rb_fd)
+{
+    uint64_t started_ns;
+    if (fd == d->timer_fd) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_handle_timer(d);
+        pgwt_debug_block_end(d, "timer_handler", 0, started_ns);
+    } else if (d->sample_timer_fd >= 0
+               && fd == d->sample_timer_fd) {
+        started_ns = pgwt_debug_block_begin(d);
+        /* Include FORKs queued before this tick even when epoll returned the
+         * timer first, or the record arrived after epoll_wait returned. Keep
+         * the lifecycle reader's existing processing/identity policy. */
+        pgwt_consume_lifecycle_ring(d);
+        handle_sample_timer(d);
+        pgwt_debug_block_end(d, "sample_timer_handler", 0, started_ns);
+    } else if (fd == rb_fd) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_consume_lifecycle_ring(d);
+        pgwt_debug_block_end(d, "lifecycle_ring_consume", 0, started_ns);
+    } else if (fd == event_rb_fd) {
+        /* The common bounded drain below handles this readiness. Doing
+         * it here as well would spend two callback budgets per pass. */
+    } else if (fd == d->signal_fd) {
+        started_ns = pgwt_debug_block_begin(d);
+        handle_signal(d);
+        pgwt_debug_block_end(d, "signal_handler", 0, started_ns);
+    } else if (pgwt_escalation_is_timer_fd(d, fd)) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_escalation_on_timer(d);
+        pgwt_debug_block_end(d, "escalation_timer_handler", 0,
+                             started_ns);
+    } else if (d->control) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_control_handle_fd(d->control, fd);
+        pgwt_debug_block_end(d, "control_handler", 0, started_ns);
+    }
 }
 
 int pgwt_daemon_run(struct pgwt_daemon *d)
@@ -1894,38 +1977,8 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
             return -1;
         }
         pgwt_sweep_bootstrap_backends(d);
-        for (int i = 0; i < n; i++) {
-            if (events[i].data.fd == d->timer_fd) {
-                started_ns = pgwt_debug_block_begin(d);
-                pgwt_handle_timer(d);
-                pgwt_debug_block_end(d, "timer_handler", 0, started_ns);
-            } else if (d->sample_timer_fd >= 0
-                       && events[i].data.fd == d->sample_timer_fd) {
-                started_ns = pgwt_debug_block_begin(d);
-                handle_sample_timer(d);
-                pgwt_debug_block_end(d, "sample_timer_handler", 0, started_ns);
-            } else if (events[i].data.fd == rb_fd) {
-                started_ns = pgwt_debug_block_begin(d);
-                pgwt_consume_lifecycle_ring(d);
-                pgwt_debug_block_end(d, "lifecycle_ring_consume", 0, started_ns);
-            } else if (events[i].data.fd == event_rb_fd) {
-                /* The common bounded drain below handles this readiness. Doing
-                 * it here as well would spend two callback budgets per pass. */
-            } else if (events[i].data.fd == d->signal_fd) {
-                started_ns = pgwt_debug_block_begin(d);
-                handle_signal(d);
-                pgwt_debug_block_end(d, "signal_handler", 0, started_ns);
-            } else if (pgwt_escalation_is_timer_fd(d, events[i].data.fd)) {
-                started_ns = pgwt_debug_block_begin(d);
-                pgwt_escalation_on_timer(d);
-                pgwt_debug_block_end(d, "escalation_timer_handler", 0,
-                                     started_ns);
-            } else if (d->control) {
-                started_ns = pgwt_debug_block_begin(d);
-                pgwt_control_handle_fd(d->control, events[i].data.fd);
-                pgwt_debug_block_end(d, "control_handler", 0, started_ns);
-            }
-        }
+        for (int i = 0; i < n; i++)
+            dispatch_ready_fd(d, events[i].data.fd, rb_fd, event_rb_fd);
 
         /* Drain event ringbuf on every iteration (poll-based with NO_WAKEUP) */
         if (d->event_rb || d->exact_perf) {
@@ -2008,7 +2061,13 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             "test_delays_left=%u "
             "timer_settime_rc=%d timer_epoll_rc=%d "
             "state_reseeds_total=%llu invalid_wait_reads_total=%llu "
-            "wp_attach_failures_total=%llu wp_attach_exit_race_total=%llu state_map_full_total=%llu "
+            "wp_attach_failures_total=%llu wp_attach_exit_race_total=%llu "
+            "wp_attach_failures_live_total=%llu wp_attach_failures_unknown_total=%llu "
+            "wp_attach_failures_gone_total=%llu lifecycle_exit_before_attach_total=%llu "
+            "lifecycle_exit_before_attach_with_opportunity_total=%llu "
+            "lifecycle_exit_before_attach_no_opportunity_total=%llu "
+            "lifecycle_exit_before_attach_unknown_total=%llu "
+            "state_map_full_total=%llu "
             "cpu_ns_total=%llu offcpu_ns_total=%llu "
             "cpu_clamped_ns_total=%llu wait_gap_cpu_ns_total=%llu "
             "tick_drain_records_total=%llu tick_drain_max_records=%llu "
@@ -2032,6 +2091,13 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             (unsigned long long)d->counters.invalid_wait_reads_total,
             (unsigned long long)d->counters.wp_attach_failures_total,
             (unsigned long long)d->counters.wp_attach_exit_race_total,
+            (unsigned long long)d->counters.wp_attach_failures_live_total,
+            (unsigned long long)d->counters.wp_attach_failures_unknown_total,
+            (unsigned long long)d->counters.wp_attach_failures_gone_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_with_opportunity_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_no_opportunity_total,
+            (unsigned long long)d->counters.lifecycle_exit_before_attach_unknown_total,
             (unsigned long long)d->counters.state_map_full_total,
             (unsigned long long)d->counters.cpu_ns_total,
             (unsigned long long)d->counters.offcpu_ns_total,
@@ -2141,6 +2207,8 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
         free(d->event_writer);
         d->event_writer = NULL;
     }
+    if (d->evidence_capture)
+        pgwt_evidence_capture_close(&d->evidence_capture, pgwt_daemon_counter_vector(d));
 
     pgwt_ring_free(&d->ring);
     pgwt_close_all_backends(&d->backends);

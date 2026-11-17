@@ -5,6 +5,7 @@
 #include "pg_wait_tracer.h"
 #include "cmdline.h"
 #include "synthetic_query.h"
+#include "backend_status_layout.h"
 
 #include <sys/types.h>
 #include <stdint.h>
@@ -22,7 +23,17 @@ struct pgwt_backend {
     int      wp_addr_shared;
     uint64_t attach_ts;        /* monotonic ns when attached */
     uint64_t init_ts;          /* captured bootstrap time; 0 for direct attach */
-    bool     init_attached;    /* INIT attach completed, retained across tiers */
+    bool     init_attached;    /* real attach completed, retained across tiers */
+    bool     wp_attach_exit_race; /* proven exit already counted; retain until EXIT */
+    bool     wp_attach_failed; /* a real failure already gates this retirement */
+    bool     bootstrap_armed; /* retained after close for retirement diagnostics */
+    bool     post_arm_checked;
+    uint64_t post_arm_ptr;
+    int      post_arm_addr_shared;
+    int      post_arm_resolve_errno;
+    int      post_arm_shared_errno;
+    uint64_t enroll_init_no_state, enroll_wait_read_fail;
+    bool     enroll_counters_valid;
     bool     is_alive;
     /* meta has been filled by pgwt_parse_cmdline. A zeroed meta reads as
      * backend_type == CLIENT (enum value 0), which is WRONG for an unparsed
@@ -32,11 +43,18 @@ struct pgwt_backend {
     struct pgwt_metadata meta;
     uint32_t databaseid;      /* PgBackendStatus context, 0 until observed */
     uint32_t userid;
-    uint64_t pgbs_addr;        /* PG13 cached shared PgBackendStatus row */
+    struct pgwt_pgbs_reader sampled_reader;
+    bool sampled_cache_stale; /* replacement during exact capture; reset after drain */
+    uint64_t pgbs_addr;        /* cached shared PgBackendStatus row (also metadata path) */
     uint64_t pgbs_resolve_retry_ns;
+    uint64_t pgbs_resolve_fast_until_ns; /* 100 ms cadence for first 1s */
     uint8_t  pgbs_resolve_attempts;
     struct pgwt_pg13_synthetic_cache *pg13_synthetic_cache;
 };
+
+/* Idempotent, independent of layout and capture tier. Failed identity reads
+ * retry no faster than 100 ms; successful enrollment never rereads stat. */
+int pgwt_sampler_enroll_backend(struct pgwt_backend *be, uint64_t tick_ts);
 
 struct pgwt_backend_table {
     struct pgwt_backend entries[MAX_BACKENDS];
