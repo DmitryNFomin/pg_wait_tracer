@@ -160,10 +160,40 @@ class KnownClassCases(unittest.TestCase):
         self.assertEqual(self.classify((text + "\nINFO: PID 11 initialized (client)",
                                         deltas, pids, short))[0], 1)
 
-    def test_transport_drop(self):
-        text, deltas, pids, short = fixture(k1=True)
+    def test_event_ring_drop_matches_master(self):
+        # Master bc554a73 gates lifecycle drops, not event-ring NMI drops.
+        text, deltas, pids, short = fixture()
         deltas["ringbuf_drops_total"] = 1
-        self.assertEqual(self.classify((text, deltas, pids, short))[0], 1)
+        data = text, deltas, pids, short
+        self.assertEqual(self.classify(data)[0], 0)
+        outcome = self.fake_arm(data, churn=True)
+        self.assertEqual(outcome, {"K1": set(), "K2": set()})
+        with patch.object(self.module, "run_arm", side_effect=[None, outcome, None]), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(self.module.run_arms(1), 0)
+
+    def test_lifecycle_drops_stay_red(self):
+        for counter in ("ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total"):
+            for known in (False, True):
+                with self.subTest(counter=counter, known_k1=known):
+                    text, deltas, pids, short = fixture(k1=known)
+                    deltas[counter] = 1
+                    data = text, deltas, pids, short
+                    self.assertEqual(self.classify(data)[0], 1)
+                    with self.assertRaises(AssertionError) as raised:
+                        self.fake_arm(data, churn=True)
+                    self.assertEqual(raised.exception.args, ((counter, 1),))
+
+    def test_baseline_exit_race_matches_master(self):
+        # A pre-cohort race remains in the full log and absolute counters.
+        # Master's check_cohort reconciles total diagnostics with after;
+        # the exception classifier's delta-only reconciliation rejects it.
+        text, deltas, pids, short = fixture()
+        text += "\n" + K2_WP.replace("pid=12 ", "pid=42 ")
+        data = text, deltas, pids, short
+        self.assertEqual(self.classify(data)[0], 1)
+        self.assertEqual(self.fake_arm(data, churn=True, baseline={"wp_attach_exit_race_total": 1}),
+                         {"K1": set(), "K2": set()})
 
     def test_remaining_pid_still_checked(self):
         text, deltas, pids, short = fixture(k1=True)
@@ -177,7 +207,7 @@ class KnownClassCases(unittest.TestCase):
         text, deltas, pids, short = fixture(k1=True)
         self.assertEqual(self.classify((text, deltas, pids, short - {11}))[0], 1)
 
-    def fake_arm(self, data, skip_store=False, churn=False):
+    def fake_arm(self, data, skip_store=False, churn=False, baseline=None):
         """Run the real live-arm assertions with only the external I/O replaced."""
         module = self.module
         text, deltas, pids, short = data
@@ -185,8 +215,10 @@ class KnownClassCases(unittest.TestCase):
                  "\n".join(f"INFO: fork detected PID {pid}, bootstrap watchpoint attached"
                             for pid in pids))
         before = dict.fromkeys(deltas, 0)
+        before.update(baseline or {})
         before["lifecycle_init_hint_drops_total"] = 0
-        after = {**deltas, "lifecycle_init_hint_drops_total": 1}
+        after = {key: before[key] + value for key, value in deltas.items()}
+        after["lifecycle_init_hint_drops_total"] = 1
 
         def process(*args, **kwargs):
             kwargs["stderr"].write(text)
@@ -277,6 +309,14 @@ def mutants():
         ("unclassified attach args changed", "error = AssertionError((key, after[key]))",
          "error = AssertionError(key, after[key])",
          "test_unclassified_attach_failure_preserves_master_args"),
+        ("generic ringbuf drop gate restored", "    for key in (*ATTACH_COUNTERS[:1],",
+         '    for key, value in deltas.items():\n'
+         '        if key.startswith("ringbuf_") and key.endswith("drops_total") and value != 0:\n'
+         '            raise CohortFailure(f"{key} must be zero", set())\n'
+         '    for key in (*ATTACH_COUNTERS[:1],',
+         "test_event_ring_drop_matches_master"),
+        ("rejected classifier overrides master", "                        pass\n",
+         "                        raise\n", "test_baseline_exit_race_matches_master"),
     )
     for name, old, new, case in definitions:
         assert SOURCE.count(old) == 1, name
