@@ -182,6 +182,12 @@ export const states = {
         fn: 'pane',
         args: [{ fidelity: 'exact', coverage: COVERAGE.complete_xf }],
     },
+    'pane-live-edge': {
+        description: 'Live window whose last watermark trails its end: whole-window numbers labelled "up to HH:MM:SS", the clipped range named "Live — not yet confirmed after HH:MM:SS", plus the in-flight mark.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        fn: 'pane',
+        args: [{ fidelity: 'exact', coverage: COVERAGE.live_edge_xf }],
+    },
     'pane-idle-unverified': {
         description: 'DB time complete, idle coverage not: the Idle time unverified mark (events pane).',
         tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],

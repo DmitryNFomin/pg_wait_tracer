@@ -151,6 +151,7 @@ GALLERY_STATIC_CELLS = [
     "gallery-fidelity-coverage-restart-postgres", # U3: withheld pane, restart cause
     "gallery-fidelity-pane-in-flight-excluded",  # U3: in-flight time excluded mark
     "gallery-fidelity-pane-idle-unverified",     # U3: Idle time unverified mark
+    "gallery-fidelity-pane-live-edge",           # U3 r2: up-to label + live-edge range text
     "gallery-timeline-dense-50pids",            # dense timeline (480px cap)
     "gallery-timeline-dense-one-row",           # #106 per-pixel class stacks
     "gallery-timeline-single-point",            # degenerate timeline
@@ -222,6 +223,7 @@ GALLERY_EVIDENCE = {
     "gallery-fidelity-coverage-restart-postgres": [".coverage-unavailable", ("text", "PostgreSQL restart")],
     "gallery-fidelity-pane-in-flight-excluded": [".pane-fidelity-badge", ("text", "in-flight time excluded")],
     "gallery-fidelity-pane-idle-unverified": [".pane-fidelity-badge", ("text", "Idle time unverified")],
+    "gallery-fidelity-pane-live-edge": [".pane-fidelity-badge", ("text", "Live — not yet confirmed after")],
     "gallery-timeline-dense-50pids": [".cell-body"],
     "gallery-timeline-dense-one-row": [".chart"],
     "gallery-timeline-single-point": [".chart"],

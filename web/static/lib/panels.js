@@ -70,7 +70,7 @@ export function buildPaneFidelity(data, opts) {
             : 'This window mixes sampled and exact capture: numbers in this ' +
               'pane may combine scaled estimates with exact measurements.',
         marks,
-        ranges: [],
+        ranges: covBadge ? covBadge.ranges : [],
     };
 }
 
@@ -88,17 +88,22 @@ export function buildCoverageBadge(data, opts) {
             marks: [], ranges: cov.uncovered };
     }
     const marks = [];
+    // A3 item 1: a live_edge window's numbers end at covered_to.
+    if (cov.upTo) marks.push(cov.upTo);
     if (cov.excludesInFlight) marks.push(IN_FLIGHT_EXCLUDED_LABEL);
     if (opts && opts.idle && cov.idleUnverified) marks.push(IDLE_UNVERIFIED_LABEL);
     if (!marks.length) return null;
+    const ranges = cov.liveEdge ? [cov.liveEdge] : [];
     return { fidelity: fidelityOf(data), coverage: cov, label: null,
-        title: marks.join('; '), fill: style.fill, border: style.border,
-        marks, ranges: [] };
+        title: marks.concat(ranges.map(r => r.text)).join('; '),
+        fill: style.fill, border: style.border, marks, ranges };
 }
 
 /* One uncovered range as display text: UTC wall times, plus the spec's
- * parenthetical for its reason where the spec names one. */
+ * parenthetical for its reason where the spec names one. The live_edge
+ * clipped range has no end yet; its text names its start (A3 item 1). */
 export function coverageRangeText(r) {
+    if (r.live) return r.text;
     const sub = (r.to - r.from) < 1e9;
     const t = (ns) => fmtTime(ns, sub ? 1e6 : 0);
     return t(r.from) + '–' + t(r.to) + (r.text ? ' ' + r.text : '');

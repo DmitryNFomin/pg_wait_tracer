@@ -6,14 +6,14 @@ import assert from 'node:assert/strict';
 import {
     coverageOf, coverageWithholds, coverageReasonText, aasScaleMax,
     COVERAGE_UNVERIFIED_LABEL, IN_FLIGHT_EXCLUDED_LABEL, IDLE_UNVERIFIED_LABEL,
-    buildFidelityShading, INCOMPLETE_FIDELITY,
+    buildFidelityShading, INCOMPLETE_FIDELITY, LIVE_EDGE_RANGE_PREFIX, UP_TO_PREFIX,
 } from '../../web/static/lib/builders/fidelity.js';
 import {
     buildPaneFidelity, paneFidelityBadgeHtml, buildCoverageBadge,
     buildCoverageNotice, buildCompareCoverageNotice, coverageNoticeHtml,
 } from '../../web/static/lib/panels.js';
 import { buildAasOption, AAS_ANNOTATION_SERIES, aasPeakText } from '../../web/static/lib/builders/aas.js';
-import { buildUplotSpec } from '../../web/static/lib/uplot-aas.js';
+import { buildUplotSpec, overlayGeometry } from '../../web/static/lib/uplot-aas.js';
 import {
     buildHeatmapOption, heatmapScaleMax, HEATMAP_COVERAGE_SERIES,
 } from '../../web/static/lib/builders/histogram.js';
@@ -57,8 +57,12 @@ test('U3 reader: the spec label and its known causes', () => {
     const expect = {
         restart_postgres: ' (PostgreSQL restart)', restart_daemon: ' (daemon restart)',
         restart_unknown: ' (restart)', capture_loss: ' (capture loss)',
-        unclean_end: ' (daemon stopped uncleanly)', missing_file: '', retention: '',
-        not_recorded: '', clock_step: '', restart_no_gap: ' (daemon restart)',
+        unclean_end: ' (daemon stopped uncleanly)', missing_file: ' (trace file missing)',
+        retention: ' (older than the retained data)',
+        not_recorded: ' (coverage not recorded — capture predates coverage tracking)',
+        clock_step: ' (system clock stepped back)',
+        not_yet_covered: ' (not yet confirmed — live)', not_captured: ' (not captured)',
+        restart_no_gap: ' (daemon restart)',
         capture_loss_and_restart: ' (capture loss) (PostgreSQL restart)',
     };
     assert.deepEqual(Object.keys(expect).sort(), INCOMPLETE_STATES.slice().sort());
@@ -108,7 +112,12 @@ test('U3 reader: uncovered ranges carry the reason text the spec names, and only
     const cov = coverageOf({ coverage: COVERAGE.capture_loss_and_restart });
     assert.deepEqual(cov.uncovered.map(u => u.text), ['(capture loss)', '(PostgreSQL restart)']);
     const mf = coverageOf({ coverage: COVERAGE.missing_file });
-    assert.deepEqual(mf.uncovered.map(u => u.text), [null], 'NO_INVENTED_REASON_TEXT');
+    assert.deepEqual(mf.uncovered.map(u => u.text), ['(trace file missing)']);
+    // A reason the spec does not name gets no text, never its token.
+    const future = coverageOf({ coverage: { ...COVERAGE.missing_file,
+        reasons: ['future_reason'], uncovered: [{ ...COVERAGE.missing_file.uncovered[0], reason: 'future_reason' }] } });
+    assert.deepEqual(future.uncovered.map(u => u.text), [null], 'NO_INVENTED_REASON_TEXT');
+    assert.equal(future.label, COVERAGE_UNVERIFIED_LABEL);
     const html = coverageNoticeHtml(buildCoverageNotice(withheld('missing_file')));
     assert.ok(!html.includes('missing_file'), 'RAW_REASON_TOKEN_NEVER_SHOWN');
 });
@@ -305,7 +314,7 @@ test('U3 record-level views keep their records and carry the label', () => {
     assert.equal(sc.hasData, true, 'SCATTER_RECORDS_KEPT');
     assert.match(paneFidelityBadgeHtml(sc.coverageBadge), /PostgreSQL restart/);
     const scXf = createExecScatterView().build(execScatterWindow('live_edge_xf'));
-    assert.deepEqual(scXf.coverageBadge.marks, [IN_FLIGHT_EXCLUDED_LABEL]);
+    assert.deepEqual(scXf.coverageBadge.marks, ['up to 09:46:38', IN_FLIGHT_EXCLUDED_LABEL]);
     assert.equal(createTimelineView().build(sessionTimelineWindow('complete'), c).coverageBadge, null);
     // Executions / execution_detail use the same badge.
     assert.equal(buildCoverageBadge({ rows: [], coverage: COVERAGE.unclean_end }).label,
@@ -315,9 +324,10 @@ test('U3 record-level views keep their records and carry the label', () => {
 /* ── xf mark and Idle unverified ─────────────────────────────────────────── */
 
 test('U3 in-flight mark: complete and live_edge panes carry it; legacy panes stay quiet', () => {
-    for (const state of ['complete_xf', 'live_edge_xf']) {
+    for (const [state, marks] of [['complete_xf', [IN_FLIGHT_EXCLUDED_LABEL]],
+        ['live_edge_xf', ['up to 09:46:38', IN_FLIGHT_EXCLUDED_LABEL]]]) {
         const badge = buildPaneFidelity({ fidelity: 'exact', coverage: COVERAGE[state] });
-        assert.deepEqual(badge.marks, [IN_FLIGHT_EXCLUDED_LABEL], state);
+        assert.deepEqual(badge.marks, marks, state);
         assert.match(paneFidelityBadgeHtml(badge), /in-flight time excluded/);
     }
     assert.equal(buildPaneFidelity({ fidelity: 'exact', coverage: COVERAGE.complete }), null);
@@ -357,4 +367,143 @@ test('U3 Idle unverified: overview summary and rows, events rows and badge, comp
     // Not an idle verdict: rows untouched.
     const plain = createOverviewView().build(timeModelWindow('complete'), c);
     assert.ok(!rowsOf(plain).some(r => r.idleUnverified));
+});
+
+/* ── Amendment A3: label text for every reason and for the live edge ─────── */
+
+/* Every reason the verdict can emit (spec §2 States, A2 item 1) and the text
+ * A3 / §2 Output gives it. restart takes its cause (A1 item 2). */
+const A3_REASON_TEXT = [
+    ['capture_loss', null, '(capture loss)'],
+    ['missing_file', null, '(trace file missing)'],
+    ['unclean_end', null, '(daemon stopped uncleanly)'],
+    ['retention', null, '(older than the retained data)'],
+    ['restart', 'postgres', '(PostgreSQL restart)'],
+    ['restart', 'daemon', '(daemon restart)'],
+    ['restart', 'unknown', '(restart)'],
+    ['clock_step', null, '(system clock stepped back)'],
+    ['not_yet_covered', null, '(not yet confirmed — live)'],
+    ['not_recorded', null, '(coverage not recorded — capture predates coverage tracking)'],
+    ['not_captured', null, '(not captured)'],
+];
+const RAW_TOKENS = ['capture_loss', 'missing_file', 'unclean_end', 'retention',
+    'clock_step', 'not_yet_covered', 'not_recorded', 'not_captured', 'live_edge',
+    'coverage_unverified', 'excludes_in_flight', 'covered_to', 'restart_cause',
+    'postgres', 'future_reason'];
+
+function oneReason(reason, cause) {
+    const u = { from: COV_GAP.from, to: COV_GAP.to, reason };
+    return { verdict: 'incomplete', reasons: [reason], covered_to: null,
+        uncovered: [u], restart_cause: cause, excludes_in_flight: false,
+        idle: { verdict: 'incomplete', uncovered: [{ ...u }] } };
+}
+
+for (const [reason, cause, text] of A3_REASON_TEXT) {
+    test(`A3 reason text: ${reason}${cause ? ' / ' + cause : ''} → ${text}`, () => {
+        const coverage = oneReason(reason, cause);
+        const cov = coverageOf({ code: 'coverage_unverified', coverage });
+        assert.equal(cov.label, COVERAGE_UNVERIFIED_LABEL + ' ' + text, 'A3_NOTICE_TEXT');
+        assert.deepEqual(cov.uncovered.map(u => u.text), [text], 'A3_RANGE_TEXT');
+        const html = coverageNoticeHtml(buildCoverageNotice({ code: 'coverage_unverified', coverage }));
+        assert.ok(html.includes(esc(COVERAGE_UNVERIFIED_LABEL + ' ' + text)), 'A3_NOTICE_RENDERED');
+        assert.match(html, new RegExp('<li>[^<]*' + esc(text).replace(/[()]/g, '\\$&') + '</li>'),
+            'A3_RANGE_RENDERED');
+        // Record-level badge and the AAS chip use the same range text.
+        assert.ok(paneFidelityBadgeHtml(buildCoverageBadge({ coverage })).includes(esc(text)));
+    });
+}
+
+test('A3 reason text: every reason the verdict emits has a case above', () => {
+    const covered = new Set(A3_REASON_TEXT.map(r => r[0]));
+    for (const r of ['capture_loss', 'missing_file', 'unclean_end', 'retention', 'restart',
+        'clock_step', 'not_yet_covered', 'not_recorded', 'not_captured']) {
+        assert.ok(covered.has(r), r);
+    }
+    // Several reasons: server order, each once, joined by a space (A3 item 3).
+    const cov = coverageOf({ coverage: { ...oneReason('clock_step', null),
+        reasons: ['missing_file', 'clock_step', 'missing_file'] } });
+    assert.equal(cov.label, COVERAGE_UNVERIFIED_LABEL +
+        ' (trace file missing) (system clock stepped back)');
+});
+
+test('A3 live_edge: "up to HH:MM:SS" on whole-window numbers, the clipped range named', () => {
+    const cov = coverageOf({ fidelity: 'exact', coverage: COVERAGE.live_edge_xf });
+    // covered_to = COV_TO - 2 s = 1773999998 s since the epoch = 09:46:38 UTC.
+    assert.equal(cov.upTo, 'up to 09:46:38', 'A3_UP_TO');
+    assert.equal(UP_TO_PREFIX + '09:46:38', cov.upTo);
+    assert.equal(cov.liveEdge.text, 'Live — not yet confirmed after 09:46:38', 'A3_LIVE_EDGE_TEXT');
+    assert.equal(LIVE_EDGE_RANGE_PREFIX + '09:46:38', cov.liveEdge.text);
+    assert.equal(cov.liveEdge.from, COV_TO - 2e9);
+    assert.equal(cov.withheld, false);
+    // Pane badge: both texts.
+    const html = paneFidelityBadgeHtml(buildPaneFidelity({ fidelity: 'exact', coverage: COVERAGE.live_edge_xf }));
+    assert.ok(html.includes('up to 09:46:38'), 'A3_UP_TO_IN_BADGE');
+    assert.ok(html.includes('<li>Live — not yet confirmed after 09:46:38</li>'),
+        'A3_LIVE_EDGE_IN_BADGE (the range text alone: the clipped range has no end yet)');
+    // A sampled live window keeps the sampled label and gains both texts.
+    const sampled = buildPaneFidelity({ fidelity: 'sampled', coverage: COVERAGE.live_edge_xf });
+    assert.equal(sampled.label, 'Sampled (estimated)');
+    assert.deepEqual(sampled.ranges.map(r => r.text), [cov.liveEdge.text]);
+    // AAS peak (status line) names where its data ends, both renderers.
+    const data = aasWindow('live_edge_xf');
+    const ec = buildAasOption(data, { win: WIN });
+    const up = buildUplotSpec(data, { win: WIN });
+    assert.equal(aasPeakText(ec), 'peak 2.6 AAS (up to 09:46:38)', 'A3_UP_TO_ON_PEAK');
+    assert.equal(aasPeakText(up), aasPeakText(ec));
+    // The clipped range is shaded from covered_to to the window end and
+    // labelled with the range text, in both renderers; buckets stay missing.
+    const band = ec.option.series.find(s => s.name === AAS_ANNOTATION_SERIES).markArea.data;
+    assert.equal(band.length, 1);
+    assert.equal(band[0][0].xAxis, (COV_TO - 2e9) / 1e6);
+    assert.equal(band[0][0].name, cov.liveEdge.text, 'A3_LIVE_EDGE_BAND_LABEL (ECharts)');
+    const rects = overlayGeometry(data, { win: WIN }).rects.filter(r => r.label);
+    assert.deepEqual(rects.map(r => r.label), [cov.liveEdge.text], 'A3_LIVE_EDGE_BAND_LABEL (uPlot)');
+    const cpu = ec.option.series.find(s => s.name !== AAS_ANNOTATION_SERIES).data.map(p => p[1]);
+    assert.equal(cpu[59], null, 'LIVE_EDGE_BUCKET_STAYS_MISSING');
+    // A sampled live window keeps its whole-window sampled band too.
+    const sh = buildFidelityShading({ fidelity: 'sampled', coverage: COVERAGE.live_edge_xf }, WIN);
+    assert.deepEqual(sh.bands.map(b => b.kind), ['sampled', INCOMPLETE_FIDELITY]);
+    // Complete windows carry neither text.
+    const done = coverageOf({ coverage: COVERAGE.complete_xf });
+    assert.equal(done.upTo, null);
+    assert.equal(done.liveEdge, null);
+    assert.match(aasPeakText(buildAasOption(aasWindow('complete'), { win: WIN })), /^peak [\d.]+ AAS$/);
+    // A live_edge verdict without covered_to fails closed: its numbers would
+    // have no stated end.
+    const noEnd = coverageOf({ coverage: { ...COVERAGE.live_edge_xf, covered_to: null } });
+    assert.equal(noEnd.verdict, 'incomplete', 'LIVE_EDGE_WITHOUT_END_FAILS_CLOSED');
+    assert.equal(noEnd.withheld, true);
+});
+
+test('A3: no raw reason, verdict or cause token reaches rendered output', () => {
+    const states = Object.keys(COVERAGE);
+    const extra = { future: { ...oneReason('future_reason', 'postgres') } };
+    const rendered = [];
+    for (const [name, coverage] of [...states.map(k => [k, COVERAGE[k]]), ...Object.entries(extra),
+        ...A3_REASON_TEXT.map(([r, c]) => [r + '/' + c, oneReason(r, c)])]) {
+        const data = { fidelity: coverage.verdict === 'incomplete' ? 'incomplete' : 'exact', coverage };
+        const wh = { code: 'coverage_unverified', coverage };
+        rendered.push([name + ' notice', coverageNoticeHtml(buildCoverageNotice(wh))]);
+        rendered.push([name + ' pane', paneFidelityBadgeHtml(buildPaneFidelity(data, { idle: true }))]);
+        rendered.push([name + ' badge', paneFidelityBadgeHtml(buildCoverageBadge(data, { idle: true }))]);
+        const aas = { ...aasWindow('complete'), ...data };
+        const ec = buildAasOption(aas, { win: WIN });
+        rendered.push([name + ' peak', aasPeakText(ec)]);
+        rendered.push([name + ' bands', JSON.stringify(
+            (ec.option.series.find(s => s.name === AAS_ANNOTATION_SERIES)?.markArea?.data || [])
+                .map(p => p[0].name || ''))]);
+        rendered.push([name + ' uPlot bands', JSON.stringify(
+            overlayGeometry(aas, { win: WIN }).rects.map(r => r.label || ''))]);
+        rendered.push([name + ' heatmap', JSON.stringify(
+            buildHeatmapOption({ ...heatmapWindow('complete'), ...data }).option.series
+                .map(s => s.markArea && s.markArea.label ? s.markArea.label.formatter : ''))]);
+    }
+    let nonEmpty = 0;
+    for (const [where, html] of rendered) {
+        if (html) nonEmpty++;
+        for (const tok of RAW_TOKENS) {
+            assert.ok(!String(html).includes(tok), `RAW_TOKEN_IN_OUTPUT ${tok} in ${where}: ${html}`);
+        }
+    }
+    assert.ok(nonEmpty > rendered.length / 2, 'the check rendered real output');
 });

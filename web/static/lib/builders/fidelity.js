@@ -15,6 +15,8 @@
  * unavailable panel) consume them. Everything here is Node-unit-tested.
  */
 
+import { fmtTime } from '../format.js';
+
 /* Subtle shading colors, kept here so a snapshot test pins them and a color
  * regression is caught without a browser. */
 export const SAMPLED_BAND_COLOR = 'rgba(255, 193, 7, 0.10)';   // amber wash
@@ -62,7 +64,9 @@ export function fidelityOf(data) {
  * verdict is incomplete is withheld as { code:"coverage_unverified",
  * coverage }. This reader is the only place the web UI interprets that
  * object: every view asks coverageOf() and never derives a verdict itself.
- * Label texts are the spec's (spec-coverage-label r2 §2 Output + A1). */
+ * Label texts are the spec's (spec-coverage-label r2 §2 Output, A1, A3): no
+ * raw reason or verdict token ever reaches the DOM; a reason the spec does
+ * not name contributes no text at all. */
 export const COVERAGE_UNVERIFIED_CODE = 'coverage_unverified';
 export const COVERAGE_UNVERIFIED_LABEL =
     'Coverage unverified — whole-window metrics unavailable';
@@ -76,7 +80,23 @@ const RESTART_CAUSE_TEXT = {
 const REASON_TEXT = {
     capture_loss: '(capture loss)',
     unclean_end: '(daemon stopped uncleanly)',
+    // Amendment A3 item 2.
+    missing_file: '(trace file missing)',
+    retention: '(older than the retained data)',
+    clock_step: '(system clock stepped back)',
+    not_yet_covered: '(not yet confirmed — live)',
+    not_recorded: '(coverage not recorded — capture predates coverage tracking)',
+    not_captured: '(not captured)',
 };
+/* Amendment A3 item 1: a live_edge window's numbers cover [from, covered_to);
+ * the clipped range [covered_to, to) is named, never drawn. */
+export const LIVE_EDGE_RANGE_PREFIX = 'Live — not yet confirmed after ';
+export const UP_TO_PREFIX = 'up to ';
+
+/* HH:MM:SS (UTC, like every other wall time in the UI). */
+function coverageClock(ns) {
+    return fmtTime(ns, 0);
+}
 
 /* The spec's parenthetical for a reason, or null where it names none. */
 export function coverageReasonText(reason, restartCause) {
@@ -102,11 +122,16 @@ function coverageRanges(list, restartCause) {
  *   label,              // incomplete: the label plus its known causes
  *   reasons, uncovered, coveredTo, restartCause,
  *   excludesInFlight,   // A1 item 1: complete/live_edge only
+ *   upTo,               // live_edge: 'up to HH:MM:SS' for whole-window numbers
+ *   liveEdge,           // live_edge: { from: covered_to, to: null, live: true,
+ *                       //   text: 'Live — not yet confirmed after HH:MM:SS' }
  *   idleUnverified,     // Idle rows unavailable while DB time is not
  *   idleUncovered,
  * }
  * A present but malformed or unknown verdict fails closed to incomplete,
- * like fidelityOf(). A withheld response with no object is incomplete. */
+ * like fidelityOf(), and so does a live_edge verdict without covered_to (its
+ * numbers would have no stated end). A withheld response with no object is
+ * incomplete. */
 export function coverageOf(data) {
     if (!data || typeof data !== 'object') return null;
     const has = Object.prototype.hasOwnProperty.call(data, 'coverage');
@@ -115,6 +140,8 @@ export function coverageOf(data) {
     const c = (data.coverage && typeof data.coverage === 'object') ? data.coverage : {};
     let verdict = COVERAGE_VERDICTS.has(c.verdict) ? c.verdict : 'incomplete';
     if (withheldCode) verdict = 'incomplete';
+    const coveredTo = Number.isFinite(c.covered_to) ? c.covered_to : null;
+    if (verdict === 'live_edge' && coveredTo === null) verdict = 'incomplete';
     const restartCause = typeof c.restart_cause === 'string' ? c.restart_cause : null;
     const reasons = Array.isArray(c.reasons)
         ? c.reasons.filter(r => typeof r === 'string') : [];
@@ -131,15 +158,20 @@ export function coverageOf(data) {
     const idle = (c.idle && typeof c.idle === 'object') ? c.idle : null;
     const idleUnverified = !incomplete && idle !== null &&
         idle.verdict !== 'complete' && idle.verdict !== 'live_edge';
+    const live = verdict === 'live_edge';
+    const clock = live ? coverageClock(coveredTo) : null;
     return {
         verdict,
         withheld: incomplete,
         label,
         reasons,
         uncovered: incomplete ? coverageRanges(c.uncovered, restartCause) : [],
-        coveredTo: Number.isFinite(c.covered_to) ? c.covered_to : null,
+        coveredTo,
         restartCause,
         excludesInFlight: !incomplete && c.excludes_in_flight === true,
+        upTo: live ? UP_TO_PREFIX + clock : null,
+        liveEdge: live ? { from: coveredTo, to: null, reason: null, live: true,
+            text: LIVE_EDGE_RANGE_PREFIX + clock } : null,
         idleUnverified,
         idleUncovered: idleUnverified ? coverageRanges(idle.uncovered, restartCause) : [],
     };
@@ -265,6 +297,13 @@ export function buildFidelityShading(data, win) {
     } else if (!bands.length && fidelity !== 'exact') {
         bands.push({ from: xMin, to: xMax, kind: fidelity });
     }
+    // A3 item 1: the live_edge clipped range is shaded and named; its buckets
+    // stay missing (the server sends them null). Added after the whole-window
+    // fallback so a sampled live window keeps its own shading too.
+    if (cov && cov.liveEdge && (xMax == null || cov.liveEdge.from < xMax)) {
+        bands.push({ from: cov.liveEdge.from, to: xMax, kind: INCOMPLETE_FIDELITY,
+            label: cov.liveEdge.text });
+    }
 
     const markArea = bandsToMarkArea(bands);
 
@@ -294,7 +333,9 @@ export function bandsToMarkArea(bands) {
     if (!bands || !bands.length) return null;
     const data = [];
     for (const b of bands) {
-        const { fill, border, label } = fidelityBandStyle(b.kind);
+        const style = fidelityBandStyle(b.kind);
+        const { fill, border } = style;
+        const label = b.label || style.label;
         const start = { itemStyle: { color: fill,
                                      borderColor: border, borderWidth: 1,
                                      borderType: 'dashed' } };

@@ -810,6 +810,10 @@ _COVERAGE_STATES = {
                              [(_FROM_NS, _FROM_NS + 10 * _BUCKET_NS, "retention")]),
     "not_recorded": _incomplete(["not_recorded"], [(_FROM_NS, _TO_NS, "not_recorded")]),
     "clock_step": _incomplete(["clock_step"], [(*_COV_GAP, "clock_step")]),
+    "not_yet_covered": _incomplete(["not_yet_covered"],
+                                   [(_TO_NS - 5 * _BUCKET_NS, _TO_NS, "not_yet_covered")]),
+    "not_captured": _incomplete(["not_captured"],
+                                [(_FROM_NS, _FROM_NS + 10 * _BUCKET_NS, "not_captured")]),
     # Row 29: DB time complete, idle floor far behind.
     "idle_unverified": {"verdict": "complete", "reasons": [], "covered_to": _TO_NS,
                         "uncovered": [], "restart_cause": None,

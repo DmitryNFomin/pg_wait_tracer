@@ -785,7 +785,7 @@ export function overlayGeometry(data, opts, scaleWindow) {
             x1: nsToMs(b.to != null ? b.to : axisToNs),
             fill: style.fill,
             stroke: style.border,
-            ...(b.kind === 'none' || b.kind === INCOMPLETE_FIDELITY ? { label: style.label } : {}),
+            ...(b.kind === 'none' || b.kind === INCOMPLETE_FIDELITY ? { label: b.label || style.label } : {}),
             dash: [4, 4],
         });
     }

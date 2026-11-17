@@ -399,11 +399,14 @@ export function buildAasOption(data, opts) {
 
 /* Status-line peak text shared by both renderers (views/active.js). A
  * window whose coverage verdict is incomplete shows the coverage label in
- * place of its whole-window peak: never a number, never zero. */
+ * place of its whole-window peak: never a number, never zero; a live_edge
+ * peak says where its data ends. */
 export function aasPeakText(model) {
     const cov = model && model.coverage;
     if (cov && cov.withheld) return cov.label;
-    return 'peak ' + ((model && model.maxAas) || 0).toFixed(1) + ' AAS';
+    // A3 item 1: a live_edge peak covers [from, covered_to) only.
+    const upTo = cov && cov.upTo ? ' (' + cov.upTo + ')' : '';
+    return 'peak ' + ((model && model.maxAas) || 0).toFixed(1) + ' AAS' + upTo;
 }
 
 /* Label of the 'offcpu' WAIT_CLASSES entry — used to spot it among tooltip

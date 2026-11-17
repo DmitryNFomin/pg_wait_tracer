@@ -57,6 +57,11 @@ export const COVERAGE = {
         [[COV_FROM, COV_FROM + 10 * MIN_NS, 'retention']]),
     not_recorded: incomplete(['not_recorded'], [[COV_FROM, COV_TO, 'not_recorded']]),
     clock_step: incomplete(['clock_step'], [GAP('clock_step')]),
+    // A live window reaching past the last watermark by more than L.
+    not_yet_covered: incomplete(['not_yet_covered'],
+        [[COV_TO - 5 * MIN_NS, COV_TO, 'not_yet_covered']]),
+    not_captured: incomplete(['not_captured'],
+        [[COV_FROM, COV_FROM + 10 * MIN_NS, 'not_captured']]),
     // Spec row 3: two adjacent boots, no uncovered point (window-level rule).
     restart_no_gap: incomplete(['restart'], [], 'daemon'),
     // Two reasons in precedence order (A1 item 4).

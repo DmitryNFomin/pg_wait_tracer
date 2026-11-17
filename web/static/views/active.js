@@ -1177,8 +1177,9 @@ function renderFidelityChip(model, ctx) {
     // U3: the server's coverage verdict (lib/builders/fidelity.js coverageOf).
     const cov = model.coverage || null;
     const inFlight = !!(cov && cov.excludesInFlight);
+    const liveEdge = (cov && cov.liveEdge) || null;
 
-    if (!showBand && !inFlight) {
+    if (!showBand && !inFlight && !liveEdge) {
         if (chip) chip.remove();
         return;
     }
@@ -1206,6 +1207,11 @@ function renderFidelityChip(model, ctx) {
         for (const r of cov.uncovered) {
             html += '<span class="coverage-range">' + esc(coverageRangeText(r)) + '</span>';
         }
+    } else if (liveEdge) {
+        // A3 item 1: the numbers end at covered_to; the clipped range is named.
+        html += '<span class="coverage-mark">' + esc(cov.upTo) + '</span>';
+        html += '<span class="coverage-range">' + esc(coverageRangeText(liveEdge)) + '</span>';
+        if (fid !== 'exact') html += '<span>' + esc(model.fidelityLabel) + '</span>';
     } else if (showBand) {
         html += '<span>' + esc(model.fidelityLabel) + '</span>';
     }
