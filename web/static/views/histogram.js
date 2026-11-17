@@ -22,9 +22,13 @@
  *     ctx.onDrill (time-bucket isolate; the app's registry routes it).
  */
 
-import { buildHeatmapOption, buildSelectorModel } from '../lib/builders/histogram.js';
+import {
+    buildHeatmapOption, buildSelectorModel, heatmapScaleMax,
+} from '../lib/builders/histogram.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
-import { mountUnavailablePanel } from '../lib/panels.js';
+import {
+    mountUnavailablePanel, buildCoverageBadge, paneFidelityBadgeHtml,
+} from '../lib/panels.js';
 import { fmtCount } from '../lib/format.js';
 
 const BUCKETS = () =>
@@ -66,7 +70,7 @@ export function createHistogramView() {
         const span = ctxRef.timeRange.span();
         const anchor = ctxRef.timeRange.to;
         const filterKey = JSON.stringify(ctxRef.filters.snapshot());
-        const raw = (data && data.max_count) || 1;
+        const raw = heatmapScaleMax(data);
         vmaxState = nextStickyMax(vmaxState, raw,
             { span, anchor, filters: filterKey,
               live: ctxRef.isLiveTick ? ctxRef.isLiveTick() : false });
@@ -91,6 +95,10 @@ export function createHistogramView() {
     function renderHeatmap(data) {
         const host = document.getElementById('heatmap-container');
         if (!host) return;
+        // U3: the coverage label for this window (time-bucketed: the cells
+        // outside the uncovered ranges stay, the label rides along).
+        const covHost = document.getElementById('heatmap-coverage');
+        if (covHost) covHost.innerHTML = paneFidelityBadgeHtml(buildCoverageBadge(data));
         // EXACT-required (A3): heatmap is unavailable over a sampled-only window.
         if (isUnavailable(data)) {
             if (chart) { chart.dispose(); chart = null; }
@@ -222,6 +230,7 @@ export function createHistogramView() {
             '  <label>Event</label>' +
             '  <select id="hm-event"><option value="">All</option></select>' +
             '</div>' +
+            '<div id="heatmap-coverage"></div>' +
             '<div id="heatmap-container"></div>';
         document.getElementById('hm-class').addEventListener('change', () => {
             populateEventSelect();

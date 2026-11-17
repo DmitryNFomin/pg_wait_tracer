@@ -47,7 +47,10 @@ import {
     buildFidelityShading, buildEscalationAnnotation, buildUnavailablePanel,
     buildMetricsPanel, buildEscalateControl, buildCompareFidelity,
 } from '../lib/builders/fidelity.js';
-import { compareFidelityHtml, buildPaneFidelity, paneFidelityBadgeHtml } from '../lib/panels.js';
+import {
+    compareFidelityHtml, buildPaneFidelity, paneFidelityBadgeHtml,
+    buildCoverageNotice, coverageNoticeHtml,
+} from '../lib/panels.js';
 import { buildTableModel, mountTable } from '../lib/table.js';
 import { buildDeltaComparison } from '../lib/builders/compare.js';
 import {
@@ -277,6 +280,11 @@ function renderFidelity(body, foot, state) {
     } else if (state.fn === 'pane') {
         const card = div('panel-card', body);
         card.innerHTML = paneFidelityBadgeHtml(buildPaneFidelity(...args));
+    } else if (state.fn === 'coverage') {
+        const model = buildCoverageNotice(...args);
+        const card = div('panel-card', body);
+        card.innerHTML = coverageNoticeHtml(model);
+        factLine(foot, 'verdict: ' + (model ? model.coverage.verdict : 'none'));
     } else if (state.fn === 'compare') {
         const model = buildCompareFidelity(...args);
         const card = div('panel-card', body);

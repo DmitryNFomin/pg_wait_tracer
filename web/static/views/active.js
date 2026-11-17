@@ -52,7 +52,7 @@
  * see the U2a notes inline in the echarts-only sections below.
  */
 
-import { buildAasOption } from '../lib/builders/aas.js';
+import { buildAasOption, aasPeakText } from '../lib/builders/aas.js';
 import {
     buildUplotSpec, overlayGeometry, overlayHooks, hitTest,
     compareHooks, drawDiffStrip,
@@ -62,8 +62,9 @@ import { fullyCoversStrip } from '../lib/stripcache.js';
 import { CancelledError } from '../lib/transport.js';
 import {
     SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
-    fidelityBandStyle,
+    fidelityBandStyle, IN_FLIGHT_EXCLUDED_LABEL,
 } from '../lib/builders/fidelity.js';
+import { coverageRangeText } from '../lib/panels.js';
 import { attachSelection } from '../lib/selection.js';
 import { esc, fmtDuration, fmtTime, classFilterName } from '../lib/format.js';
 
@@ -332,9 +333,8 @@ export function createActiveView() {
     function setStatusLine(ctx, model) {
         if (!ctx.setStatus) return;
         const dur = fmtDuration(ctx.timeRange.span());
-        const peak = (model.maxAas || 0).toFixed(1);
         ctx.setStatus(ctx.server.numCpus + ' CPUs · ' + dur +
-            ' window · peak ' + peak + ' AAS', 'connected');
+            ' window · ' + aasPeakText(model), 'connected');
     }
 
     function setEmptyStatus(ctx) {
@@ -1041,6 +1041,7 @@ export function createActiveView() {
                     isCompare: !!pair, opts, spec,
                     hasData: spec.hasData,
                     maxAas: spec.maxAas,
+                    coverage: spec.coverage,
                     seriesNames: spec.seriesNames,
                 };
             }
@@ -1173,8 +1174,11 @@ function renderFidelityChip(model, ctx) {
     let chip = document.getElementById('aas-fidelity-chip');
     const fid = model.fidelity;
     const showBand = model.shading && model.shading.showLegend;
+    // U3: the server's coverage verdict (lib/builders/fidelity.js coverageOf).
+    const cov = model.coverage || null;
+    const inFlight = !!(cov && cov.excludesInFlight);
 
-    if (!showBand) {
+    if (!showBand && !inFlight) {
         if (chip) chip.remove();
         return;
     }
@@ -1196,7 +1200,16 @@ function renderFidelityChip(model, ctx) {
         '<span style="width:14px;height:10px;display:inline-block;border-radius:2px;' +
         'background:' + MIXED_BAND_COLOR + ';border:1px dashed ' + MIXED_BORDER + '"></span>';
 
-    let html = '<span>' + esc(model.fidelityLabel) + '</span>';
+    let html = '';
+    if (cov && cov.withheld) {
+        html += '<span class="coverage-label">' + esc(cov.label) + '</span>';
+        for (const r of cov.uncovered) {
+            html += '<span class="coverage-range">' + esc(coverageRangeText(r)) + '</span>';
+        }
+    } else if (showBand) {
+        html += '<span>' + esc(model.fidelityLabel) + '</span>';
+    }
+    if (inFlight) html += '<span class="coverage-mark">' + esc(IN_FLIGHT_EXCLUDED_LABEL) + '</span>';
     if (fid === 'sampled') {
         html += '<span style="display:inline-flex;align-items:center;gap:5px">' +
             sampledSwatch + 'shaded = sampled (estimated, not exact)</span>';
@@ -1206,7 +1219,7 @@ function renderFidelityChip(model, ctx) {
             '<span style="display:inline-flex;align-items:center;gap:5px">' +
             mixedSwatch + 'mixed window</span>';
     }
-    for (const kind of new Set(model.shading.bands.map(b => b.kind))) {
+    for (const kind of new Set(((model.shading && model.shading.bands) || []).map(b => b.kind))) {
         if (kind === 'sampled' || kind === 'mixed') continue;
         const style = fidelityBandStyle(kind);
         html += '<span style="display:inline-flex;align-items:center;gap:5px">' +
@@ -1218,7 +1231,7 @@ function renderFidelityChip(model, ctx) {
             (model.escalation.isAnomaly ? '#E53935' : '#4fc3f7') + '">● ' +
             esc(model.escalation.label) + '</span>';
     }
-    if (model.shading.disclaimer != null) {
+    if (model.shading && model.shading.disclaimer != null) {
         html += '<span>' + esc(model.shading.disclaimer) + '</span>';
     }
     chip.innerHTML = html;

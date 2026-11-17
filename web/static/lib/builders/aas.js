@@ -31,6 +31,7 @@ import {
 } from '../format.js';
 import {
     buildFidelityShading, buildEscalationAnnotation, fidelityOf, fidelityLabel,
+    coverageOf, aasScaleMax,
 } from './fidelity.js';
 
 /* Name of the dedicated silent annotation series that carries EVERY mark
@@ -147,7 +148,7 @@ export function buildAasOption(data, opts) {
         seriesIds = AAS_CLASS_ORDER.map(() => null);   // class drills go by name
     }
 
-    const maxAas = (data && data.max_aas) || 0;
+    const maxAas = aasScaleMax(data);
     const policyMax = policyYMax(maxAas, numCpus);
     const yMax = opts.appliedYMax != null ? opts.appliedYMax : policyMax;
 
@@ -384,6 +385,7 @@ export function buildAasOption(data, opts) {
         // Fidelity surface (B5): drives the sampled/exact legend chip + tooltip.
         fidelity: fidelityOf(data),
         fidelityLabel: fidelityLabel(fidelityOf(data)),
+        coverage: coverageOf(data),
         shading,
         escalation: escAnno,
         // U2a camera geometry (ns): the pinned axis extent and the visible
@@ -393,6 +395,15 @@ export function buildAasOption(data, opts) {
         axisRange: { from: axisFromNs, to: axisToNs },
         window: { from: win.from, to: win.to },
     };
+}
+
+/* Status-line peak text shared by both renderers (views/active.js). A
+ * window whose coverage verdict is incomplete shows the coverage label in
+ * place of its whole-window peak: never a number, never zero. */
+export function aasPeakText(model) {
+    const cov = model && model.coverage;
+    if (cov && cov.withheld) return cov.label;
+    return 'peak ' + ((model && model.maxAas) || 0).toFixed(1) + ' AAS';
 }
 
 /* Label of the 'offcpu' WAIT_CLASSES entry — used to spot it among tooltip

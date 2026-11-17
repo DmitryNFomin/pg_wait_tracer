@@ -32,6 +32,7 @@ import {
     buildPaneFidelity, paneFidelityBadgeHtml,
     buildComparePaneFidelity, compareFidelityHtml,
     baselineUnavailableHtml,
+    buildCoverageNotice, buildCompareCoverageNotice, coverageNoticeHtml,
 } from '../lib/panels.js';
 
 /* PURE: top_queries response + sort -> render model. Exported for testing.
@@ -43,6 +44,13 @@ import {
  * order (a REAL production call always passes one — createQueriesView()
  * below). */
 export function buildQueriesModel(data, sort, orderTracker) {
+    // U3: an incomplete coverage verdict withholds the whole table; in
+    // compare mode either side withholds every delta.
+    const notice = (data && data.compare)
+        ? (data.baselineUnavailable ? buildCoverageNotice(data.a)
+            : buildCompareCoverageNotice(data.a, data.b))
+        : buildCoverageNotice(data);
+    if (notice) return { coverageNotice: notice, hasRows: false, compare: !!(data && data.compare) };
     if (data && data.compare && data.baselineUnavailable) {
         const primary = data.a;
         const rows = (primary && primary.rows) || [];
@@ -95,6 +103,7 @@ export function buildQueriesModel(data, sort, orderTracker) {
  * the empty-rows pane must NOT drop unattributedNote the way the exact
  * text/table pane never did. */
 export function buildQueriesEmptyStateHtml(model) {
+    if (model.coverageNotice) return coverageNoticeHtml(model.coverageNotice);
     return baselineUnavailableHtml(model.baselineUnavailable) +
         (model.compare
         ? compareFidelityHtml(model.compareFidelity)

@@ -24,7 +24,9 @@ import {
     buildConcurrencyOption, buildPeaksPanelHtml, buildBurstsPanelHtml,
 } from '../lib/builders/concurrency.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
-import { mountUnavailablePanel } from '../lib/panels.js';
+import {
+    mountUnavailablePanel, buildCoverageNotice, coverageNoticeHtml,
+} from '../lib/panels.js';
 
 export function createConcurrencyView() {
     let chart = null;    // ECharts instance — owned here, nowhere else
@@ -109,6 +111,9 @@ export function createConcurrencyView() {
         },
 
         build(data, ctx) {
+            // U3: an incomplete coverage verdict withholds the whole view.
+            const notice = buildCoverageNotice(data);
+            if (notice) return { coverageNotice: notice };
             // EXACT-required (A3): a sampled-only window yields the structured
             // "unavailable" marker — surfaced as an explicit escalate panel.
             if (isUnavailable(data)) return { unavailable: data };
@@ -122,6 +127,12 @@ export function createConcurrencyView() {
 
         mount(el, model, ctx) {
             ctxRef = ctx;
+            if (model.coverageNotice) {
+                disposeChart();
+                if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
+                el.innerHTML = coverageNoticeHtml(model.coverageNotice);
+                return;
+            }
             if (model.unavailable) {
                 disposeChart();
                 mountUnavailablePanel(el, model.unavailable, ctx);

@@ -53,6 +53,124 @@ export function fidelityOf(data) {
     return INCOMPLETE_FIDELITY;
 }
 
+/* ── Coverage verdict (#947, #871 U3) ────────────────────────────────────────
+ *
+ * The server computes ONE coverage verdict per window (src/coverage.c) and
+ * sends it as `coverage` = { verdict, reasons[], covered_to,
+ * uncovered[{from,to,reason}], restart_cause, excludes_in_flight,
+ * idle:{verdict, uncovered[]} } next to `fidelity`; a whole-window view whose
+ * verdict is incomplete is withheld as { code:"coverage_unverified",
+ * coverage }. This reader is the only place the web UI interprets that
+ * object: every view asks coverageOf() and never derives a verdict itself.
+ * Label texts are the spec's (spec-coverage-label r2 §2 Output + A1). */
+export const COVERAGE_UNVERIFIED_CODE = 'coverage_unverified';
+export const COVERAGE_UNVERIFIED_LABEL =
+    'Coverage unverified — whole-window metrics unavailable';
+export const IN_FLIGHT_EXCLUDED_LABEL = 'in-flight time excluded';
+export const IDLE_UNVERIFIED_LABEL = 'Idle time unverified';
+const COVERAGE_VERDICTS = new Set(['complete', 'live_edge', 'incomplete']);
+const RESTART_CAUSE_TEXT = {
+    postgres: '(PostgreSQL restart)',
+    daemon: '(daemon restart)',
+};
+const REASON_TEXT = {
+    capture_loss: '(capture loss)',
+    unclean_end: '(daemon stopped uncleanly)',
+};
+
+/* The spec's parenthetical for a reason, or null where it names none. */
+export function coverageReasonText(reason, restartCause) {
+    if (reason === 'restart') return RESTART_CAUSE_TEXT[restartCause] || '(restart)';
+    return REASON_TEXT[reason] || null;
+}
+
+function coverageRanges(list, restartCause) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const r of list) {
+        if (!r || !Number.isFinite(r.from) || !Number.isFinite(r.to)) continue;
+        const reason = typeof r.reason === 'string' ? r.reason : null;
+        out.push({ from: r.from, to: r.to, reason,
+            text: reason ? coverageReasonText(reason, restartCause) : null });
+    }
+    return out;
+}
+
+/* coverageOf(data) → null (no coverage object: legacy presentation) | {
+ *   verdict,            // 'complete' | 'live_edge' | 'incomplete'
+ *   withheld,           // whole-window metrics must not be shown
+ *   label,              // incomplete: the label plus its known causes
+ *   reasons, uncovered, coveredTo, restartCause,
+ *   excludesInFlight,   // A1 item 1: complete/live_edge only
+ *   idleUnverified,     // Idle rows unavailable while DB time is not
+ *   idleUncovered,
+ * }
+ * A present but malformed or unknown verdict fails closed to incomplete,
+ * like fidelityOf(). A withheld response with no object is incomplete. */
+export function coverageOf(data) {
+    if (!data || typeof data !== 'object') return null;
+    const has = Object.prototype.hasOwnProperty.call(data, 'coverage');
+    const withheldCode = data.code === COVERAGE_UNVERIFIED_CODE;
+    if (!has && !withheldCode) return null;
+    const c = (data.coverage && typeof data.coverage === 'object') ? data.coverage : {};
+    let verdict = COVERAGE_VERDICTS.has(c.verdict) ? c.verdict : 'incomplete';
+    if (withheldCode) verdict = 'incomplete';
+    const restartCause = typeof c.restart_cause === 'string' ? c.restart_cause : null;
+    const reasons = Array.isArray(c.reasons)
+        ? c.reasons.filter(r => typeof r === 'string') : [];
+    const incomplete = verdict === 'incomplete';
+    let label = null;
+    if (incomplete) {
+        const texts = [];
+        for (const r of reasons) {
+            const t = coverageReasonText(r, restartCause);
+            if (t && !texts.includes(t)) texts.push(t);
+        }
+        label = [COVERAGE_UNVERIFIED_LABEL].concat(texts).join(' ');
+    }
+    const idle = (c.idle && typeof c.idle === 'object') ? c.idle : null;
+    const idleUnverified = !incomplete && idle !== null &&
+        idle.verdict !== 'complete' && idle.verdict !== 'live_edge';
+    return {
+        verdict,
+        withheld: incomplete,
+        label,
+        reasons,
+        uncovered: incomplete ? coverageRanges(c.uncovered, restartCause) : [],
+        coveredTo: Number.isFinite(c.covered_to) ? c.covered_to : null,
+        restartCause,
+        excludesInFlight: !incomplete && c.excludes_in_flight === true,
+        idleUnverified,
+        idleUncovered: idleUnverified ? coverageRanges(idle.uncovered, restartCause) : [],
+    };
+}
+
+/* True when a whole-window view must render the unavailable state. */
+export function coverageWithholds(data) {
+    const cov = coverageOf(data);
+    return !!(cov && cov.withheld);
+}
+
+/* The AAS chart's y-scale input. A withheld window carries no whole-window
+ * peak (max_aas), so the scale follows the per-bucket stacks the server did
+ * send; the peak itself is never displayed for such a window. */
+export function aasScaleMax(data) {
+    if (data && Number.isFinite(data.max_aas)) return data.max_aas;
+    if (!coverageWithholds(data)) return (data && data.max_aas) || 0;
+    let peak = 0;
+    for (const b of (data && data.buckets) || []) {
+        if (!b) continue;
+        let sum = 0;
+        if (Array.isArray(b.aas)) {
+            for (const v of b.aas) if (Number.isFinite(v)) sum += v;
+        } else {
+            for (const [k, v] of Object.entries(b)) if (k !== 't' && Number.isFinite(v)) sum += v;
+        }
+        if (sum > peak) peak = sum;
+    }
+    return peak;
+}
+
 /* Human label for a fidelity token (used in the AAS legend / status). */
 export function fidelityLabel(fid) {
     switch (fidelityOf(fid === undefined ? null : { fidelity: fid })) {
@@ -130,6 +248,14 @@ export function buildFidelityShading(data, win) {
         const kind = fidelityOf(r);
         if (kind !== 'exact') {
             bands.push({ from: r.from, to: r.to, kind });
+        }
+    }
+    // U3: the server's uncovered ranges are shaded where they lie, so the
+    // per-bucket series outside them stays readable.
+    const cov = coverageOf(data);
+    if (cov) {
+        for (const u of cov.uncovered) {
+            bands.push({ from: u.from, to: u.to, kind: INCOMPLETE_FIDELITY });
         }
     }
     if (fidelity === 'mixed' && !bands.some(b => b.kind === 'sampled' || b.kind === 'mixed')) {

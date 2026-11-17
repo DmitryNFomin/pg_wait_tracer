@@ -22,6 +22,7 @@ import {
 import { dot, pctBar, stackedBar, eventStackedBar, createStableOrder } from '../table.js';
 
 import { queryBackendSpanHtml, backendSpanEnvelope } from './backend-span.js';
+import { IDLE_UNVERIFIED_LABEL } from './fidelity.js';
 
 const _dot = (name) => dot(name, classColor);
 
@@ -167,6 +168,44 @@ export function isIdleRow(r) {
     return r.indent === 0 && typeof r.name === 'string' && r.name === 'Idle';
 }
 
+/* U3 (spec §2 Idle verdict): while the server's idle coverage verdict is
+ * incomplete and the DB-time verdict is not, the Idle parent, its children
+ * and the idle rows of Events are unavailable. The server nulls them; this
+ * keeps a row the server did not null from printing a number all the same.
+ * `idleUnverified` = coverageOf(data).idleUnverified, never derived here. */
+const IDLE_ROW_FIELDS = ['ms', 'pct', 'aas', 'count', 'total_ms', 'avg_us',
+    'p50_us', 'p95_us', 'p99_us', 'max_us'];
+
+function unverifiedIdleRow(r) {
+    const out = Object.assign({}, r, { idleUnverified: true });
+    for (const k of IDLE_ROW_FIELDS) if (k in out) out[k] = null;
+    for (const k of ['p50_overflow', 'p95_overflow', 'p99_overflow']) {
+        if (k in out) out[k] = false;
+    }
+    return out;
+}
+
+/* Overview: the Idle parent row and the indent-2 rows that follow it. */
+export function maskUnverifiedIdleTimeModel(rows, idleUnverified) {
+    if (!idleUnverified || !Array.isArray(rows)) return rows;
+    let inIdle = false;
+    return rows.map(r => {
+        if (!r) return r;
+        if (r.indent === 0) inIdle = isIdleRow(r);
+        else if (r.indent === 1) inIdle = false;
+        return inIdle ? unverifiedIdleRow(r) : r;
+    });
+}
+
+/* Events: idle rows are the ones the server sends with pct == null. */
+export function maskUnverifiedIdleEvents(rows, idleUnverified) {
+    if (!idleUnverified || !Array.isArray(rows)) return rows;
+    return rows.map(r => (r && r.pct == null) ? unverifiedIdleRow(r) : r);
+}
+
+const IDLE_UNVERIFIED_HTML = '<span class="idle-unverified">' +
+    esc(IDLE_UNVERIFIED_LABEL) + '</span>';
+
 const IDLE_PCT_HTML =
     '<span class="idle-excluded" title="Excluded from DB Time — not a ' +
     'measured zero share of it.">—</span>';
@@ -246,7 +285,10 @@ export const overviewConfig = {
             if (r.indent >= 1) return _dot(r.name) + esc(r.name);
             return esc(r.name);
         }},
-        { key: 'ms', label: 'Time', cls: 'num', format: (r) => fmtMs(r.ms) },
+        { key: 'ms', label: 'Time', cls: 'num', format: (r) => {
+            if (r.idleUnverified && isIdleRow(r)) return IDLE_UNVERIFIED_HTML;
+            return fmtMs(r.ms);
+        }},
         { key: 'pct', label: '%DB Time', cls: 'num', format: (r) => {
             if (r.indent === 0 && r.name === 'DB Time') return fmtPct(r.pct);
             // #435: never a meaningful "0%" for idle -- it is not applicable,
@@ -517,7 +559,10 @@ export const eventsConfig = {
     columns: [
         { key: 'name', label: 'Wait Event', format: (r) => _dot(r.name) + esc(r.name) },
         { key: 'count', label: 'Count', cls: 'num', format: (r) => fmtCount(r.count) },
-        { key: 'total_ms', label: 'Total', cls: 'num', format: (r) => fmtMs(r.total_ms) },
+        { key: 'total_ms', label: 'Total', cls: 'num', format: (r) => {
+            if (r.idleUnverified) return IDLE_UNVERIFIED_HTML;
+            return fmtMs(r.total_ms);
+        }},
         { key: 'avg_us', label: 'Avg', cls: 'num', format: (r) => fmtUs(r.avg_us) },
         { key: 'p50_us', label: 'P50', cls: 'num', format: pctlCell('p50_us'),
           intent: histogramIntent('p50_us') },

@@ -41,7 +41,9 @@ import {
 import {
     isUnavailable, fidelityBandStyle,
 } from '../lib/builders/fidelity.js';
-import { mountUnavailablePanel } from '../lib/panels.js';
+import {
+    mountUnavailablePanel, buildCoverageNotice, coverageNoticeHtml,
+} from '../lib/panels.js';
 import { esc } from '../lib/format.js';
 
 const DEFAULT_THRESHOLD = 20;
@@ -498,6 +500,9 @@ export function createTransitionsView() {
 
         build(data, ctx) {
             const t = data.transitions;
+            // U3: an incomplete coverage verdict withholds the whole graph.
+            const notice = buildCoverageNotice(t);
+            if (notice) return { coverageNotice: notice };
             // EXACT-required (A3): a sampled-only window returns the structured
             // "unavailable" marker for transitions — show the escalate panel.
             if (isUnavailable(t)) return { unavailable: t };
@@ -518,6 +523,12 @@ export function createTransitionsView() {
             clearRenderData();
             mountEl = el;
             ctxRef = ctx;
+            if (model.coverageNotice) {
+                disposeChart();
+                if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
+                el.innerHTML = coverageNoticeHtml(model.coverageNotice);
+                return;
+            }
             if (model.unavailable) {
                 disposeChart();
                 mountUnavailablePanel(el, model.unavailable, ctx);

@@ -84,6 +84,9 @@ export function buildDeltaComparison(kind, dataA, dataB, opts) {
     for (const key of keys) {
         const a = aMap.get(key) || null;
         const b = bMap.get(key) || null;
+        // U3: an Idle row the server's idle verdict left unverified has no
+        // value on that side; a delta against it would be a fabricated zero.
+        if ((a && a.idleUnverified) || (b && b.idleUnverified)) continue;
         const source = a || b;
         const aMs = a ? finiteMs(a[valueKey]) : 0;
         const bMs = b ? finiteMs(b[valueKey]) : 0;

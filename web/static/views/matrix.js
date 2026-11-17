@@ -5,7 +5,9 @@ import {
     matrixChartFitHeight, MATRIX_CHART_NATURAL_PX, MATRIX_CHART_MIN_PX,
 } from '../lib/builders/matrix.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
-import { mountUnavailablePanel } from '../lib/panels.js';
+import {
+    mountUnavailablePanel, buildCoverageNotice, coverageNoticeHtml,
+} from '../lib/panels.js';
 
 export function createMatrixView() {
     let chart = null, ctxRef = null, prevLabels = null, labelsRef = null;
@@ -62,6 +64,9 @@ export function createMatrixView() {
             });
         },
         build(data) {
+            // U3: an incomplete coverage verdict withholds the whole view.
+            const notice = buildCoverageNotice(data);
+            if (notice) return { coverageNotice: notice };
             if (isUnavailable(data)) return { unavailable: data };
             // Row/column order is held across ticks (STABILITY, #104): pass
             // last tick's label order back in so unchanged events don't
@@ -74,6 +79,11 @@ export function createMatrixView() {
         mount(el, model, ctx) {
             ctxRef = ctx; labelsRef = model.labels;
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
+            if (model.coverageNotice) {
+                disposeChart();
+                el.innerHTML = coverageNoticeHtml(model.coverageNotice);
+                return;
+            }
             if (model.unavailable) {
                 disposeChart();
                 mountUnavailablePanel(el, model.unavailable, ctx);

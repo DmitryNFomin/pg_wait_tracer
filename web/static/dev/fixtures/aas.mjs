@@ -24,6 +24,7 @@
  */
 
 import { BASE_NS, SEC_NS, MIN_NS, r4, tri } from './base.mjs';
+import { aasWindow, COV_FROM, COV_TO } from './coverage.mjs';
 
 const CLASS_KEYS = ['cpu', 'io', 'lock', 'lwlock', 'ipc', 'client', 'timeout',
     'bufferpin', 'activity', 'extension', 'unknown',
@@ -408,6 +409,12 @@ export const states = {
         },
         opts: { numCpus: 0, win: { from: BASE_NS, to: BASE_NS + 4 * B60 } },
     },
+    'coverage-capture-loss': {
+        description: 'Incomplete coverage: the buckets over the uncovered range are missing (never zero) and shaded; the series either side stays.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'CONTINUITY', 'fidelity'],
+        data: aasWindow('capture_loss'),
+        opts: { numCpus: 4, win: { from: COV_FROM, to: COV_TO } },
+    },
     'one-huge-value': {
         description: 'Lock spikes to 480 in one bucket on a 64-vCPU host — worst case for y-axis flattening (P7).',
         tags: ['HIERARCHY'],
@@ -491,4 +498,5 @@ export const uplotStates = {
     'compare-ghostdiff': COMPARE_STATE,
     'missing-bucket-zero': states['missing-bucket-zero'],
     'not-captured-range': states['not-captured-range'],
+    'coverage-capture-loss': states['coverage-capture-loss'],
 };

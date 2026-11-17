@@ -193,6 +193,8 @@ worded; truncation must be announced.
 
 `gallery-concurrency-truncated-bursts` — burst-onset selection note and sampled PID count, alongside a complete PID list.
 
+Coverage verdict (#947, U3): `gallery-fidelity-coverage-*` — a withheld pane names "Coverage unverified — whole-window metrics unavailable", its known cause and the uncovered ranges, never a number or a zero; `gallery-aas-coverage-capture-loss`, `gallery-uplot-aas-coverage-capture-loss` and `gallery-histogram-coverage-capture-loss` — the uncovered buckets are shaded and missing, not zero, while the buckets either side stay; `gallery-fidelity-pane-in-flight-excluded` and `gallery-fidelity-pane-idle-unverified` — the two marks.
+
 **Check it:** the `empty` cell of every builder (`gallery-aas-empty`,
 `gallery-timeline-empty`, `gallery-histogram-empty`,
 `gallery-transitions-empty`, `gallery-concurrency-empty`) — each must say so

@@ -11,7 +11,9 @@ import {
 } from '../lib/builders/waterfall.js';
 import { backendActivityHtml } from '../lib/builders/backend-span.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
-import { mountUnavailablePanel } from '../lib/panels.js';
+import {
+    mountUnavailablePanel, buildCoverageBadge, paneFidelityBadgeHtml,
+} from '../lib/panels.js';
 import { attachSelection } from '../lib/selection.js';
 import { esc, fmtTimeNs } from '../lib/format.js';
 
@@ -70,6 +72,7 @@ export function createWaterfallView() {
             '</div>' +
             ' ' + execScopeNoteHtml() +
             ' <div id="executions-disclosure" class="exec-scope-note" hidden></div>' +
+            ' <div id="executions-coverage"></div>' +
             ' <div id="executions-table"></div>' +
             '</section>' +
             '<section class="waterfall-pane">' +
@@ -327,6 +330,9 @@ export function createWaterfallView() {
                 executionSelectionPool((data.executions && data.executions.rows) || [], null);
             const undrawable = allExecutionsUndrawable(candidatePool);
             return { table, waterfall: wf, detail: data.detail,
+                // U3: record-level — rows stay, the coverage label rides along.
+                coverageBadge: buildCoverageBadge(data.executions) ||
+                    buildCoverageBadge(data.detail),
                 selected: data.selected, detailEnd: data.detailEnd,
                 allUndrawable: undrawable,
                 undrawableText: undrawable
@@ -357,6 +363,8 @@ export function createWaterfallView() {
             const disclosure = document.getElementById('executions-disclosure');
             disclosure.textContent = model.table.disclosure || '';
             disclosure.hidden = !model.table.disclosure;
+            document.getElementById('executions-coverage').innerHTML =
+                paneFidelityBadgeHtml(model.coverageBadge);
             document.getElementById('waterfall-context').innerHTML = model.context || '';
             document.getElementById('waterfall-backend-activity').innerHTML = model.backendActivity || '';
             const countsLabel = document.getElementById('executions-counts-label');
