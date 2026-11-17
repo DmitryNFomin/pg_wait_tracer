@@ -103,6 +103,9 @@ int pgwt_detect_pgss_loaded(pid_t postmaster_pid);
  * (postgresql<major>-devel), since PG13 has no debuginfo anywhere. Returns 0
  * if the version is unknown (caller refuses to attach). */
 int pgwt_detect_pgproc_wait_offset(int pg_major);
+struct PgBackendStatusLayout;
+void pgwt_pg13_status_offsets(struct PgBackendStatusLayout *layout,
+                              uint64_t my_backend_id_addr);
 
 /* Resolve a backend's wait_event_info address from the MyProc PGPROC* global.
  * Reads *my_proc_global_addr from /proc/<pid>/mem to get the backend's PGPROC,

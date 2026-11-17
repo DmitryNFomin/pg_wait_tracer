@@ -61,6 +61,9 @@ struct pgwt_counters {
      * short, foreign pid, out-of-range state). Not the command gate and not
      * comparable with noncmd_cpu_samples_total (#693). */
     uint64_t sampled_attr_tick_read_failures_total;
+    uint64_t sampled_attr_pg13_scan_fallbacks_total; /* counted scan attempts */
+    /* Idle CLIENT samples with successful status + wait reads and db/user. */
+    uint64_t sampled_attr_tick_idle_samples_total;
     /* Coherent, identity-confirmed at-tick reads whose attribution context is
      * absent (st_databaseid OR st_userid InvalidOid — see
      * PGWT_PGBS_ATTR_NO_CONTEXT). Expected to equal (backends without a full
@@ -467,6 +470,8 @@ struct pgwt_daemon {
      * from tick: tick advances only after handle_timer completes, so it cannot
      * tell "never entered" from "entered and stalled before completion". */
     bool        debug_dump_state;
+    /* Opt-in overrun control, cached at init; zero adds no delay. */
+    uint32_t    debug_sample_tick_delay_us;
     uint64_t    debug_loop_iterations;
     uint64_t    debug_timer_entries;
     uint64_t    debug_timer_expirations;

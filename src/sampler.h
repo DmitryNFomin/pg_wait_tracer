@@ -113,10 +113,7 @@ struct pgwt_sample_target {
      * whether a CLIENT backend's we==0 reading is a CPU sample. */
     enum pgwt_backend_type backend_type;
     int      cmd_open;
-    /* Cached PgBackendStatus row for this backend, when the caller has one
-     * (PG13 resolves and caches it); 0 = resolve via MyBEEntry. Used only by
-     * the post-read command-gate recheck (#294). */
-    uint64_t status_addr;
+    struct pgwt_pgbs_reader *attr_reader; /* enrollment row proof, no registry search */
 };
 
 enum pgwt_sampled_attr_tick_outcome {
@@ -204,6 +201,8 @@ struct pgwt_sampler {
      * deflate sample weight vs wall time). */
     uint64_t sample_period_ns;
     uint64_t last_tick_ns;        /* previous tick timestamp (0 = first) */
+    bool debug_sampled_attr;      /* environment is read once at start */
+    bool debug_sampled_attr_failures; /* opt-in per-outcome evidence, no extra reads */
 
     /* Scratch buffers sized for MAX_BACKENDS, allocated once. */
     uint32_t     *read_vals;     /* MAX_BACKENDS — wait_event_info per target */
@@ -229,6 +228,9 @@ struct pgwt_sampler {
     uint64_t read_faults_total;   /* per-pid pread fallbacks taken */
     uint64_t read_failures_total; /* targets with no successful read */
 };
+
+/* PG13 mapping maintenance: daemon interval only, never the sampling tick. */
+int pgwt_sampler_refresh_pg13_generation(struct pgwt_daemon *d);
 
 /* Provider hooks (see provider.h). Exposed for the vtable in sampler.c. */
 /* Live folding, also built by the portable weight parity test. */

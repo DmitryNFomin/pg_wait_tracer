@@ -1,0 +1,25 @@
+{
+ "calls": {
+  "close": 688,
+  "open": 0,
+  "openat": 702,
+  "pread64": 0,
+  "process_vm_readv": 690,
+  "threads": 1
+ },
+ "errors": [],
+ "idle_cohort_samples_lower_bound": 103962,
+ "label": "candidate",
+ "major": 18,
+ "per_tick": {
+  "close": 3.017543859649123,
+  "openat": 3.0789473684210527,
+  "pread64": 0.0,
+  "process_vm_readv_max": 3.026315789473684,
+  "process_vm_readv_min": 3.2701421800947865
+ },
+ "population": 511,
+ "read_failures": 0,
+ "ticks": 211,
+ "ticks_spanning": 228
+}

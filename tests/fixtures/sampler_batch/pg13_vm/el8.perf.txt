@@ -1,0 +1,100 @@
+# Recorded verbatim syscall/frame fragments from /Users/dmitryfomin/work/git/pg_wait_tracer/tests/results/session-20261116/p866-pg13-live/el8/out/diag-m16384/pg13-far-candidate/perf.trace
+# Original line numbers follow each fragment; omissions contain no fixture evidence.
+# Source line 37
+     0.304 ( 0.312 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x1cf7530, liovcnt: 1024, rvec: 0x1cff040, riovcnt: 1024) = 328704
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_read_batch (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 42
+     0.628 ( 0.309 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x1cfb530, liovcnt: 928, rvec: 0x1d03040, riovcnt: 928) = 297888
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_read_batch (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 47
+     1.106 ( 0.139 ms): 9738 process_vm_readv(pid: 9193 (postgres), lvec: 0x1d7e8f0, liovcnt: 492, rvec: 0x1cf37a0, riovcnt: 492) = 1968
+                                       __GI_process_vm_readv (inlined)
+                                       pgwt_sampler_read_targets (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_read_targets (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 131
+     9.498 ( 0.320 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x1cf7530, liovcnt: 1024, rvec: 0x1cff040, riovcnt: 1024) = 328704
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_read_batch (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 136
+     9.829 ( 0.289 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x1cfb530, liovcnt: 928, rvec: 0x1d03040, riovcnt: 928) = 297888
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_read_batch (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 141
+    10.302 ( 0.133 ms): 9738 process_vm_readv(pid: 9193 (postgres), lvec: 0x1d7e8f0, liovcnt: 492, rvec: 0x1cf37a0, riovcnt: 492) = 1968
+                                       __GI_process_vm_readv (inlined)
+                                       pgwt_sampler_read_targets (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_read_targets (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 162125
+  7465.607 ( 0.020 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x7ffee7a608a0, liovcnt: 1, rvec: 0x7ffee7a648a0, riovcnt: 1) = 12
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_resolve_pg13_batch (/root/cand-diag/pg_wait_tracer)
+# Source line 162129
+  7465.638 ( 0.014 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x7ffee7a608a0, liovcnt: 1, rvec: 0x7ffee7a648a0, riovcnt: 1) = 8
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_resolve_pg13_batch (/root/cand-diag/pg_wait_tracer)
+# Source line 162133
+  7465.978 (         ): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x229abe0, liovcnt: 1024, rvec: 0x22aa3f0, riovcnt: 1024) ...
+# Source line 162134
+  7466.411 ( 0.238 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x229ebe0, liovcnt: 1024, rvec: 0x22ae3f0, riovcnt: 1024) = 328704
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_read_batch (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 162139
+  7466.667 ( 0.320 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x22a2be0, liovcnt: 1024, rvec: 0x22b23f0, riovcnt: 1024) = 328704
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_read_batch (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 162144
+  7467.007 ( 0.247 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x22a6be0, liovcnt: 880, rvec: 0x22b63f0, riovcnt: 880) = 282480
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_read_batch (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 162163
+  7467.908 ( 0.194 ms): 9738 process_vm_readv(pid: 9193 (postgres), lvec: 0x215db60, liovcnt: 992, rvec: 0x2161970, riovcnt: 992) = 3968
+                                       __GI_process_vm_readv (inlined)
+                                       pgwt_sampler_read_targets (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_read_targets (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 373329
+ 24343.625 (         ): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x229e6d0, liovcnt: 1024, rvec: 0x22adea0, riovcnt: 1024) ...
+# Source line 373330
+ 24343.854 ( 0.187 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x22a26d0, liovcnt: 1024, rvec: 0x22b1ea0, riovcnt: 1024) = 328704
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_read_batch (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 373335
+ 24344.054 ( 0.167 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x22a66d0, liovcnt: 1024, rvec: 0x22b5ea0, riovcnt: 1024) = 328704
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_read_batch (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 373340
+ 24344.235 ( 0.143 ms): 9738 process_vm_readv(pid: 9190 (postgres), lvec: 0x22aa6d0, liovcnt: 876, rvec: 0x22b9ea0, riovcnt: 876) = 281196
+                                       __GI_process_vm_readv (inlined)
+                                       batch_readv (inlined)
+                                       pgwt_pgbs_read_batch (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
+# Source line 373345
+ 24344.677 ( 0.152 ms): 9738 process_vm_readv(pid: 9193 (postgres), lvec: 0x2161b70, liovcnt: 991, rvec: 0x2165970, riovcnt: 991) = 3964
+                                       __GI_process_vm_readv (inlined)
+                                       pgwt_sampler_read_targets (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_read_targets (/root/cand-diag/pg_wait_tracer)
+                                       pgwt_sampler_poll (/root/cand-diag/pg_wait_tracer)
