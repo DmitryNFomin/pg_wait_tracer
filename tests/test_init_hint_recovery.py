@@ -37,10 +37,11 @@ EXIT_CLASSES = {key: f"lifecycle_exit_before_attach_{key}_total" for key in
                 ("with_opportunity", "no_opportunity", "unknown")}
 DIAGNOSTIC_LINES = 40
 DIAGNOSTIC_WIDTH = 512
-# Temporary #933 regression tripwire. The lead sets this from a 20-run
-# measurement of master's churn arm (provenance to follow). The five observed
-# red runs had one known-class PID each. Remove with the A2 PR.
-KNOWN_CLASS_CAP = 3
+# Temporary #933 exception; remove with the A2 PR.
+# max observed 1 per run in 20 runs on master bc554a73 (Ubuntu 6.8 PG18,
+# tests/results/session-20261117/i933-churn-cap); cap 2 = observed max + 1;
+# regression tripwire, not a rate bound.
+KNOWN_CLASS_CAP = 2
 KNOWN_CLASS_EXIT = 93
 
 

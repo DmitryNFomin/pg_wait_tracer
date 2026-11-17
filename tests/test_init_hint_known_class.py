@@ -84,23 +84,47 @@ class KnownClassCases(unittest.TestCase):
         self.assertEqual(self.classify((text.replace("liveness=exiting", "liveness=live"),
                                         deltas, pids, short))[0], 1)
 
-    def test_over_cap(self):
-        text, deltas, _, _ = fixture(k1=True)
-        text = HEALTHY + "\n" + "\n".join(K1.replace("pid=11 ", f"pid={pid} ")
-                                           for pid in (11, 13, 14, 15))
-        deltas["lifecycle_exit_before_attach_total"] = 4
-        deltas["lifecycle_exit_before_attach_with_opportunity_total"] = 4
-        pids = {99, 11, 13, 14, 15}
-        self.assertEqual(self.classify((text, deltas, pids, pids))[0], 1)
+    def test_run_02_unknown_retirement_stays_red(self):
+        # Exact daemon lines from master bc554a73, Ubuntu 6.8 PG18:
+        # tests/results/session-20261117/i933-churn-cap/run-02.log.
+        # This unarmed retirement is #948, outside the #933 exception.
+        lines = (
+            "WP-ATTACH-FAIL: pid=15990 site=bootstrap_watchpoint_open/backend_wait_addr_resolve "
+            "errno=3 resolve_errno=3 liveness=exiting liveness_result=1 liveness_errno=0 exit_proof=2\n"
+            "EXIT-BEFORE-ATTACH: pid=15990 opportunity=unknown entry_present=1 bootstrap_armed=0 "
+            "post_arm_checked=0 post_arm_ptr=0x0 addr_shared=0 resolve_errno=0 shared_errno=0 "
+            "counter_deltas_valid=1 lifecycle_init_no_state_delta=0 wait_read_fail_delta=0\n"
+            "INFO: PID 15990 exited (client)"
+        )
+        for known in (False, True):
+            with self.subTest(known_k1=known):
+                text, deltas, pids, short = fixture(k1=known)
+                deltas["lifecycle_exit_before_attach_total"] += 1
+                deltas["lifecycle_exit_before_attach_unknown_total"] = 1
+                deltas["wp_attach_exit_race_total"] = 1
+                data = (text + "\n" + lines, deltas, pids | {15990}, short | {15990})
+                self.assertEqual(self.classify(data)[0], 1)
+                with self.assertRaisesRegex(AssertionError, "unknown retirement is gated"):
+                    self.fake_arm(data, churn=True)
 
-    def test_cap_boundary(self):
+    def test_over_cap(self):
         text, deltas, _, _ = fixture(k1=True)
         text = HEALTHY + "\n" + "\n".join(K1.replace("pid=11 ", f"pid={pid} ")
                                            for pid in (11, 13, 14))
         deltas["lifecycle_exit_before_attach_total"] = 3
         deltas["lifecycle_exit_before_attach_with_opportunity_total"] = 3
         pids = {99, 11, 13, 14}
-        self.assertEqual(self.classify((text, deltas, pids, pids))[0], 93)
+        self.assertEqual(self.classify((text, deltas, pids, pids))[0], 1)
+
+    def test_cap_boundary(self):
+        self.assertEqual(self.classify(fixture(True, True))[0], 93)
+
+    def test_combined_over_cap(self):
+        text, deltas, pids, short = fixture(True, True)
+        text += "\n" + K1.replace("pid=11 ", "pid=13 ")
+        deltas["lifecycle_exit_before_attach_total"] += 1
+        deltas["lifecycle_exit_before_attach_with_opportunity_total"] += 1
+        self.assertEqual(self.classify((text, deltas, pids | {13}, short | {13}))[0], 1)
 
     def test_missing_diagnostic(self):
         text, deltas, pids, short = fixture(k1=True)
@@ -220,7 +244,7 @@ class KnownClassCases(unittest.TestCase):
         self.assertEqual(code, 93)
         self.assertEqual(calls, [(False, False), (False, True), (True, False)])
         self.assertEqual(output.strip(),
-                         "KNOWN-CLASS #933 arm=churn K1=[11] K2=[] count=1 cap=3")
+                         "KNOWN-CLASS #933 arm=churn K1=[11] K2=[] count=1 cap=2")
 
     def test_clean_arms_exit_zero(self):
         code, calls, output = self.run_arms(known=False)
