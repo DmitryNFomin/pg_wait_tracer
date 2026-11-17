@@ -185,6 +185,20 @@ static void api_edges(void)
     if (pgwt_coverage_verdict(c->model, c->from, c->to, c->now, PGWT_COV_FLOOR_DB, &s) !=
             PGWT_COV_ERROR || s.error != PGWT_COV_E_SCRATCH_SMALL)
         fail("api", "db", "no scratch must be scratch_small");
+    /* The pure-function contract of §2 and A2 item 2 keeps storage in the
+     * caller's scratch; coverage.h makes "a misaligned area" an error
+     * scratch_small. Full size, but one byte off malloc's alignment. */
+    char *raw = malloc(r.scratch_size + 1);
+    if (!raw) {
+        fail("api-misaligned", "db", "no scratch");
+    } else {
+        s.scratch = raw + 1;
+        s.scratch_size = r.scratch_size;
+        if (pgwt_coverage_verdict(c->model, c->from, c->to, c->now, PGWT_COV_FLOOR_DB, &s) !=
+                PGWT_COV_ERROR || s.error != PGWT_COV_E_SCRATCH_SMALL)
+            fail("api-misaligned", "db", "scratch misaligned by 1 byte must be scratch_small");
+        free(raw);
+    }
     free(r.scratch);
     const struct pgwt_cov_rec recs[] = {{PGWT_COV_REC_WATERMARK, 1, 1, 1}};
     const struct pgwt_cov_boot boot = {.recs = recs, .n_recs = 1};
@@ -247,6 +261,37 @@ static const struct pgwt_cov_rec rg_early_r[] = {F(0, 0, 1), WM(79, 79), GC(120,
                                                  WM(200, 200), SEAL(200)};
 static const struct pgwt_cov_boot rg_early_b[] = {BOOT(0, 0, 1, 1, 1, NONE, 200, rg_early_r)};
 static const struct pgwt_cov_model rg_early = MODEL(rg_early_b);
+
+/* An unclosed gap beside a closed one of another id (round-2 review
+ * finding 3). §2 Model "per gap: [start, end or ∞)" and §1 GAP_CLOSE
+ * carries the gap_id it closes, so gap 2's close cannot end gap 1. Gap 1
+ * opens at 60 (last W <= 60 is wm 59/55) and never closes: §2 Taint
+ * [55, ∞). Gap 2 [75,120). [150,160) lies in gap 1's taint only. */
+static const struct pgwt_cov_rec rg_open_r[] = {F(0, 0, 1),  WM(59, 55),  GO(60, 1),
+                                                WM(79, 75),  GO(80, 2),   GC(120, 2),
+                                                WM(200, 200), SEAL(200)};
+static const struct pgwt_cov_boot rg_open_b[] = {BOOT(0, 0, 1, 1, 1, NONE, 200, rg_open_r)};
+static const struct pgwt_cov_model rg_open = MODEL(rg_open_b);
+
+/* live_edge exclusions (round-2 review finding 1). §2 States live_edge:
+ * "b live, S_b <= from < W, 0 < to - W <= L, [from,W) meets neither T_b
+ * nor a hole"; §2 Covered piece: E_b = W while live. Otherwise the window
+ * is incomplete with the §2 per-point reasons: (1) capture_loss in T_b,
+ * (2) missing_file in a hole, (7) not_yet_covered after W. One live boot,
+ * W = 100 (wm 100/100), obs 100.5, now 101; window [90,102), so
+ * to - W = 2 <= L = 3.
+ * Taint: GAP_OPEN at 98, closed at 99; the last W <= 98 is wm 97.5/97, so
+ * §2 Taint T_b = [97,99), inside [90,100).
+ * Hole: f1 (observed 98) is unreadable and f2 is observed at 99; §2 Holes
+ * gives [floor(last valid W) = 97, 99), inside [90,100). */
+static const struct pgwt_cov_rec re_taint_r[] = {F(0, 0, 1), WM(97.5, 97), GO(98, 1), GC(99, 1),
+                                                 WM(100, 100)};
+static const struct pgwt_cov_boot re_taint_b[] = {BOOT(0, 0, 1, 0, 1, NONE, 100.5, re_taint_r)};
+static const struct pgwt_cov_model re_taint = MODEL(re_taint_b);
+static const struct pgwt_cov_rec re_hole_r[] = {F(0, 0, 1), WM(97.5, 97), F(98, 1, 0), F(99, 2, 1),
+                                                WM(100, 100)};
+static const struct pgwt_cov_boot re_hole_b[] = {BOOT(0, 0, 1, 0, 1, NONE, 100.5, re_hole_r)};
+static const struct pgwt_cov_model re_hole = MODEL(re_hole_b);
 
 /* Liveness. §2 Live = unsealed; same kernel boot_id as the server; last
  * observation within L of now; with a control socket, the status reports
@@ -314,6 +359,17 @@ static const struct cov_case rule_cases[] = {
          INCOMPLETE(1, {R(CAPTURE_LOSS)}, 1, {SPAN(85, 95, CAPTURE_LOSS)}, PGWT_COV_RESTART_NONE)),
     RULE("G3-close-first", "[150,160)", rg_early, 150, 160, 10000,
          INCOMPLETE(1, {R(CAPTURE_LOSS)}, 1, {SPAN(150, 160, CAPTURE_LOSS)},
+                    PGWT_COV_RESTART_NONE)),
+    RULE("G4-other-id-close", "[150,160)", rg_open, 150, 160, 10000,
+         INCOMPLETE(1, {R(CAPTURE_LOSS)}, 1, {SPAN(150, 160, CAPTURE_LOSS)},
+                    PGWT_COV_RESTART_NONE)),
+    RULE("E1-live-edge-taint", "[90,102)", re_taint, 90, 102, 101,
+         INCOMPLETE(2, {R(CAPTURE_LOSS) M_COMMA R(NOT_YET_COVERED)}, 2,
+                    {SPAN(97, 99, CAPTURE_LOSS) M_COMMA SPAN(100, 102, NOT_YET_COVERED)},
+                    PGWT_COV_RESTART_NONE)),
+    RULE("E2-live-edge-hole", "[90,102)", re_hole, 90, 102, 101,
+         INCOMPLETE(2, {R(MISSING_FILE) M_COMMA R(NOT_YET_COVERED)}, 2,
+                    {SPAN(97, 99, MISSING_FILE) M_COMMA SPAN(100, 102, NOT_YET_COVERED)},
                     PGWT_COV_RESTART_NONE)),
     RULE("L1-other-kernel", "[50,100)", rl_kernel, 50, 100, 101,
          INCOMPLETE(1, {R(UNCLEAN_END)}, 1, {SPAN(50, 100, UNCLEAN_END)}, PGWT_COV_RESTART_NONE)),

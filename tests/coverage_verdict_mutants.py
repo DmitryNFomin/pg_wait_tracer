@@ -41,7 +41,7 @@ LEGACY_MEETS = ("        for (size_t i = 0; i < m->n_legacy; i++)\n"
                 "                met++;\n")
 APPEND_ORDER = "        while (j < ngo && go[j].start < r->a)\n"
 
-# name, [(anchor, replacement)], window that must fail
+# name, [(anchor, replacement)], window (or tuple of windows) that must fail
 MUTANTS = [
     # The brief's list.
     ("c1-drop-open-floor", [("        s->E = s->fk;\n", "        s->E = s->W;\n")], "5b"),
@@ -94,6 +94,17 @@ MUTANTS = [
     ("clock-step-dropped", [("    n_ov = overlaps(ws.sums, m->n_boots, ws.ev, ws.ov);",
                              "    n_ov = 0 * overlaps(ws.sums, m->n_boots, ws.ev, ws.ov);")],
      "S1-clock-step-inside"),
+    # Rules round 2's review (655c3242) found unreached: findings 1-3.
+    ("live-edge-exclusions-dropped",
+     [("            to - p->W <= PGWT_COV_LIVE_L_NS && clean(&ws, p, n_ov, from, p->W)) {",
+       "            to - p->W <= PGWT_COV_LIVE_L_NS && 1) {")],
+     ("E1-live-edge-taint", "E2-live-edge-hole")),
+    ("scratch-misalignment-accepted",
+     [("        (off[7] && (!p || (uintptr_t)p % WS_ALIGN)))", "        (off[7] && !p))")],
+     "api-misaligned"),
+    ("unclosed-gap-takes-other-id-close",
+     [("        go[j].hi = c < ngc && gc[c].key == go[j].key ? gc[c].end : PGWT_COV_INF;",
+       "        go[j].hi = c < ngc ? gc[c].end : PGWT_COV_INF;")], "G4-other-id-close"),
 ]
 
 
@@ -159,9 +170,10 @@ def main():
         for name, edits, window in MUTANTS:
             rc, out = run(build(tmp, "mutant", mutate(original, edits)))
             ids = failed_ids(out)
-            if rc == 0 or window not in ids:
-                raise SystemExit(f"SURVIVED {name}: wanted FAIL {window}, rc={rc}\n{out}")
-            print(f"KILLED {name}: {window} (failing windows: {' '.join(ids)})")
+            wanted = window if isinstance(window, tuple) else (window,)
+            if rc == 0 or any(w not in ids for w in wanted):
+                raise SystemExit(f"SURVIVED {name}: wanted FAIL {' '.join(wanted)}, rc={rc}\n{out}")
+            print(f"KILLED {name}: {' '.join(wanted)} (failing windows: {' '.join(ids)})")
         print("NOT-A-MUTANT c5-this-tick-publish-from: writer rule (U1); the verdict never "
               "sees publish_from")
 
