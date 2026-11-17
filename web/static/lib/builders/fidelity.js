@@ -169,9 +169,13 @@ export function bandsToMarkArea(bands) {
     const data = [];
     for (const b of bands) {
         const { fill, border, label } = fidelityBandStyle(b.kind);
-        const start = { name: label, itemStyle: { color: fill,
+        const start = { itemStyle: { color: fill,
                                      borderColor: border, borderWidth: 1,
                                      borderType: 'dashed' } };
+        if (b.kind === 'none' || b.kind === INCOMPLETE_FIDELITY) {
+            start.name = label;
+            start.label = { position: 'insideTop', distance: 4, color: '#ddd', fontSize: 10 };
+        }
         const end = {};
         if (b.from != null) start.xAxis = b.from;
         if (b.to != null) end.xAxis = b.to;

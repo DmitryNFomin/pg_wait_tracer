@@ -907,6 +907,8 @@ export function drawOverlayRects(u, geo) {
     if (!geo || !geo.rects || !geo.rects.length) return;
     const ctx = u.ctx;
     const { left, top, width, height } = u.bbox;
+    const dpr = (typeof uPlot !== 'undefined' && uPlot.pxRatio) ||
+        (typeof devicePixelRatio !== 'undefined' ? devicePixelRatio : 1);
     ctx.save();
     ctx.beginPath();
     ctx.rect(left, top, width, height);
@@ -940,6 +942,16 @@ export function drawOverlayRects(u, geo) {
             }
             ctx.stroke();
             ctx.setLineDash([]);
+        }
+        if (r.label) {
+            ctx.font = (10 * dpr) + 'px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillStyle = '#ddd';
+            const halfWidth = ctx.measureText(r.label).width / 2;
+            const x = Math.max(left + halfWidth,
+                Math.min(left + width - halfWidth, (x0 + x1) / 2));
+            ctx.fillText(r.label, x, top + 4 * dpr);
         }
     }
     ctx.restore();

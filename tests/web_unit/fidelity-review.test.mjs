@@ -1,10 +1,11 @@
-/* U0 review regressions: assertion names also identify the six negative controls. */
+/* U0 review regressions: assertion names identify the negative controls. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { buildAasOption, AAS_ANNOTATION_SERIES } from '../../web/static/lib/builders/aas.js';
-import { buildUplotSpec, hitTest } from '../../web/static/lib/uplot-aas.js';
-import { buildFidelityShading, buildCompareFidelity } from '../../web/static/lib/builders/fidelity.js';
+import { buildUplotSpec, hitTest, drawOverlayRects } from '../../web/static/lib/uplot-aas.js';
+import { buildFidelityShading, buildCompareFidelity, bandsToMarkArea } from '../../web/static/lib/builders/fidelity.js';
 import {
     buildPaneFidelity, paneFidelityBadgeHtml, buildPercentileBasis,
     percentileBasisHtml, compareFidelityHtml,
@@ -16,16 +17,84 @@ const WIN = { from: 1e9, to: 6e9 };
 const UNKNOWN = { fidelity: 'future-pause-verdict' };
 const MESSAGE = 'Incomplete capture: some of this window was not captured.';
 
-test('review 1: sampled and mixed overlays keep their presentation without chips', () => {
-    for (const fidelity of ['sampled', 'mixed']) {
-        const spec = buildUplotSpec({ fidelity }, { win: WIN });
-        assert.equal(Object.hasOwn(spec.overlays.rects[0], 'label'), false,
-            'SAMPLED_MIXED_OVERLAYS_HAVE_NO_CHIP');
+// Exercise the vendored renderer and canvas painter, rather than just geometry.
+const echarts = createRequire(import.meta.url)('../../web/static/vendor/echarts.min.js');
+const BAND_LABELS = [
+    ['none', 'Not captured'], ['incomplete', 'Incomplete capture'],
+    ['sampled', undefined], ['mixed', undefined], ['exact', undefined],
+];
+function bandData(fidelity) {
+    return { fidelity, bucket_ns: 1e9, max_aas: 1,
+        buckets: [{ t: WIN.from, cpu: 1 }, { t: WIN.to, cpu: 1 }] };
+}
+
+test('markArea names only the none and incomplete band kinds', () => {
+    for (const [kind, label] of BAND_LABELS) {
+        const area = bandsToMarkArea([{ ...WIN, kind }]);
+        assert.equal(area.data[0][0].name, label, 'MARK_AREA_NAMES_ONLY_UNCAPTURED: ' + kind);
+        assert.equal(Object.hasOwn(area.data[0][0], 'name'), label !== undefined,
+            'MARK_AREA_NAMES_ONLY_UNCAPTURED: ' + kind);
     }
-    for (const [fidelity, label] of [['none', 'Not captured'],
-        ['future-pause-verdict', 'Incomplete capture']]) {
-        assert.equal(buildUplotSpec({ fidelity }, { win: WIN }).overlays.rects[0].label, label,
-            'UNCAPTURED_OVERLAYS_KEEP_LABELS');
+});
+
+test('ECharts paints only uncaptured band labels, entirely inside the plot', () => {
+    for (const [kind, label] of BAND_LABELS) {
+        const chart = echarts.init(null, null,
+            { renderer: 'svg', ssr: true, width: 900, height: 320 });
+        try {
+            chart.setOption(buildAasOption(bandData(kind), { win: WIN }).option);
+            const svg = chart.renderToSVGString();
+            const texts = [...svg.matchAll(/<text[^>]*>([^<]*)<\/text>/g)]
+                .map(m => m[1]).filter(t => /captur|Sampled|Mixed|Exact/.test(t));
+            assert.deepEqual(texts, label ? [label] : [], 'ECHARTS_BAND_TEXT: ' + kind);
+            const box = chart.getModel().getComponent('grid').coordinateSystem.getRect();
+            const painted = chart.getZr().storage.getDisplayList().filter(el => label !== undefined && el.style?.text === label);
+            assert.equal(painted.length, label ? 1 : 0, 'ECHARTS_BAND_TEXT: ' + kind);
+            for (const el of painted) {
+                const r = el.getBoundingRect().clone();
+                r.applyTransform(el.getComputedTransform());
+                assert.ok(r.x >= box.x && r.x + r.width <= box.x + box.width &&
+                    r.y > box.y && r.y + r.height <= box.y + box.height,
+                    'ECHARTS_BAND_LABEL_INSIDE_PLOT: ' + kind);
+            }
+        } finally {
+            chart.dispose();
+        }
+    }
+});
+
+test('uPlot paints only uncaptured band labels, entirely inside the plot at both DPRs', () => {
+    const oldDpr = globalThis.devicePixelRatio;
+    try {
+        for (const dpr of [1, 2]) {
+            globalThis.devicePixelRatio = dpr;
+            for (const [kind, label] of BAND_LABELS) {
+                const texts = [];
+                const bbox = { left: 55 * dpr, top: 14 * dpr, width: 825 * dpr, height: 278 * dpr };
+                const ctx = {
+                    save() {}, restore() {}, beginPath() {}, rect() {}, clip() {},
+                    fillRect() {}, setLineDash() {}, moveTo() {}, lineTo() {}, stroke() {},
+                    measureText(text) { return { width: text.length * 6 * dpr }; },
+                    fillText(text, x, y) {
+                        texts.push(text);
+                        assert.equal(this.textAlign, 'center', 'UPLOT_BAND_LABEL_ALIGNMENT');
+                        assert.equal(this.textBaseline, 'top', 'UPLOT_BAND_LABEL_ALIGNMENT');
+                        assert.equal(this.font, (10 * dpr) + 'px sans-serif');
+                        const halfWidth = this.measureText(text).width / 2;
+                        assert.ok(x - halfWidth >= bbox.left && x + halfWidth <= bbox.left + bbox.width &&
+                            y > bbox.top && y + 10 * dpr <= bbox.top + bbox.height,
+                            'UPLOT_BAND_LABEL_INSIDE_PLOT: ' + kind);
+                    },
+                };
+                const u = { ctx, bbox, valToPos: x => bbox.left +
+                    (x - WIN.from / 1e6) / ((WIN.to - WIN.from) / 1e6) * bbox.width };
+                drawOverlayRects(u, buildUplotSpec(bandData(kind), { win: WIN }).overlays);
+                assert.deepEqual(texts, label ? [label] : [], 'UPLOT_BAND_TEXT: ' + kind);
+            }
+        }
+    } finally {
+        if (oldDpr === undefined) delete globalThis.devicePixelRatio;
+        else globalThis.devicePixelRatio = oldDpr;
     }
 });
 
@@ -36,10 +105,10 @@ test('review 2: both AAS renderers preserve each present class around missing cl
     const ecValues = ec.option.series.filter(s => s.name !== AAS_ANNOTATION_SERIES)
         .map(s => s.data.map(p => p[1]));
     assert.deepEqual(up.rawValues, ecValues, 'AAS_PER_CLASS_VALUES_AGREE');
-    // Bucket 1 has CPU=1, no offcpu, IO=0.5, Lock=0.1. Every cumulative
+    // Bucket 1 has CPU=1.5, no offcpu, IO=0.75, Lock=0.25. Every cumulative
     // edge stays numeric there, including the zero-thickness missing layers.
     assert.deepEqual(up.alignedData.slice(1).map(v => v[1]),
-        [1, 1, 1.5, 1.6, 1.6, 1.6, 1.6, 1.6, 1.6, 1.6, 1.6, 1.6],
+        [1.5, 1.5, 2.25, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5],
         'MISSING_CLASS_KEEPS_LATER_CLASSES_VISIBLE');
     for (let j = 0; j < data.buckets.length; j++) {
         const present = ecValues.some(v => v[j] != null);
@@ -58,7 +127,7 @@ test('review 2: both AAS renderers preserve each present class around missing cl
     assert.deepEqual(up.alignedData.slice(1).map(v => v[3]), AAS_CLASS_ORDER.map(() => 0),
         'OBSERVED_ZERO_BUCKET_STAYS_ZERO');
     const io = AAS_CLASS_ORDER.find(c => c.key === 'io').label;
-    assert.equal(hitTest(up, up.alignedData[0][1], 1.25)?.seriesName, io,
+    assert.equal(hitTest(up, up.alignedData[0][1], 2)?.seriesName, io,
         'PRESENT_IO_REMAINS_HITTABLE');
     assert.equal(hitTest(up, up.alignedData[0][2], 0), null, 'GAP_HAS_NO_HIT');
 });
@@ -75,7 +144,7 @@ test('review 3: mixed fallback survives none and incomplete ranges without hidin
         { from: 2e9, to: 3e9, kind: 'incomplete' },
     ], 'MIXED_FALLBACK_WITH_UNCAPTURED_RANGES');
     assert.deepEqual(model.markArea.data.map(pair => pair[0].name),
-        ['Mixed (sampled + exact)', 'Not captured', 'Incomplete capture']);
+        [undefined, 'Not captured', 'Incomplete capture']);
     assert.equal(model.disclaimer, null);
     for (const fidelity of ['sampled', 'mixed']) {
         const located = buildFidelityShading({ fidelity: 'mixed', fidelity_ranges: [

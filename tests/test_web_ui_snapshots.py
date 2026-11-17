@@ -139,7 +139,7 @@ GALLERY_STATIC_CELLS = [
     "gallery-uplot-aas-escalated-live-edge",    # uPlot: edge vline (drop-never-move)
     "gallery-uplot-aas-compare-ghostdiff",      # U4: B total ghost + signed diff lane
     "gallery-uplot-aas-missing-bucket-zero",    # same payload through uPlot
-    "gallery-uplot-aas-not-captured-range",     # Not captured overlay label
+    "gallery-uplot-aas-not-captured-range",     # grey band with Not captured text inside plot
     "gallery-fidelity-compare-mismatch",         # U4: exact-vs-sampled warning chip
     "gallery-fidelity-compare-predates",         # U4: quiet retention-edge note
     "gallery-fidelity-pane-unknown",             # incomplete pane badge
