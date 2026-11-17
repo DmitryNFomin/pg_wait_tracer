@@ -10,8 +10,9 @@ never into the tree).
 Windows, verdicts, reasons, the xf mark, uncovered ranges, covered_to,
 restart_cause and the idle verdict are parsed from the two files. The setups
 are prose, so MODELS encodes each one by hand and pins the exact setup text it
-was encoded from: an edit to either file fails generation instead of
-drifting. Uncovered-range brackets are not compared (a measure-zero endpoint
+was encoded from, and DEFAULTS pins the defaults line every setup relies on
+(now, L, closure, kernel boot, postmaster start): an edit to either file
+fails generation instead of drifting. Uncovered-range brackets are not compared (a measure-zero endpoint
 is not represented). restart_cause tokens follow Amendment A1 item 2, so the
 answer file's "postgresql" is read as "postgres".
 
@@ -37,6 +38,11 @@ ERRORS = {"invalid_window": "PGWT_COV_E_INVALID_WINDOW"}
 RESTART = {"daemon": "PGWT_COV_RESTART_DAEMON", "postgres": "PGWT_COV_RESTART_POSTGRES",
            "postgresql": "PGWT_COV_RESTART_POSTGRES", "unknown": "PGWT_COV_RESTART_UNKNOWN"}
 NOW = 10000
+# The inputs file's defaults line, exactly. NOW above and the boot fields
+# written by c_model encode it; L = 3 is PGWT_COV_LIVE_L_NS in src/coverage.h.
+DEFAULTS = ("Defaults unless a row says otherwise: one generation, wall = mono, L = 3, "
+            "now = 10000, sealed boots have closure CLEAN and their last wm is W/W, all boots "
+            "share the server's kernel boot_id and the same postmaster start.")
 
 
 def die(msg):
@@ -181,7 +187,11 @@ def parse_window(text):
 
 def read_inputs(path):
     rows = {}
-    for line in path.read_text().splitlines():
+    lines = path.read_text().splitlines()
+    defaults = [ln.strip() for ln in lines if ln.strip().startswith("Defaults")]
+    if defaults != [DEFAULTS]:
+        die(f"defaults line changed; re-encode NOW, L and the boot defaults:\n  {defaults!r}")
+    for line in lines:
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) != 3 or not cells[0].isdigit():
             continue

@@ -39,7 +39,7 @@ TIME_ORDER = ("        for (size_t k = 0; k < out->n_uncovered; k++) {\n"
 LEGACY_MEETS = ("        for (size_t i = 0; i < m->n_legacy; i++)\n"
                 "            if (meets(m->legacy[i].from, m->legacy[i].to, from, to))\n"
                 "                met++;\n")
-APPEND_ORDER = "if (st == W_REC && r->kind == PGWT_COV_REC_WATERMARK && r->a <= start)"
+APPEND_ORDER = "        while (j < ngo && go[j].start < r->a)\n"
 
 # name, [(anchor, replacement)], window that must fail
 MUTANTS = [
@@ -59,13 +59,41 @@ MUTANTS = [
     ("stale-is-live", [("              now - wall(b, b->last_obs) <= PGWT_COV_LIVE_L_NS;",
                         "              (now - wall(b, b->last_obs) <= PGWT_COV_LIVE_L_NS || 1);")],
      "8"),
-    ("taint-from-append-order", [(APPEND_ORDER, APPEND_ORDER.replace("r->a <= start", "k < gap_idx")),
-                                 ("    (void)gap_idx;\n", "    (void)start;\n")], "11"),
+    ("taint-from-append-order",
+     [(APPEND_ORDER, APPEND_ORDER.replace("go[j].start < r->a", "go[j].pos < k"))], "11"),
     ("no-xf-when-live", [("        out->excludes_in_flight = s.live && s.fd < to;",
                           "        out->excludes_in_flight = 0;")], "7a"),
     ("floor-db-for-idle", [("    return kind == PGWT_COV_FLOOR_IDLE ? fi : fd;",
                             "    (void)kind;\n    (void)fi;\n    return fd;")], "29"),
     ("liveness-from-w-progress", [("now - wall(b, b->last_obs)", "now - wall(b, w.w)")], "26b"),
+    ("has-exact-on-overlap", [("p->S <= from && to <= p->E &&", "meets(p->S, p->E, from, to) &&")],
+     "2a"),
+    # Rules the agreed table cannot reach (review 9d8bfac0 finding 1, nit 4,
+    # finding 3 / A2 item 1). Each case lives in test_coverage_verdict.c's
+    # rule_cases, outside the table; every refusal mutated here would
+    # otherwise turn an incomplete window complete.
+    ("gap-id-ignored", [("static int64_t pair_key(int64_t id) { return id; }",
+                         "static int64_t pair_key(int64_t id) { (void)id; return 0; }")],
+     "G1-gap-id"),
+    ("gap-close-before-open-pairs",
+     [("static int closes_after(size_t open_pos, size_t close_pos) { return close_pos > open_pos; }",
+       "static int closes_after(size_t open_pos, size_t close_pos) "
+       "{ (void)open_pos; (void)close_pos; return 1; }")], "G2-id-reused"),
+    ("kernel-boot-ignored", [("    s->live = !s->sealed && b->same_kernel_boot &&\n",
+                              "    s->live = !s->sealed &&\n")], "L1-other-kernel"),
+    ("status-mismatch-ignored", [("              b->status != PGWT_COV_STATUS_MISMATCH &&\n", "")],
+     "L2-status-mismatch"),
+    ("unreadable-file-not-lost", [("int lost = !r->c || (", "int lost = (")], "H1-unreadable"),
+    ("hole-closed-by-unreadable", [("if (r->c && w->hole_open) {", "if (w->hole_open) {")],
+     "H2-unreadable-no-close"),
+    ("nonmonotone-w-accepted",
+     [("(r->kind == PGWT_COV_REC_WATERMARK && w->have_w && r->a < w->w)", "0")],
+     "H3-nonmonotone-w"),
+    ("restart-unknown-is-daemon", [("        return PGWT_COV_RESTART_UNKNOWN;",
+                                    "        return PGWT_COV_RESTART_DAEMON;")], "C1-cause-unknown"),
+    ("clock-step-dropped", [("    n_ov = overlaps(ws.sums, m->n_boots, ws.ev, ws.ov);",
+                             "    n_ov = 0 * overlaps(ws.sums, m->n_boots, ws.ev, ws.ov);")],
+     "S1-clock-step-inside"),
 ]
 
 
@@ -138,6 +166,12 @@ def main():
               "sees publish_from")
 
         # Drift controls: the table must follow the fixture files.
+        d = drift(tmp, "defaults", "coverage-table-inputs.md", "L = 3, now = 10000,",
+                  "L = 30, now = 20000,")
+        rc, out = generate(d, d)
+        if rc == 0 or "defaults line changed" not in out:
+            raise SystemExit(f"defaults drift was not refused: {out}")
+        print("REFUSED defaults-line drift (now, L)")
         d = drift(tmp, "setup", "coverage-table-inputs.md",
                   "| 5 | B1[0,100,unsealed], last wm 100/95 |",
                   "| 5 | B1[0,100,unsealed], last wm 100/96 |")
@@ -160,7 +194,7 @@ def main():
         if rc == 0 or "7a" not in failed_ids(out):
             raise SystemExit(f"answer drift did not turn the test red: {out}")
         print("RED answer drift (7a mark removed)")
-    print(f"coverage verdict mutants: {len(MUTANTS)} killed, 3 drift controls: PASS")
+    print(f"coverage verdict mutants: {len(MUTANTS)} killed, 4 drift controls: PASS")
 
 
 if __name__ == "__main__":

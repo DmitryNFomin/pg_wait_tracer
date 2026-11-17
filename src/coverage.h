@@ -1,6 +1,8 @@
 /* Coverage label: the one verdict function (coverage spec r2 §2 plus
- * Amendment A1). Pure: no I/O, no allocation, no globals; the only output
- * storage is the caller's. Not wired into any consumer yet (U2b, U3).
+ * Amendments A1 and A2). Pure: no I/O, no allocation, no globals; the only
+ * storage is the caller's (the uncovered-range buffer and a scratch area
+ * sized by pgwt_cov_scratch_bytes). One call is O(n log n) in the records
+ * it reads (A2 item 2). Not wired into any consumer yet (U2b, U3).
  * Refs #947, #871. */
 #ifndef PGWT_COVERAGE_H
 #define PGWT_COVERAGE_H
@@ -18,7 +20,8 @@
 
 /* One decoded COVERAGE fact, in file order. A boot's records start with the
  * FILE fact of its earliest retained file; every later file opens with its
- * own FILE fact. */
+ * own FILE fact. A GAP_OPEN pairs with the first GAP_CLOSE of the same
+ * gap_id that follows it in record order; with none it never closes. */
 enum pgwt_cov_rec_kind {
     PGWT_COV_REC_FILE = 1,  /* a BOOT observation, b file_no, c 1 readable / 0 unreadable */
     PGWT_COV_REC_WATERMARK, /* a W, b floor_db, c floor_idle */
@@ -92,6 +95,7 @@ enum pgwt_cov_error {
     PGWT_COV_E_INVALID_WINDOW, /* from >= to */
     PGWT_COV_E_BAD_MODEL,      /* NULL arrays, or a boot whose records do not start with FILE */
     PGWT_COV_E_BUFFER_FULL,    /* more uncovered ranges than uncovered_cap */
+    PGWT_COV_E_SCRATCH_SMALL,  /* scratch_size below pgwt_cov_scratch_bytes(model) */
 };
 
 /* A1 item 2. */
@@ -118,11 +122,20 @@ struct pgwt_cov_result {
     size_t n_uncovered;
     int restart_cause;             /* enum pgwt_cov_restart */
     int excludes_in_flight;
+    void *scratch;                 /* caller's working storage for one call,
+                                      aligned as malloc's result is */
+    size_t scratch_size;
 };
 
-/* Fills *out (the caller sets uncovered/uncovered_cap first) and returns
- * out->verdict. floor_kind IDLE gives the separate Idle-row verdict: the
- * same rules with floor_idle in E_b, taint and holes. */
+/* Bytes of scratch one call over this model needs (O(boots + records +
+ * legacy ranges)); SIZE_MAX when the model is NULL or the size does not fit
+ * in size_t. Less, or a misaligned area, is error scratch_small. */
+size_t pgwt_cov_scratch_bytes(const struct pgwt_cov_model *model);
+
+/* Fills *out (the caller sets uncovered/uncovered_cap and scratch/
+ * scratch_size first) and returns out->verdict. floor_kind IDLE gives the
+ * separate Idle-row verdict: the same rules with floor_idle in E_b, taint
+ * and holes. */
 int pgwt_coverage_verdict(const struct pgwt_cov_model *model, int64_t from,
                           int64_t to, int64_t now, int floor_kind,
                           struct pgwt_cov_result *out);
