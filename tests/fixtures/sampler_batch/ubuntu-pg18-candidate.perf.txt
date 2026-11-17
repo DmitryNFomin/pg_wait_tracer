@@ -1,0 +1,18 @@
+     0.000 ( 0.764 ms): 13401 process_vm_readv(pid: 12764 (postgres), lvec: 0x5967f60448d0, liovcnt: 1024, rvec: 0x5967f604a8b0, riovcnt: 1024) = 148680
+     0.806 ( 0.300 ms): 13401 process_vm_readv(pid: 12764 (postgres), lvec: 0x5967f60488d0, liovcnt: 509, rvec: 0x5967f604e8b0, riovcnt: 509) = 74116
+     1.461 ( 0.403 ms): 13401 process_vm_readv(pid: 12765 (postgres), lvec: 0x5967f600b080, liovcnt: 511, rvec: 0x5967f600d080, riovcnt: 511) = 2044
+     2.324 ( 0.054 ms): 13401 openat(dfd: CWD, filename: 0xf9d3f30, flags: RDONLY|CLOEXEC)          = 51
+     2.407 ( 0.039 ms): 13401 close(fd: 51)                                                         = 0
+     2.471 ( 0.022 ms): 13401 openat(dfd: CWD, filename: 0x7ea921f0, flags: RDONLY|CLOEXEC)         = 51
+ Summary of events:
+
+ pg_wait_tracer (13401), 4157 events, 100.0%
+
+   syscall            calls  errors  total       min       avg       max       stddev
+                                     (msec)    (msec)    (msec)    (msec)        (%)
+   --------------- --------  ------ -------- --------- --------- ---------     ------
+   process_vm_readv      690      0   299.487     0.009     0.434     1.156      1.75%
+   openat               702    225    29.314     0.010     0.042     0.432      2.43%
+   close                688      0    20.069     0.006     0.029     0.252      2.28%
+
+

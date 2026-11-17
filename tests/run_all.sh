@@ -612,6 +612,7 @@ EOF
 LIVE_TESTS=(
     "test_evidence_capture_live|python3|test_evidence_capture_live.py"
     "test_lifecycle|bash|test_lifecycle.sh"
+    "test_sampler_batch_live|python3|test_sampler_batch_live.py"
     "test_init_hint_recovery|python3|test_init_hint_recovery.py"
     "test_counter_vector_live|python3|test_counter_vector_live.py"
     "test_counter_vector_phase_live|python3|test_counter_vector_phase_live.py"
@@ -717,6 +718,13 @@ if [[ $(id -u) -eq 0 ]] && pgrep -x postgres > /dev/null 2>&1; then
         fi
         if [[ -n "$min_pg" && -n "$PG_VERSION" && "$PG_VERSION" -lt "$min_pg" ]]; then
             exclude_test "$name" "needs PostgreSQL >= $min_pg, running PG$PG_VERSION"
+            continue
+        fi
+        # Status batching is qualified on PG13/17/18. Keep the unsupported
+        # PG14-16 cells outside this test's matrix, like the minimum-version
+        # exclusions above; they are not missing required-live coverage.
+        if [[ "$name" == "test_sampler_batch_live" && "$PG_VERSION" =~ ^(14|15|16)$ ]]; then
+            exclude_test "$name" "status batch needs PostgreSQL 13, 17 or 18; running PG$PG_VERSION"
             continue
         fi
         if [[ "$name" == "test_capture_smoke_full" ]]; then

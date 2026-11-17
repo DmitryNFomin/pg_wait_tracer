@@ -1,0 +1,19 @@
+     0.000 ( 0.048 ms): 12480 openat(dfd: CWD, filename: 0xdeb48e60)                                = 52
+     0.058 ( 0.018 ms): 12480 pread64(fd: 52, buf: 0x7fffdeb48e58, count: 8, pos: 104867596925952)  = 8
+     0.086 ( 0.012 ms): 12480 close(fd: 52)                                                         = 0
+     0.424 ( 0.209 ms): 12480 process_vm_readv(pid: 11796 (postgres), lvec: 0x64511f428a50, liovcnt: 508, rvec: 0x64511f42aa20, riovcnt: 508) = 2032
+     0.659 ( 0.021 ms): 12480 openat(dfd: CWD, filename: 0xd63d3f30, flags: RDONLY|CLOEXEC)         = 52
+     0.698 ( 0.011 ms): 12480 close(fd: 52)                                                         = 0
+ Summary of events:
+
+ pg_wait_tracer (12480), 11593 events, 100.0%
+
+   syscall            calls  errors  total       min       avg       max       stddev
+                                     (msec)    (msec)    (msec)    (msec)        (%)
+   --------------- --------  ------ -------- --------- --------- ---------     ------
+   process_vm_readv     3753      0  1270.154     0.126     0.338     2.598      0.70%
+   openat               918    225    37.579     0.007     0.041     0.129      1.70%
+   close                900      0    21.604     0.006     0.024     0.113      1.91%
+   pread64              225      0     6.254     0.010     0.028     0.096      2.60%
+
+

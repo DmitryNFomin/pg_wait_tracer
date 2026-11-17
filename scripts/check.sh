@@ -47,6 +47,22 @@ run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
 need node; need go; need python3
 
+# Sampled attribution: deterministic syscall budget and caught regressions.
+step "sampled attribution I/O budget and mutants"
+run python3 -B tests/test_sampled_attr_io.py
+# The live status-batch test's pure parts (perf summary parser, bounds) on outputs
+# recorded on the Ubuntu and EL8 gate images; the recorded master must assess RED.
+run python3 -B tests/test_sampler_batch_summary.py
+# Same portable C dispatch test as the box C tier, built outside the tree.
+if dispatch_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-sampler-dispatch-check.XXXXXX"); then
+    run python3 -B tests/build_sampler_dispatch.py --output "$dispatch_check_dir/test_sampler_dispatch"
+    run "$dispatch_check_dir/test_sampler_dispatch"
+    rm -rf "$dispatch_check_dir"
+else
+    echo "FAIL: cannot create sampler dispatch test directory"
+    fail=1
+fi
+
 step "watchpoint attach exit races (portable backend C harness)"
 run python3 -B tests/test_backend_attach_race.py --mutants
 run python3 -B tests/test_backend_exit_accounting.py

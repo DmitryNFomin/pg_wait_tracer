@@ -34,22 +34,25 @@ def find_postmaster(pg_version=None):
     Otherwise find the highest available version.
 
     A postmaster is a postgres process whose parent is NOT also postgres.
+    PGDG's EL packages start it as `postmaster` (exe .../bin/postgres), and
+    its children inherit that comm, so both names count on either side.
 
     Returns PID (int) or None.
     """
-    result = subprocess.run(["pgrep", "-x", "postgres"],
-                            capture_output=True, text=True)
-    if result.returncode != 0:
+    names = ("postgres", "postmaster")
+    pids = []
+    for name in names:
+        result = subprocess.run(["pgrep", "-x", name],
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            pids.extend(int(p) for p in result.stdout.split())
+    if not pids:
         return None
 
     best_pid = None
     best_ver = 0
 
-    for pid_str in result.stdout.strip().split('\n'):
-        if not pid_str:
-            continue
-        pid = int(pid_str)
-
+    for pid in sorted(set(pids)):
         # Skip children — a postmaster's parent is not postgres
         try:
             ppid = None
@@ -61,7 +64,7 @@ def find_postmaster(pg_version=None):
             if ppid is None:
                 continue
             parent_comm = open(f"/proc/{ppid}/comm").read().strip()
-            if parent_comm == "postgres":
+            if parent_comm in names:
                 continue
         except (FileNotFoundError, PermissionError, ValueError):
             continue
@@ -72,9 +75,9 @@ def find_postmaster(pg_version=None):
         except OSError:
             continue
 
-        m = re.search(r'postgresql/(\d+)/', exe)
+        m = re.search(r'postgresql/(\d+)/|pgsql-(\d+)/', exe)
         if m:
-            ver = int(m.group(1))
+            ver = int(m.group(1) or m.group(2))
         else:
             # Fallback: run postgres --version
             try:
