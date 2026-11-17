@@ -32,6 +32,12 @@
   require the expected nonzero exit code and any other failure fails the gate;
   outside that scope the test must pass normally.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#known-failing-invocations`)
+
+  Temporary entry `test_init_hint_recovery|933|ubuntu@6.8|exit=93` accepts only
+  the diagnosed churn K1/K2 classes, capped at `KNOWN_CLASS_CAP = 3` PIDs,
+  after the remaining checks and skipped-store control pass. Every other failure
+  stays red. Remove the entry and exception in the A2 PR (owner, #933 comment
+  6941834132: only until the needed PR lands).
 - Never commit locally generated PNGs to `tests/web_snapshots/`; baselines are
   regenerated only by CI's `snapshots` job.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#snapshot-provenance`)

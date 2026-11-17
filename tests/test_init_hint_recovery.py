@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -36,6 +37,11 @@ EXIT_CLASSES = {key: f"lifecycle_exit_before_attach_{key}_total" for key in
                 ("with_opportunity", "no_opportunity", "unknown")}
 DIAGNOSTIC_LINES = 40
 DIAGNOSTIC_WIDTH = 512
+# Temporary #933 regression tripwire. The lead sets this from a 20-run
+# measurement of master's churn arm (provenance to follow). The five observed
+# red runs had one known-class PID each. Remove with the A2 PR.
+KNOWN_CLASS_CAP = 3
+KNOWN_CLASS_EXIT = 93
 
 
 def print_failure_diagnostics(text, after, failing_pids=()):
@@ -157,6 +163,110 @@ def check_cohort(text, pids, short_lived, before, after):
     return attached, no_init, race, before_attach
 
 
+def classify_churn(text, deltas, pids, short_lived):
+    """Pure, fail-closed classification; validate every remaining cohort check.
+
+    Only the two complete measured signatures may be removed from the strict
+    cohort check. Counter reconciliation covers the entire daemon stream, so
+    an unrelated PID or an undiagnosed increment cannot hide behind them.
+    """
+    records = {prefix: {} for prefix in
+               ("INIT-LOST:", "WP-ATTACH-FAIL:", "EXIT-BEFORE-ATTACH:")}
+    for line in text.splitlines():
+        prefix = line.split(" ", 1)[0]
+        if prefix not in records:
+            continue
+        pairs = re.findall(r"(\w+)=([^ ]+)", line)
+        fields = dict(pairs)
+        if (len(pairs) != len(fields) or not fields.get("pid", "").isdigit()):
+            raise CohortFailure("partial or ambiguous diagnostic", set())
+        pid = int(fields["pid"])
+        records[prefix].setdefault(pid, []).append(fields)
+
+    retirement = retirement_diagnostics(text)
+    init_with = Counter(map(int, re.findall(
+        r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=0(?: |$)", text)))
+    k1 = set(retirement["with_opportunity"])
+    k2 = set(init_with)
+    known = k1 | k2
+    if not known <= pids & short_lived or k1 & k2:
+        raise CohortFailure("unknown or overlapping known-class outcome", known)
+    if len(known) > KNOWN_CLASS_CAP:
+        raise CohortFailure("known-class cap exceeded", known)
+
+    def exact(fields, expected, numeric=()):
+        return (all(fields.get(key) == value for key, value in expected.items()) and
+                all(fields.get(key, "").isdigit() for key in numeric))
+
+    for pid in known:
+        init = records["INIT-LOST:"].get(pid, [])
+        wp = records["WP-ATTACH-FAIL:"].get(pid, [])
+        retired = records["EXIT-BEFORE-ATTACH:"].get(pid, [])
+        valid = False
+        if pid in k1 and len(retired) == 1 and not init and not wp:
+            fields = retired[0]
+            valid = exact(fields, {
+                "opportunity": "with", "entry_present": "1", "bootstrap_armed": "1",
+                "post_arm_checked": "1", "addr_shared": "0", "resolve_errno": "0",
+                "shared_errno": "0", "counter_deltas_valid": "1",
+                "lifecycle_init_no_state_delta": "0", "wait_read_fail_delta": "0"})
+            valid = valid and bool(re.fullmatch(r"0x[0-9a-fA-F]+", fields.get("post_arm_ptr", "")))
+            valid = valid and int(fields["post_arm_ptr"], 16) > 0
+        elif pid in k2 and len(init) == len(wp) == 1 and not retired:
+            fields = init[0]
+            valid = exact(fields, {"clock": "CLOCK_MONOTONIC", "no_opportunity": "0",
+                                   "exit_ts_source": "record"},
+                          ("init_ts", "exit_ts", "last_sweep_start_ns", "batch_start_ns",
+                           "batch_records", "since_epoll_return_ns"))
+            valid = valid and 0 < int(fields["init_ts"]) < int(fields["exit_ts"])
+            valid = valid and exact(wp[0], {
+                "site": "watchpoint_open", "errno": "3", "resolve_errno": "0",
+                "liveness": "exiting", "liveness_result": "1", "liveness_errno": "0",
+                "exit_proof": "2"})
+        if not valid:
+            raise CohortFailure("missing, partial or duplicate known-class diagnostic", {pid})
+    attached = set(map(int, re.findall(r"INFO: PID (\d+) initialized \(", text)))
+    if known & attached:
+        raise CohortFailure("overlapping attached and known-class outcome", known & attached)
+    failures = attach_failure_pids(text)
+    if failures:
+        raise CohortFailure("watchpoint attach failure", failures)
+    for key, value in deltas.items():
+        if key.startswith("ringbuf_") and key.endswith("drops_total") and value != 0:
+            raise CohortFailure(f"{key} must be zero", set())
+    for key in (*ATTACH_COUNTERS[:1], *ATTACH_COUNTERS[2:],
+                "ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
+                "state_map_full_total", "init_state_read_fail_total"):
+        if deltas[key] != 0:
+            raise CohortFailure(f"{key} must be zero", set())
+    # Require exact agreement before subtracting any diagnosed outcome.
+    for key, count in ((EXIT_CLASSES["with_opportunity"], len(k1)),
+                       ("lifecycle_init_lost_with_opportunity_total", len(k2))):
+        if deltas[key] != count:
+            raise CohortFailure(f"{key} does not match known-class PIDs", known)
+    if deltas["lifecycle_init_lost_total"] != (
+            deltas["lifecycle_init_lost_with_opportunity_total"] +
+            deltas["lifecycle_init_lost_no_opportunity_total"]):
+        raise CohortFailure("INIT loss counters disagree", set())
+    remaining = dict(deltas)
+    for key, count in ((EXIT_BEFORE_ATTACH, len(k1)),
+                       (EXIT_CLASSES["with_opportunity"], len(k1)),
+                       ("lifecycle_init_lost_total", len(k2)),
+                       ("lifecycle_init_lost_with_opportunity_total", len(k2)),
+                       ("wp_attach_exit_race_total", len(k2))):
+        remaining[key] -= count
+    kept = []
+    for line in text.splitlines():
+        prefix = line.split(" ", 1)[0]
+        match = re.search(r"\bpid=(\d+)\b", line)
+        if prefix in records and match and int(match[1]) in known:
+            continue
+        kept.append(line)
+    check_cohort("\n".join(kept), pids - known, short_lived - known,
+                 dict.fromkeys(remaining, 0), remaining)
+    return {"K1": k1, "K2": k2}
+
+
 def ctl(directory):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(5)
@@ -274,6 +384,7 @@ def short_cohort():
 
 
 def run_arm(pm_pid, skip_store, churn=False):
+    known = {"K1": set(), "K2": set()}
     with tempfile.TemporaryDirectory(prefix="pgwt_init_hint_") as tmp:
         directory = Path(tmp)
         log = directory / "daemon.stderr"
@@ -326,6 +437,9 @@ def run_arm(pm_pid, skip_store, churn=False):
                     after["lifecycle_init_lost_with_opportunity_total"] +
                     after["lifecycle_init_lost_no_opportunity_total"]), after
                 assert hint_delta > 0, "no bootstrap INIT hint was actually suppressed"
+                if churn and not skip_store:
+                    known = classify_churn(text, {key: after[key] - before[key] for key in before
+                                                  if type(before[key]) is int}, pids, short_lived)
                 for key in ("ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
                             "state_map_full_total", "init_state_read_fail_total",
                             "wp_attach_failures_total"):
@@ -336,10 +450,11 @@ def run_arm(pm_pid, skip_store, churn=False):
                         error = AssertionError((key, after[key]))
                         error.pids = failing
                         raise error
-                for key in ("with_opportunity", "unknown"):
-                    if after[EXIT_CLASSES[key]] - before[EXIT_CLASSES[key]] != 0:
-                        raise CohortFailure(f"{key} retirement delta must be zero",
-                                            set(retirement_diagnostics(text)[key]))
+                if not (churn and not skip_store):
+                    for key in ("with_opportunity", "unknown"):
+                        if after[EXIT_CLASSES[key]] - before[EXIT_CLASSES[key]] != 0:
+                            raise CohortFailure(f"{key} retirement delta must be zero",
+                                                set(retirement_diagnostics(text)[key]))
                 attach_counts = Counter(int(pid) for pid in re.findall(r"INFO: PID (\d+) initialized \(", text))
                 attached = set(attach_counts)
                 pending = {int(pid) for pid in re.findall(r"fork detected PID (\d+), bootstrap watchpoint attached", text)}
@@ -353,10 +468,11 @@ def run_arm(pm_pid, skip_store, churn=False):
                     assert not ok and "lifecycle_init_lost_with_opportunity_total=" in detail, detail
                     assert pids - attached, "control attached everything despite discarding all INIT facts"
                 else:
-                    if after["lifecycle_init_lost_with_opportunity_total"] != 0:
-                        raise CohortFailure("with-opportunity INIT loss", set(map(int, re.findall(
-                            r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=0(?: |$)", text))))
-                    check_cohort(text, pids, short_lived, before, after)
+                    if not churn:
+                        if after["lifecycle_init_lost_with_opportunity_total"] != 0:
+                            raise CohortFailure("with-opportunity INIT loss", set(map(int, re.findall(
+                                r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=0(?: |$)", text))))
+                        check_cohort(text, pids, short_lived, before, after)
                     # Every attached member attaches once, including delayed hints.
                     for pid in pids & attached:
                         assert attach_counts[pid] == 1, pid
@@ -377,6 +493,20 @@ def run_arm(pm_pid, skip_store, churn=False):
                 raise
             finally:
                 stop(proc)
+    return known
+
+
+def run_arms(pm_pid):
+    run_arm(pm_pid, skip_store=False)
+    known = run_arm(pm_pid, skip_store=False, churn=True)
+    run_arm(pm_pid, skip_store=True)
+    count = len(known["K1"] | known["K2"])
+    if count:
+        print(f"KNOWN-CLASS #933 arm=churn K1={sorted(known['K1'])} "
+              f"K2={sorted(known['K2'])} count={count} cap={KNOWN_CLASS_CAP}")
+        return KNOWN_CLASS_EXIT
+    print("test_init_hint_recovery: PASS")
+    return 0
 
 
 def main():
@@ -386,11 +516,8 @@ def main():
     assert os.geteuid() == 0, "live test requires root"
     pm_pid = args.pid or find_postmaster()
     assert pm_pid, "PostgreSQL postmaster not found"
-    run_arm(pm_pid, skip_store=False)
-    run_arm(pm_pid, skip_store=False, churn=True)
-    run_arm(pm_pid, skip_store=True)
-    print("test_init_hint_recovery: PASS")
+    return run_arms(pm_pid)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
