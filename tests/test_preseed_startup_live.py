@@ -36,6 +36,8 @@ TRACER = ROOT / "pg_wait_tracer"
 TOLERANCE_NS = 75_000_000  # new test: scheduling/lock-release bracket allowance
 HOLD_SECONDS = 1.2
 SLEEP_SQL = "SELECT pg_sleep(0.3) /* pgwt616_first_statement */"
+CMD_START = 0xFFFFFFF6
+CMD_END = 0xFFFFFFF7
 
 READER = r'''
 #include "event_reader.h"
@@ -107,6 +109,22 @@ def until(proc, predicate, reason, seconds=15):
     raise AssertionError(reason)
 
 
+def command_spans(events):
+    """One pid's command windows; READER emits timestamp_ns as `end`."""
+    spans = []
+    start = None
+    for event in sorted(events, key=lambda e: e["end"]):
+        if event["event"] == CMD_START and start is None:
+            start = event["end"]
+        elif event["event"] == CMD_END and start is not None:
+            spans.append((start, event["end"]))
+            start = None
+    if start is not None:
+        # No close marker: retain the command through the captured tail.
+        spans.append((start, max(e["end"] for e in events)))
+    return spans
+
+
 def startup_duration(events, clocks):
     """Independent wall-clock brackets; never use product totals as truth."""
     send, armed, release_before, release_after = clocks
@@ -132,17 +150,28 @@ def startup_duration(events, clocks):
         "startup Lock duration starts outside escalation bracket", locks, clocks)
     assert release_before - TOLERANCE_NS <= end <= release_after + TOLERANCE_NS, (
         "startup Lock duration ends outside release bracket", locks, clocks)
+    assert all(end <= cmd_start or cmd_end <= start
+               for cmd_start, cmd_end in command_spans(events)), (
+        "startup Lock run must be command-closed", locks, command_spans(events))
     for event in locks:
-        assert event["query"] == 0 and not event["flags"] & 2, (
-            "startup Lock must be query-less and command-closed", event)
+        assert event["query"] == 0, (
+            "startup Lock must be query-less", event)
     return sum(e["duration"] for e in locks)
 
 
 def first_statement(events, query_id, sleep_event):
     sleeps = [e for e in events if e["event"] == sleep_event and e["duration"] > 0]
     assert sleeps and query_id != 0, "first pg_sleep statement has no wait/query witness"
-    assert all(e["query"] == query_id and e["flags"] & 2 for e in sleeps), (
+    locks = [e for e in events if e["event"] >> 24 == 3]
+    assert locks, "first pg_sleep statement has no startup Lock witness"
+    lock_end = max(e["end"] for e in locks)
+    spans = command_spans(events)
+    assert all(e["query"] == query_id for e in sleeps), (
         "first pg_sleep attributed to its statement", sleeps, query_id)
+    assert all(any(lock_end < start <= e["end"] - e["duration"]
+                   and e["end"] <= end for start, end in spans)
+               for e in sleeps), (
+        "first pg_sleep must lie inside a command starting after startup Lock", sleeps, spans)
 
 
 def host_checks():
@@ -153,54 +182,91 @@ def host_checks():
     lock = dict(event=0x03000001, end=2_255_000_000, duration=1_230_000_000,
                 query=0, flags=0)
     sleep = dict(event=0x09000001, end=2_600_000_000, duration=300_000_000,
-                 query=123, flags=2)
-    assert startup_duration([lock, sleep], clocks) == 1_230_000_000
-    first_statement([lock, sleep], 123, 0x09000001)
+                 query=123, flags=0)
+
+    def marker(kind, end):
+        return dict(event=kind, end=end, duration=0, query=0, flags=0)
+
+    # Like g3/g4: startup Lock, a short SET command, then the pg_sleep command.
+    set_start = marker(CMD_START, 2_270_000_000)
+    set_end = marker(CMD_END, 2_280_000_000)
+    cmd_start = marker(CMD_START, 2_290_000_000)
+    cmd_end = marker(CMD_END, 2_610_000_000)
+    events = [lock, set_start, set_end, cmd_start, sleep, cmd_end]
+    assert command_spans(events) == [(set_start["end"], set_end["end"]),
+                                     (cmd_start["end"], cmd_end["end"])]
+    assert startup_duration(events, clocks) == 1_230_000_000
+    first_statement(events, 123, 0x09000001)
+    open_events = events[:-1]
+    assert command_spans(open_events)[-1] == (cmd_start["end"], sleep["end"])
+    assert startup_duration(open_events, clocks) == 1_230_000_000
+    first_statement(open_events, 123, 0x09000001)
     split_clocks = (5528624706083, 5528649686083, 5529853069965, 5529854663041)
     first_lock = dict(event=0x03000000, end=5529617624997, duration=976_843_403,
                       query=0, flags=0)
     cpu = dict(event=0, end=5529617677334, duration=52_337, query=0, flags=0)
     second_lock = dict(event=0x03000000, end=5529854606858, duration=236_929_524,
                        query=0, flags=0)
-    assert startup_duration([first_lock, cpu, second_lock], split_clocks) == 1_213_772_927
+    split_tail = [marker(CMD_START, 5529856707746), marker(CMD_END, 5529856906765),
+                  marker(CMD_START, 5529857078624),
+                  dict(sleep, end=5530158157720, duration=300395399),
+                  marker(CMD_END, 5530158261821)]
+    split_events = [first_lock, cpu, second_lock, *split_tail]
+    assert startup_duration(split_events, split_clocks) == 1_213_772_927
+    first_statement(split_events, 123, 0x09000001)
     red = 0
-    for events, message in (([sleep], "startup Lock duration"),
-                            ([dict(lock, duration=1), sleep], "startup Lock duration"),
-                            ([dict(lock, query=123), sleep], "startup Lock must be query-less")):
+    for bad_events, message in (
+            (events[1:], "startup Lock duration"),
+            ([dict(lock, duration=1), *events[1:]], "startup Lock duration"),
+            ([dict(lock, query=123), *events[1:]], "startup Lock must be query-less"),
+            ([marker(CMD_START, lock["end"] - 1), lock, cmd_end],
+             "startup Lock run must be command-closed")):
         try:
-            startup_duration(events, clocks)
+            startup_duration(bad_events, clocks)
         except AssertionError as error:
             assert message in str(error), error
             red += 1
         else:
             raise AssertionError("duration/attribution control survived")
     long_gap = 10_000_001
-    for events, message in (
-            ([first_lock, dict(cpu, event=0x09000001), second_lock],
+    for bad_events, message in (
+            ([first_lock, dict(cpu, event=0x09000001), second_lock, *split_tail],
              "non-CPU record between Lock segments"),
             ([dict(first_lock, end=cpu["end"] - long_gap,
                    duration=first_lock["duration"] - (long_gap - cpu["duration"])),
-              dict(cpu, duration=long_gap), second_lock], "CPU gap exceeds 10 ms"),
+              dict(cpu, duration=long_gap), second_lock, *split_tail], "CPU gap exceeds 10 ms"),
             ([first_lock, cpu,
               dict(second_lock, end=second_lock["end"] - 1,
                    duration=second_lock["duration"] - 1),
-              dict(second_lock, duration=1)], "expected one or two completed Lock segments"),
-            ([first_lock, cpu, dict(second_lock, query=123)],
-             "startup Lock must be query-less")):
+              dict(second_lock, duration=1), *split_tail], "expected one or two completed Lock segments"),
+            ([first_lock, cpu, dict(second_lock, query=123), *split_tail],
+             "startup Lock must be query-less"),
+            # A command wholly in the CPU gap still overlaps the whole Lock run.
+            ([first_lock, marker(CMD_START, first_lock["end"] + 1),
+              marker(CMD_END, cpu["end"] - 1), cpu, second_lock, *split_tail],
+             "non-CPU record between Lock segments")):
         try:
-            startup_duration(events, split_clocks)
+            startup_duration(bad_events, split_clocks)
         except AssertionError as error:
             assert message in str(error), error
             red += 1
         else:
             raise AssertionError("split Lock control survived")
-    try:
-        first_statement([dict(sleep, query=0)], 123, 0x09000001)
-    except AssertionError as error:
-        assert "attributed to its statement" in str(error), error
-        red += 1
-    else:
-        raise AssertionError("first-statement attribution control survived")
+    span_message = "inside a command starting after startup Lock"
+    for bad_events, message in (
+            ([lock, cmd_start, dict(sleep, query=0), cmd_end], "attributed to its statement"),
+            ([lock, set_start, set_end, sleep], span_message),
+            ([marker(CMD_START, lock["end"] - 1), lock, sleep, cmd_end], span_message),
+            ([lock, dict(cmd_start, end=2_310_000_000), sleep, cmd_end], span_message),
+            ([lock, cmd_start, dict(cmd_end, end=2_590_000_000), sleep], span_message),
+            ([*events, dict(sleep, end=2_920_000_000)], span_message)):
+        try:
+            first_statement(bad_events, 123, 0x09000001)
+        except AssertionError as error:
+            assert message in str(error), error
+            red += 1
+        else:
+            raise AssertionError("first-statement attribution control survived")
     with tempfile.TemporaryDirectory(prefix="pgwt616-reader-host-") as temporary:
         reader = build_reader(Path(temporary))
         assert subprocess.run([str(reader)], capture_output=True).returncode == 2
@@ -213,7 +279,7 @@ def host_checks():
              contextlib.redirect_stdout(output):
             assert main() == 77
         assert output.getvalue().strip() == f"SKIP test_preseed_startup_live: requires PG17 (running PG{version})"
-    print(f"startup live oracle host: 3 positive, {red} red controls; decoder build PASS")
+    print(f"startup live oracle host: 6 positive, {red} red controls; decoder build PASS")
     print("startup live skip contract: PG13/PG18 exit 77 before capture PASS")
 
 
