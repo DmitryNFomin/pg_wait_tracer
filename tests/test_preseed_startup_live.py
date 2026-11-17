@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""PG17 unpublished status: deterministic startup lock, attribution and red controls.
+"""PG17 unpublished status: cold wait cache, startup lock and red controls.
 
 Linux/root command: sudo python3 tests/test_preseed_startup_live.py --pid PM_PID
 Other PG majors: SKIP test_preseed_startup_live: requires PG17 (exit 77).
 The live runner excludes those majors before invoking this test.
 --self-test exercises the duration/attribution oracle on any host; no BPF runs.
+Startup arms suppress sampler wait-address resolution (TEST ONLY, default off).
+Red C additionally disables preseed refresh: that same hold must roll back.
+Expected PG17 lines:
+PASS: PG17 cold-cache refresh, unpublished escalation, query-less startup Lock duration, first pg_sleep attribution
+PASS: red control A denied and fully rolled back
+PASS: red control B caught by startup Lock duration assertion
+PASS: red control C disabled refresh denied and fully rolled back
+test_preseed_startup_live: PASS (cold-cache startup hold, red controls A/B/C)
 
 Source ordering verified in PostgreSQL REL_17_STABLE:
 https://github.com/postgres/postgres/blob/REL_17_STABLE/src/backend/utils/init/postinit.c
@@ -279,8 +287,38 @@ def host_checks():
              contextlib.redirect_stdout(output):
             assert main() == 77
         assert output.getvalue().strip() == f"SKIP test_preseed_startup_live: requires PG17 (running PG{version})"
+    for label in ("startup", "failed-read", "skip-wait-seed", "disabled-refresh"):
+        with patch.dict(os.environ, {"PGWT_TEST_UNRELATED": "1"}):
+            env = arm_environment(label, Path("/tmp/selected-pid"))
+        assert "PGWT_TEST_UNRELATED" not in env
+        assert ("PGWT_TEST_SKIP_SAMPLER_WAIT_ADDR" in env) == (label != "failed-read")
+        assert ("PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH" in env) == (label == "disabled-refresh")
+        assert ("PGWT_TEST_PRESEED_READ_FAILURE_PID_FILE" in env) == (label == "failed-read")
+        assert ("PGWT_TEST_SKIP_UNPUBLISHED_WAIT_SEED" in env) == (label == "skip-wait-seed")
+    with patch.object(sys, "argv", ["test_preseed_startup_live.py", "--pid", "7"]), \
+         patch.object(sys, "platform", "linux"), patch.object(os, "geteuid", return_value=0), \
+         patch.object(subprocess, "check_output", return_value="170000"), \
+         patch(__name__ + ".build_reader", return_value=Path("/tmp/reader")), \
+         patch(__name__ + ".run_arm") as arm, contextlib.redirect_stdout(io.StringIO()):
+        assert main() == 0
+    assert [call.args[3] for call in arm.call_args_list] == [
+        "startup", "failed-read", "skip-wait-seed", "disabled-refresh"]
     print(f"startup live oracle host: 6 positive, {red} red controls; decoder build PASS")
     print("startup live skip contract: PG13/PG18 exit 77 before capture PASS")
+    print("startup live arm wiring: 4 isolated hook environments; PG17 runs startup and red controls A/B/C PASS")
+
+
+def arm_environment(label, selector):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
+    if label == "failed-read":
+        env["PGWT_TEST_PRESEED_READ_FAILURE_PID_FILE"] = str(selector)
+    if label == "skip-wait-seed":
+        env["PGWT_TEST_SKIP_UNPUBLISHED_WAIT_SEED"] = "1"
+    if label != "failed-read":
+        env["PGWT_TEST_SKIP_SAMPLER_WAIT_ADDR"] = "1"
+    if label == "disabled-refresh":
+        env["PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH"] = "1"
+    return env
 
 
 def run_arm(pm_pid, base, reader, label, tracer=TRACER):
@@ -293,11 +331,7 @@ def run_arm(pm_pid, base, reader, label, tracer=TRACER):
     relation = int(query("SELECT 'pg_catalog.pg_database'::regclass::oid")[0][0])
     selector = directory / "fail-pid"
     selector.write_text("0\n")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
-    if label == "failed-read":
-        env["PGWT_TEST_PRESEED_READ_FAILURE_PID_FILE"] = str(selector)
-    if label == "skip-wait-seed":
-        env["PGWT_TEST_SKIP_UNPUBLISHED_WAIT_SEED"] = "1"
+    env = arm_environment(label, selector)
     daemon = None
     lock_held = False
     pool = ThreadPoolExecutor(max_workers=1)
@@ -343,6 +377,8 @@ def run_arm(pm_pid, base, reader, label, tracer=TRACER):
                 # catalog relation lock and still exposes publication.
                 assert query(f"SELECT count(*) FROM pg_stat_get_activity(NULL) WHERE pid={pid}")[0][0] == "0", (
                     "startup waiter unexpectedly has a published status row", pid)
+                until(daemon, lambda: f"TEST ONLY skip sampler wait address PID {pid}" in log.read_text(),
+                      "sampler cold-cache hook did not reach startup PID")
             else:
                 worker = pool.submit(new_client, 5)
                 def established():
@@ -355,25 +391,35 @@ def run_arm(pm_pid, base, reader, label, tracer=TRACER):
             send = time.monotonic_ns()
             reply = request(directory, "escalate", duration_s=15, reason="manual")
             armed = time.monotonic_ns()
-            if label == "failed-read":
+            if label in ("failed-read", "disabled-refresh"):
+                control = "A" if label == "failed-read" else "C"
                 assert reply.get("ok") is False and reply.get("error") == (
                     "coherent exact preseed failed; escalation rolled back"), (
-                    "red control A: unavailable established attribution must deny escalation", reply)
+                    f"red control {control}: preseed must deny escalation", reply)
                 metrics = request(directory, "metrics")
                 assert metrics["tier"] == "sampled" and not metrics["escalation_active"], metrics
                 assert metrics["exact_probe_attached_mask"] == 0 and not metrics["exact_cpu_active"], metrics
                 assert metrics["exact_preseed_entries"] == metrics["exact_preseed_no_command_entries"] == 0, metrics
                 assert metrics["exact_preseed_failures_total"] == before["exact_preseed_failures_total"] + 1, metrics
                 assert metrics["escalation_windows_total"] == before["escalation_windows_total"], metrics
-                assert f"TEST ONLY forced attribution read failure PID {pid}" in log.read_text()
-                print("PASS: red control A denied and fully rolled back")
-                selector.write_text("0\n")
+                assert metrics["exact_preseed_wait_addr_refreshed_total"] == before["exact_preseed_wait_addr_refreshed_total"], metrics
+                if label == "failed-read":
+                    assert f"TEST ONLY forced attribution read failure PID {pid}" in log.read_text()
+                    print("PASS: red control A denied and fully rolled back")
+                    selector.write_text("0\n")
+                else:
+                    assert f"denied: cannot coherently preseed PID {pid}" in log.read_text()
+                    print("PASS: red control C disabled refresh denied and fully rolled back")
+                    clients.query(holder, "COMMIT")
+                    lock_held = False
                 worker.result(timeout=10)
                 return
             assert reply.get("ok") is True, ("startup escalation denied", reply)
             metrics = request(directory, "metrics")
             assert metrics["exact_preseed_unpublished_total"] >= before["exact_preseed_unpublished_total"] + 1, metrics
             assert request(directory, "status")["exact_preseed_unpublished_total"] == metrics["exact_preseed_unpublished_total"]
+            assert metrics["exact_preseed_wait_addr_refreshed_total"] >= before["exact_preseed_wait_addr_refreshed_total"] + 1, metrics
+            assert request(directory, "status")["exact_preseed_wait_addr_refreshed_total"] == metrics["exact_preseed_wait_addr_refreshed_total"]
             assert metrics["exact_preseed_failures_total"] == before["exact_preseed_failures_total"], metrics
             if label == "startup":
                 snapshot = request(directory, "open_intervals")
@@ -416,7 +462,7 @@ def run_arm(pm_pid, base, reader, label, tracer=TRACER):
                 names = json.loads((directory / "wait_event_names.json").read_text())
                 sleep_event = (9 << 24) | names["Timeout"].index("PgSleep")
                 first_statement(events, query_id, sleep_event)
-                print("PASS: PG17 unpublished escalation, query-less startup Lock duration, first pg_sleep attribution")
+                print("PASS: PG17 cold-cache refresh, unpublished escalation, query-less startup Lock duration, first pg_sleep attribution")
     except BaseException:
         if log.exists():
             print(log.read_text()[-16000:], file=sys.stderr, flush=True)
@@ -457,9 +503,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="pgwt616-startup-live-") as temporary:
         base = Path(temporary)
         reader = build_reader(base)
-        for label in ("startup", "failed-read", "skip-wait-seed"):
+        for label in ("startup", "failed-read", "skip-wait-seed", "disabled-refresh"):
             run_arm(pm_pid, base, reader, label, args.tracer.resolve())
-    print("test_preseed_startup_live: PASS (startup hold, red controls A/B)")
+    print("test_preseed_startup_live: PASS (cold-cache startup hold, red controls A/B/C)")
     return 0
 
 

@@ -717,7 +717,7 @@ void pgwt_bm_write(struct pgwt_backend_meta_writer *bm, pid_t pid, const struct 
 const char *pgwt_backend_type_name(enum pgwt_backend_type type) { (void)type; return "client"; }
 static void report_state_map_full(struct pgwt_daemon *d, pid_t pid)
 { (void)d; (void)pid; }
-static void seed_state_entry(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
+void pgwt_sampler_seed_state_entry(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
 { (void)d; (void)pid; (void)addr; }
 static int read_init_state(void *ctx, pid_t pid, struct pgwt_pid_state *state)
 { (void)ctx; (void)pid; memset(state, 0, sizeof(*state)); return 0; }
@@ -1527,6 +1527,21 @@ static void test_retry_and_idle(int major)
     release_daemon(d);
 }
 
+static void test_preseed_cold_wait_hook(void)
+{
+    struct pgwt_daemon *d = new_daemon(17);
+    struct pgwt_backend *be = alloc_backend(&d->backends, 1000, false);
+    wait_addr = test_wait(17, 0);
+    CHECK(setenv("PGWT_TEST_SKIP_SAMPLER_WAIT_ADDR", "1", 1) == 0, "enable cold wait cache hook");
+    CHECK(sample_registry(d, clock_ns) == 0 && be->wp_addr == 0 &&
+          be->sampled_reader.pid == 1000,
+          "cold wait cache hook preserves enrollment and prevents sampler resolution");
+    CHECK(unsetenv("PGWT_TEST_SKIP_SAMPLER_WAIT_ADDR") == 0, "disable cold wait cache hook");
+    CHECK(sample_registry(d, clock_ns + 1) == 1 && be->wp_addr == wait_addr,
+          "sampler resolves cold wait cache normally with test hook off");
+    release_daemon(d);
+    puts("preseed cold wait cache hook: enrolled, unresolved while enabled, default resolution restored PASS");
+}
 #endif
 static void test_pg13_retirement(void)
 {
@@ -1623,6 +1638,7 @@ int main(int argc, char **argv)
         test_pg13_pending_backend_id_known_base(); test_pg13_rejected_computed_hint();
 #ifdef PGWT_LIFECYCLE_SOURCE
         test_pg13_registry(); test_pg13_recovery();
+        test_preseed_cold_wait_hook();
 #endif
         for (int i = 0; i < 3; i++) {
         const int major[] = {13,17,18};

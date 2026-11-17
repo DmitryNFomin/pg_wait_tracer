@@ -999,6 +999,7 @@ static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
     snprintf(path, sizeof(path), "/proc/%d/stat", be->pid);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     int pinned = fd >= 0 ? fd : -errno;
+    uint64_t refreshed_wait_addr = 0;
     int proof = pgwt_backend_no_command_fd(pinned, d->postmaster_pid);
     if (proof == 0 && d->backend_status_layout.major == 13 &&
         be->meta_parsed && be->meta.backend_type == PGWT_BT_CLIENT)
@@ -1015,6 +1016,22 @@ static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
                                         &d->backend_status_layout, &row);
         if (test_preseed_read_failure(be->pid))
             rc = PGWT_PGBS_PRESEED_FAILED;
+        uint64_t wait_addr = 0;
+        if (rc == PGWT_PGBS_PRESEED_UNPUBLISHED && pin_ok) {
+            wait_addr = be->wp_addr;
+            if (!wait_addr || pgwt_addr_is_shared(be->pid, wait_addr) != 1) {
+                /* TEST ONLY, default off: red control for the cold-cache
+                 * startup-lock hold. Never wait for a sampler tick here. */
+                wait_addr = getenv("PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH") ? 0 :
+                    pgwt_resolve_backend_wait_addr(d, be->pid);
+                if (wait_addr && pgwt_addr_is_shared(be->pid, wait_addr) == 1)
+                    refreshed_wait_addr = wait_addr;
+                else
+                    wait_addr = 0;
+            }
+        }
+        /* Resolution and mapping validation above are covered by this final
+         * identity check. Do not publish a cache entry before it succeeds. */
         int after = pgwt_backend_no_command_fd(pinned, d->postmaster_pid);
         if (pin_ok)
             pin_ok = pgwt_pgbs_preseed_pin(pinned, &after_pin) == 0 &&
@@ -1026,7 +1043,7 @@ static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
                  !pgwt_pgbs_state_is_cmd_open(&d->backend_status_layout, row.state))
             proof = 4;
         else if (rc == PGWT_PGBS_PRESEED_UNPUBLISHED && pin_ok &&
-                 be->wp_addr && pgwt_addr_is_shared(be->pid, be->wp_addr) == 1)
+                 wait_addr)
             proof = 7;
         else if (d->backend_status_layout.major >= 14 &&
                  rc == PGWT_PGBS_PRESEED_ROW && row.databaseid && row.userid &&
@@ -1049,6 +1066,12 @@ static int seed_no_command(struct pgwt_daemon *d, struct pgwt_backend *be,
     if (bpf_map_update_elem(bpf_map__fd(d->skel->maps.exact_seed_map),
                             &key, &seed, BPF_ANY) != 0)
         return -1;
+    if (proof == 7 && refreshed_wait_addr) {
+        be->wp_addr = refreshed_wait_addr;
+        be->wp_addr_shared = 1;
+        pgwt_sampler_seed_state_entry(d, be->pid, be->wp_addr);
+        d->counters.exact_preseed_wait_addr_refreshed_total++;
+    }
     d->counters.exact_preseed_no_command_total++;
     if (proof == 1) d->counters.exact_preseed_gone_total++;
     if (proof == 2) d->counters.exact_preseed_exiting_total++;

@@ -670,13 +670,17 @@ PRESEED_HARNESS = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-struct pg_wait_tracer_bpf { struct { void *exact_seed_map, *exact_attr_map; } maps; };
+struct pg_wait_tracer_bpf { struct { void *exact_seed_map, *exact_attr_map, *state_map; } maps; };
 static struct pgwt_daemon d;
 static struct pgwt_exact_seed stored;
 static int have_seed, map_failure, stat_reads, stat_opens, mem_reads, first_read_fail;
 static int scenario, stat_closed, mem_closed, edge_present, mem_opens, wait_shared;
 static unsigned start_change_on_read;
 static unsigned checks;
+static uint64_t resolved_wait_addr;
+static int resolve_calls, fresh_wait_shared, reuse_on_resolve;
+static int state_updates, have_state, state_failure;
+static struct pgwt_pid_state wait_state;
 enum { NORMAL, LIVE, GONE, ZOMBIE, DEAD, EXITING, EXITING_VSIZE, NULL_ENTRY,
        STARTUP, EIO_READ, ZERO_READ, TORN, WRONG_PID, ZERO_PID, DB_ONLY,
        USER_ONLY, STARTUP_OPEN, UNKNOWN, REUSED, BAD_STAT, MEM_ESRCH, MEM_EPERM,
@@ -772,7 +776,8 @@ static ssize_t fake_pread(int fd, void *buf, size_t size, off_t offset)
 #define open fake_open
 #define close fake_close
 #define pread fake_pread
-static int bpf_map__fd(void *map) { return map == d.skel->maps.exact_seed_map ? 1 : 2; }
+static int bpf_map__fd(void *map) { return map == d.skel->maps.exact_seed_map ? 1 :
+    map == d.skel->maps.state_map ? 3 : 2; }
 static int bpf_map_lookup_elem(int fd, const void *key, void *out)
 {
     CHECK(*(const uint32_t *)key == 42, "map pid key");
@@ -784,8 +789,16 @@ static int bpf_map_lookup_elem(int fd, const void *key, void *out)
     return -1;
 }
 #define BPF_ANY 0
+#define BPF_NOEXIST 1
 static int bpf_map_update_elem(int fd, const void *key, const void *value, int flags)
 {
+    if (fd == 3) {
+        CHECK(*(const uint32_t *)key == 42 && flags == BPF_NOEXIST, "idempotent wait state seed");
+        ++state_updates;
+        if (have_state) { errno = EEXIST; return -1; }
+        if (state_failure) { errno = ENOSPC; return -1; }
+        memcpy(&wait_state, value, sizeof(wait_state)); have_state = 1; return 0;
+    }
     CHECK(fd == 1 && *(const uint32_t *)key == 42 && flags == BPF_ANY, "seed map update");
     if (map_failure) return -1;
     memcpy(&stored, value, sizeof(stored)); have_seed = 1; return 0;
@@ -800,7 +813,17 @@ static int bpf_map_delete_elem(int fd, const void *key)
 { CHECK(fd == 1 && *(const uint32_t *)key == 42, "delete generation seed"); have_seed = 0; return 0; }
 static uint64_t mono_ns(void) { return 100; }
 int pgwt_addr_is_shared(pid_t pid, uint64_t addr)
-{ CHECK(pid == 42 && addr == 0x5000, "wait address belongs to backend"); return wait_shared; }
+{
+    CHECK(pid == 42 && (addr == 0x5000 || addr == 0x6000), "wait address belongs to backend");
+    return addr == 0x6000 ? fresh_wait_shared : wait_shared;
+}
+uint64_t pgwt_resolve_backend_wait_addr(struct pgwt_daemon *ctx, pid_t pid)
+{
+    CHECK(ctx == &d && pid == 42, "resolve original backend once");
+    ++resolve_calls;
+    if (reuse_on_resolve) start_change_on_read = (unsigned)stat_reads + 2;
+    return resolved_wait_addr;
+}
 static int get_config(struct pgwt_daemon *ctx, struct pgwt_exact_config *cfg)
 { (void)ctx; *cfg = (struct pgwt_exact_config){.generation=9, .attach_boundary_ns=90}; return 0; }
 struct pgwt_backend *pgwt_find_backend(struct pgwt_backend_table *table, pid_t pid)
@@ -841,7 +864,7 @@ static struct pgwt_pgbs_mapping pg13_main_mapping(pid_t pid, const struct PgBack
 @FUNCTIONS@
 static void reset(int test, int major)
 {
-    static struct pg_wait_tracer_bpf skel = {.maps={.exact_seed_map=(void *)1, .exact_attr_map=(void *)2}};
+    static struct pg_wait_tracer_bpf skel = {.maps={.exact_seed_map=(void *)1, .exact_attr_map=(void *)2, .state_map=(void *)3}};
     memset(&d, 0, sizeof(d)); memset(&stored, 0, sizeof(stored));
     d.skel = &skel; d.postmaster_pid = 7; d.my_be_entry_addr = 0x1000;
     d.backends.count = 1;
@@ -865,6 +888,8 @@ static void reset(int test, int major)
     l->st_activity_raw=(struct pgwt_pgbs_field){.offset=32,.width=8,.present=true};
     start_change_on_read = 0;
     mem_opens=0; wait_shared=1;
+    resolved_wait_addr=0; resolve_calls=0; fresh_wait_shared=1; reuse_on_resolve=0;
+    state_updates=have_state=state_failure=0; memset(&wait_state, 0, sizeof(wait_state));
     scenario=test; have_seed=map_failure=stat_reads=stat_opens=mem_reads=stat_closed=mem_closed=edge_present=0;
     first_read_fail = test == LIVE || test == GONE || test == ZOMBIE || test == DEAD ||
         test == EXITING || test == EXITING_VSIZE || test == UNKNOWN || test == REUSED ||
@@ -1141,6 +1166,84 @@ int main(void)
               "post-boundary exact edge remains authoritative");
     }
     retirement_seeds();
+    /* UNPUBLISHED only: zero and stale-private caches, no sampler tick. */
+    for (int major=14; major<=17; ++major) {
+        for (int stale=0; stale<=1; ++stale) {
+            reset(UNPUBLISHED, major);
+            struct pgwt_backend *be = &d.backends.entries[0];
+            be->wp_addr = stale ? 0x5000 : 0;
+            be->wp_addr_shared = stale ? 0 : -1; wait_shared=0;
+            resolved_wait_addr=0x6000;
+            CHECK(pgwt_exact_seed_all(&d, 9) == 0 && have_seed &&
+                  stored.query_id == 0 && !stored.cmd_open &&
+                  d.counters.exact_preseed_unpublished_total == 1,
+                  "refresh preserves unpublished proof 7");
+            CHECK(be->wp_addr == 0x6000 && be->wp_addr_shared == 1,
+                  "refreshed shared wait address stored");
+            CHECK(resolve_calls == 1 && state_updates == 1 && have_state &&
+                  wait_state.wait_event_addr == 0x6000 && wait_state.last_ts == 100 &&
+                  !wait_state.last_event && !wait_state.last_query_id &&
+                  d.counters.exact_preseed_wait_addr_refreshed_total == 1,
+                  "refresh seeds state and counts once");
+        }
+    }
+    for (int stale=0; stale<=1; ++stale) {
+        for (int failure=0; failure<5; ++failure) {
+            reset(UNPUBLISHED, 17);
+            struct pgwt_backend *be = &d.backends.entries[0];
+            uint64_t original = stale ? 0x5000 : 0;
+            int original_shared = stale ? 0 : -1;
+            be->wp_addr=original; be->wp_addr_shared=original_shared; wait_shared=0;
+            resolved_wait_addr = failure == 0 ? 0 : 0x6000;
+            fresh_wait_shared = failure == 1 ? 0 : failure == 2 ? -1 : 1;
+            reuse_on_resolve = failure == 3;
+            map_failure = failure == 4;
+            CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed,
+                  failure == 1 ? "fresh private wait address denied" :
+                  failure == 3 ? "pid reused during refresh denied" : "failed refresh denied");
+            CHECK(be->wp_addr == original && be->wp_addr_shared == original_shared,
+                  "failed refresh leaves cached address untouched");
+            CHECK(resolve_calls == 1 && !state_updates && !have_state &&
+                  d.counters.exact_preseed_wait_addr_refreshed_total == 0 &&
+                  d.counters.exact_preseed_unpublished_total == 0 &&
+                  be->exact_unpublished_generation == 0,
+                  "failed refresh publishes no state or counter");
+        }
+    }
+    /* Existing state must survive the idempotent shared seed helper. */
+    reset(UNPUBLISHED, 17); d.backends.entries[0].wp_addr=0;
+    resolved_wait_addr=0x6000; have_state=1;
+    wait_state=(struct pgwt_pid_state){.wait_event_addr=0x5000,.last_event=7,.last_query_id=456};
+    CHECK(pgwt_exact_seed_all(&d, 9) == 0 && state_updates == 1 &&
+          wait_state.wait_event_addr == 0x5000 && wait_state.last_event == 7 &&
+          wait_state.last_query_id == 456 && d.counters.state_map_full_total == 0,
+          "refresh state seed preserves captured state");
+    reset(UNPUBLISHED, 17); d.backends.entries[0].wp_addr=0;
+    resolved_wait_addr=0x6000; state_failure=1;
+    CHECK(pgwt_exact_seed_all(&d, 9) == 0 && d.counters.state_map_full_total == 1 &&
+          d.state_map_full_logged && !have_state,
+          "refresh preserves sampler seed capacity diagnostics");
+    reset(UNPUBLISHED, 17); d.backends.entries[0].wp_addr=0;
+    resolved_wait_addr=0x6000;
+    setenv("PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH", "1", 1);
+    CHECK(pgwt_exact_seed_all(&d, 9) != 0 && !have_seed && !resolve_calls &&
+          d.backends.entries[0].wp_addr == 0 && !state_updates,
+          "disabled refresh rolls back cold startup red control C");
+    unsetenv("PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH");
+    for (int major=13; major<=18; major+=5) {
+        int cases[] = {UNPUBLISHED, NORMAL, STARTUP, NULL_ENTRY, EIO_READ};
+        for (unsigned i=0; i<sizeof(cases)/sizeof(cases[0]); ++i) {
+            reset(cases[i], major); d.backends.entries[0].wp_addr=0;
+            resolved_wait_addr=0x6000;
+            int result = pgwt_exact_seed_all(&d, 9);
+            CHECK((result == 0) == (cases[i] != UNPUBLISHED && cases[i] != EIO_READ),
+                  "PG13 PG18 preseed result unchanged with cold cache");
+            CHECK(!resolve_calls && !state_updates && d.backends.entries[0].wp_addr == 0 &&
+                  d.counters.exact_preseed_wait_addr_refreshed_total == 0,
+                  "PG13 PG18 never refresh wait address");
+        }
+    }
+    puts("wait address refresh: zero/stale cache, zero/private/unreadable, PID reuse, map failure, PG13/PG18 controls PASS");
     for (int major=14; major<=17; major++) {
         reset(UNPUBLISHED, major);
         CHECK(pgwt_exact_seed_all(&d, 9) == 0 && have_seed &&
@@ -1152,6 +1255,9 @@ int main(void)
               d.exact_probes.preseed_no_command == 1 &&
               d.backends.entries[0].exact_unpublished_generation == 9,
               "unpublished proof counted with generation marker");
+        CHECK(!resolve_calls && !state_updates &&
+              d.counters.exact_preseed_wait_addr_refreshed_total == 0,
+              "shared cached wait address does not refresh");
     }
     deny(UNPUBLISHED, 13, "PG13 unpublished proof forbidden");
     deny(UNPUBLISHED, 18, "PG18 unpublished proof forbidden");
@@ -1230,6 +1336,7 @@ def preseed_cases(mutants):
     cmdline = (ROOT / "src/cmdline.c").read_text()
     functions = "\n\n".join([
         extract(cmdline, "pgwt_backend_no_command_fd"),
+        extract((ROOT / "src/sampler.c").read_text(), "pgwt_sampler_seed_state_entry"),
         *(extract(pgbs, n) for n in ("pread_exact", "read_entry_pointer_fd", "read_field_value", "read_snapshot_fd",
             "open_mem", "pgwt_pgbs_state_is_cmd_open", "snapshot_untorn",
             "snapshot_coherent_identity", "snapshot_usable", "pgwt_pgbs_derive_sampled_attr",
@@ -1244,17 +1351,26 @@ def preseed_cases(mutants):
                     "exact_preseed_exiting_total", "exact_preseed_null_entry_total",
                     "exact_preseed_startup_total", "exact_preseed_retired_zero_total",
                     "exact_preseed_unpublished_total", "exact_preseed_reread_total",
+                    "exact_preseed_wait_addr_refreshed_total",
                     "exact_preseed_retired_other_pid_total", "exact_preseed_failures_total",
                     "exact_preseed_overwrite_refusals_total", "exact_preseed_late_attach_failures_total"):
         assert f'cjson_add_uint64(root, "{counter}", ctr->{counter});' in control, counter
+    assert 'cjson_add_uint64(root, "exact_preseed_wait_addr_refreshed_total", d->counters.exact_preseed_wait_addr_refreshed_total);' in control
     assert '"exact_preseed_no_command_entries"' in control
     assert 'd->exact_probes.preseed_generation == d->escalation.generation' in control
     variants = [("preseed_baseline", functions, None)]
     if mutants:
         mutations = [
-            ("m1_FAILED_as_UNPUBLISHED", "rc == PGWT_PGBS_PRESEED_UNPUBLISHED && pin_ok",
-             "(rc == PGWT_PGBS_PRESEED_UNPUBLISHED || rc == PGWT_PGBS_PRESEED_FAILED) && pin_ok",
+            ("m1_FAILED_as_UNPUBLISHED", "if (test_preseed_read_failure(be->pid))\n            rc = PGWT_PGBS_PRESEED_FAILED;",
+             "if (test_preseed_read_failure(be->pid))\n            rc = PGWT_PGBS_PRESEED_UNPUBLISHED;",
              "FAIL established pg_sleep read failure rolls back red control A"),
+            ("refresh_drop_shared_check", "if (wait_addr && pgwt_addr_is_shared(be->pid, wait_addr) == 1)",
+             "if (wait_addr)", "FAIL fresh private wait address denied"),
+            ("refresh_prove_without_storing", "be->wp_addr = refreshed_wait_addr;",
+             "(void)refreshed_wait_addr;", "FAIL refreshed shared wait address stored"),
+            ("refresh_store_before_final_pin", "refreshed_wait_addr = wait_addr;",
+             "refreshed_wait_addr = be->wp_addr = wait_addr;",
+             "FAIL failed refresh leaves cached address untouched"),
             ("m2_drop_unpublished_pid_zero", "snapshot->procpid == 0 && unpublished_slot(pid, base, layout)",
              "unpublished_slot(pid, base, layout)", "FAIL unpublished cannot name another pid"),
             ("m3_drop_unpublished_mapping_stride", "unpublished_slot(pid, base, layout)",
@@ -1529,6 +1645,7 @@ def live_churn(args):
                               "exact_preseed_retired_zero_total", "exact_preseed_retired_other_pid_total",
                               "exact_preseed_unpublished_total")
             counters = ("exact_preseed_no_command_total", "exact_preseed_failures_total",
+                        "exact_preseed_wait_addr_refreshed_total",
                         "escalation_windows_total", "escalation_denied_total", *proof_counters)
             summaries = []
             with tempfile.TemporaryDirectory(prefix="pgwt616-churn-") as tmp:

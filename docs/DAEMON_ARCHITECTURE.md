@@ -445,10 +445,28 @@ PG13/PG18, torn or failed reads, off-stride pointers and unknown identity
 never qualify. `exact_preseed_unpublished_total` counts successful proof seeds
 in both `metrics` and `status`. This seeds command/query attribution only;
 `preseed_state_map` still seeds the actual in-flight startup wait independently.
+If the cached wait address is missing or not shared, preseed calls the existing
+resolver once, without waiting for sampling. The fresh address must be nonzero
+and shared before the final pinned identity check. Only after that check and
+the exact seed write succeed is the address saved in the backend cache with
+shared classification and the sampler's idempotent state-map seed. This lets
+the following watchpoint attachment include the backend. The counter
+`exact_preseed_wait_addr_refreshed_total` counts these successful refreshes in
+both `metrics` and `status`; failed/private/unreadable pointers remain denials.
+PG13 and PG18 never enter this refresh path.
 If the fallback instead finds an own-pid row with database/user context and a
 closed command, the coherent reader is retried exactly once (PG14+).
 `exact_preseed_reread_total` counts these attempts, including failed attempts;
 failure still rolls the generation back. Neither path changes wait seeding order.
+
+`tests/test_preseed_startup_live.py` holds a PG17 startup backend on the
+`pg_database` lock. Its TEST ONLY environment hooks are default off:
+`PGWT_TEST_SKIP_SAMPLER_WAIT_ADDR` prevents sampler resolution of zero-address
+backends (logging each skipped PID), while
+`PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH` disables the one-shot refresh for
+the matching rollback control. Both activate only when set. The test checks
+refresh counters, query-less startup wait duration and first-statement
+attribution, retaining failed-attribution and skipped-wait-seed controls.
 
 PG13 clients also qualify when a coherent, complete row
 previously accepted by the sampler for that pid incarnation now names zero or
