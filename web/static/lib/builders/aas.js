@@ -117,7 +117,8 @@ export function buildAasOption(data, opts) {
         });
         seriesDefs = order.map(o => ({
             name: o.name,
-            data: buckets.map(b => [nsToMs(b.t), +(b.aas[o.idx] || 0).toFixed(4)]),
+            data: buckets.map(b => [b?.t == null ? null : nsToMs(b.t),
+                b?.aas?.[o.idx] == null ? null : +b.aas[o.idx].toFixed(4)]),
         }));
         // Identity-keyed color: a deterministic tint of the class hue (U1
         // color service) — same event, same color, in every view, every tick.
@@ -136,10 +137,11 @@ export function buildAasOption(data, opts) {
         // classes. Conservation (T8, #187): a bucket's 'offcpu' key is 0 (not
         // absent) wherever no measured cpu_ns exists — sampled windows and a
         // tier switch mid-window both fall out of this same per-bucket sum
-        // with no special-casing, so the stack never silently under-totals.
+        // with no special-casing. Missing keys remain gaps, never measured zero.
         seriesDefs = AAS_CLASS_ORDER.map(wc => ({
             name: wc.label,
-            data: buckets.map(b => [nsToMs(b.t), +(b[wc.key] || 0).toFixed(4)]),
+            data: buckets.map(b => [b?.t == null ? null : nsToMs(b.t),
+                b?.[wc.key] == null ? null : +b[wc.key].toFixed(4)]),
         }));
         seriesColors = AAS_CLASS_ORDER.map(c => c.color);
         seriesIds = AAS_CLASS_ORDER.map(() => null);   // class drills go by name
@@ -152,8 +154,8 @@ export function buildAasOption(data, opts) {
     // Fallback extent when no window is supplied (Node tests, degenerate
     // callers): the bucket span, or a 1 ms placeholder for empty data (the
     // empty state is never mounted — views clear the chart instead).
-    const xMinNs = buckets.length ? buckets[0].t : 0;
-    const xMaxNs = buckets.length ? buckets[buckets.length - 1].t : NS_PER_MS;
+    const xMinNs = buckets.find(b => b?.t != null)?.t ?? 0;
+    const xMaxNs = buckets.findLast(b => b?.t != null)?.t ?? NS_PER_MS;
     const win = opts.win || { from: xMinNs, to: xMaxNs };
 
     // Pinned axis extent = (opts.axis ∪ win). U0's clamp-to-last-bucket-start
@@ -173,6 +175,7 @@ export function buildAasOption(data, opts) {
         areaStyle: { opacity: 0.85 },
         lineStyle: { width: 1 },
         symbol: 'none',
+        connectNulls: false,
         emphasis: { disabled: true },
         color: seriesColors[i],
         // U2 (P3 wire 1): since ECharts 5.2.2 triggerLineEvent packs event
