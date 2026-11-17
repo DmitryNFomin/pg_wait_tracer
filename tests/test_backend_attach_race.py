@@ -38,13 +38,9 @@ struct pg_wait_tracer_bpf { struct { void *on_watchpoint, *on_bootstrap; } progs
 static struct pgwt_daemon d;
 static int attempts, enables, closes, stat_opens, stat_closes, stat_reads;
 static int target_state, operation_failed, enable_failure, open_error, anchor_error;
-<<<<<<< ours
-static int resolve_ready, direct_inits, replacement, allocation_failure, shared_result, shared_error;
+static int resolve_ready, direct_inits, replacement, allocation_failure, shared_result, shared_error, seed_failure;
 static int resolve_error, diagnostic_count, failure_reads, proof_state;
 static char diagnostic[1024];
-=======
-static int resolve_ready, direct_inits, replacement, seed_failure;
->>>>>>> theirs
 static int pinned_generation[32];
 enum { LIVE, GONE, ZOMBIE, FOREIGN, UNKNOWN, MALFORMED, REUSED, EXITING,
        EXITING_VSIZE, ZERO_VSIZE, INCOMPLETE, EMPTY_STAT, DEAD };
@@ -212,15 +208,10 @@ static void reset(int state)
     d.skel = &skel; d.postmaster_pid = 7; d.my_wait_ptr_addr = 1234;
     d.debug_dump_state = true;
     attempts = enables = closes = stat_opens = stat_closes = stat_reads = 0;
-<<<<<<< ours
     operation_failed = enable_failure = anchor_error = resolve_ready = direct_inits = replacement = allocation_failure = 0;
+    seed_failure = 0;
     open_error = ESRCH; target_state = state; shared_result = 1; shared_error = 0;
     resolve_error = EFAULT; failure_reads = 0; proof_state = -1; diagnostic_count = 0; diagnostic[0] = '\0';
-=======
-    operation_failed = enable_failure = anchor_error = resolve_ready = direct_inits = replacement = 0;
-    seed_failure = 0;
-    open_error = ESRCH; target_state = state;
->>>>>>> theirs
 }
 static void check_counts(int state, int error)
 {
@@ -353,7 +344,6 @@ int main(void)
     CHECK(pgwt_attach_backend_watchpoint(&d, &be) == 0, "successful attach");
     CHECK(d.counters.wp_attach_failures_total == 0 && d.counters.wp_attach_exit_race_total == 0 &&
           stat_opens == stat_closes, "success closes identity without failure counts");
-<<<<<<< ours
     CHECK(be.init_attached, "shared helper retains completed attachment");
     CHECK(diagnostic_count == 0 && stat_reads == 0 &&
           d.counters.wp_attach_failures_live_total == 0 &&
@@ -387,14 +377,12 @@ int main(void)
     old->wp_attach_exit_race = true; /* startup scan: no state, no EXIT before reuse */
     CHECK(pgwt_handle_fork(&d, 42) == -1 && d.counters.wp_attach_failures_total == 1 &&
           attempts == 0, "live reused PID conflicting with startup race is counted");
-=======
     reset(LIVE); enable_failure = 2; seed_failure = -1;
     d.exact_probes.core.generation = 9;
     be = (struct pgwt_backend){.pid=42, .wp_addr=1234, .wp_fd=-1};
     CHECK(pgwt_attach_backend_watchpoint(&d, &be) == 0 &&
           d.counters.exact_preseed_late_attach_failures_total == 1,
           "late attach caller checks and counts seed refusal");
->>>>>>> theirs
     puts("missing/unknown identity, validation refusal, direct fallback and success: PASS");
     return 0;
 }
@@ -662,11 +650,8 @@ def main():
                 print(result.stdout, end="")
                 print(result.stderr, end="")
                 assert result.returncode == 0, result
-<<<<<<< ours
     check_bounded_failure_output()
-=======
     preseed_cases(args.mutants)
->>>>>>> theirs
     print("test_backend_attach_race: PASS")
 
 

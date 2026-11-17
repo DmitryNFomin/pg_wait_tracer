@@ -239,7 +239,8 @@ def main():
             cfile.write_text(harness)
             command = [*shlex.split(os.environ.get("CC", "cc")), "-std=c11",
                        "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT / "src"),
-                       "-I" + str(ROOT / "include"), str(cfile),
+                       "-I" + str(ROOT / "include"),
+                       *shlex.split(os.environ.get("CFLAGS", "")), str(cfile),
                        str(ROOT / "src/backend_init.c"), "-o", str(binary)]
             subprocess.run(command, check=True)
             print(f"{name}: portable C build PASS", flush=True)

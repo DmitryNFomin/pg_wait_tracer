@@ -263,7 +263,9 @@ int main(int argc, char **argv) {
 }
 ''')
         command = shlex.split(os.environ.get("CC", "cc")) + [
-            "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-D_FORTIFY_SOURCE=2",
+            "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
+            *shlex.split(os.environ.get("CFLAGS", "")),
+            "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=2",
             "-Werror=unused-result", "-Dfchown=pgwt_test_fchown", "-include", str(header),
             "-I" + str(ROOT / "src"), str(source), str(ROOT / "src/event_writer.c"),
             "-llz4", "-o", str(directory / "group-failure")]
@@ -438,7 +440,8 @@ int main(void)
         path.write_text(source)
         binary = path.with_suffix("")
         compiled = run(shlex.split(os.environ.get("CC", "cc")) +
-                       ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(path), "-o", str(binary)])
+                       ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                        *shlex.split(os.environ.get("CFLAGS", "")), str(path), "-o", str(binary)])
         assert compiled.returncode == 0, compiled.stderr
         result = run([str(binary)])
         assert result.returncode == 0, result.stderr
