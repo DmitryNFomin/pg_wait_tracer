@@ -760,6 +760,132 @@ _EXACT_VIEWS = {"heatmap", "transitions", "concurrency", "lock_chains",
                 "interference", "executions", "execution_detail",
                 "exec_scatter"}
 
+# ── Coverage verdict (#947, #871 U3) ─────────────────────────────────────────
+# Mirrors the server's add_coverage() emitter (spec-coverage-label r2 §2
+# Output, §3): every view response carries `coverage`; an incomplete verdict
+# sets fidelity "incomplete", withholds the whole-window views as
+# {code:"coverage_unverified", coverage}, nulls the AAS / heatmap buckets that
+# meet an uncovered range (window totals withheld) and keeps record-level
+# views with the label only. Idle-unverified nulls the Idle rows.
+#
+#   PGWT_MOCK_COVERAGE=<state>   one of _COVERAGE_STATES (default: none, i.e.
+#                                no coverage object, today's legacy shape)
+
+_COVERAGE_WITHHELD = {"time_model", "top_events", "top_sessions", "top_queries",
+                      "transitions", "fingerprints", "lock_chains",
+                      "interference", "concurrency", "variants"}
+_COVERAGE_BUCKETED = {"aas", "heatmap"}
+_COVERAGE_RECORD = {"session_timeline", "executions", "execution_detail",
+                    "span_detail", "exec_scatter"}
+_COV_MID = _FROM_NS + 30 * _BUCKET_NS
+_COV_GAP = [_COV_MID, _COV_MID + 5 * _BUCKET_NS]
+
+
+def _incomplete(reasons, uncovered, restart_cause=None):
+    return {"verdict": "incomplete", "reasons": reasons, "covered_to": None,
+            "uncovered": [{"from": a, "to": b, "reason": r} for a, b, r in uncovered],
+            "restart_cause": restart_cause, "excludes_in_flight": False,
+            "idle": {"verdict": "incomplete",
+                     "uncovered": [{"from": a, "to": b, "reason": r}
+                                   for a, b, r in uncovered]}}
+
+
+_COVERAGE_STATES = {
+    "complete": {"verdict": "complete", "reasons": [], "covered_to": _TO_NS,
+                 "uncovered": [], "restart_cause": None,
+                 "excludes_in_flight": False,
+                 "idle": {"verdict": "complete", "uncovered": []}},
+    # Row 7b: a live boot whose last watermark trails `to` by 2 s.
+    "live_edge_xf": {"verdict": "live_edge", "reasons": [],
+                     "covered_to": _TO_NS - 2_000_000_000, "uncovered": [],
+                     "restart_cause": None, "excludes_in_flight": True,
+                     "idle": {"verdict": "live_edge", "uncovered": []}},
+    "restart_postgres": _incomplete(["restart"], [(*_COV_GAP, "restart")], "postgres"),
+    "restart_daemon": _incomplete(["restart"], [(*_COV_GAP, "restart")], "daemon"),
+    "capture_loss": _incomplete(["capture_loss"], [(*_COV_GAP, "capture_loss")]),
+    "unclean_end": _incomplete(["unclean_end"],
+                               [(_TO_NS - 10 * _BUCKET_NS, _TO_NS, "unclean_end")]),
+    "missing_file": _incomplete(["missing_file"], [(*_COV_GAP, "missing_file")]),
+    "retention": _incomplete(["retention"],
+                             [(_FROM_NS, _FROM_NS + 10 * _BUCKET_NS, "retention")]),
+    "not_recorded": _incomplete(["not_recorded"], [(_FROM_NS, _TO_NS, "not_recorded")]),
+    "clock_step": _incomplete(["clock_step"], [(*_COV_GAP, "clock_step")]),
+    "not_yet_covered": _incomplete(["not_yet_covered"],
+                                   [(_TO_NS - 5 * _BUCKET_NS, _TO_NS, "not_yet_covered")]),
+    "not_captured": _incomplete(["not_captured"],
+                                [(_FROM_NS, _FROM_NS + 10 * _BUCKET_NS, "not_captured")]),
+    # Row 29: DB time complete, idle floor far behind.
+    "idle_unverified": {"verdict": "complete", "reasons": [], "covered_to": _TO_NS,
+                        "uncovered": [], "restart_cause": None,
+                        "excludes_in_flight": False,
+                        "idle": {"verdict": "incomplete", "uncovered": [
+                            {"from": _FROM_NS + 50 * _BUCKET_NS, "to": _TO_NS,
+                             "reason": "unclean_end"}]}},
+}
+
+_COVERAGE_STATE = os.environ.get("PGWT_MOCK_COVERAGE", "")
+
+
+def _meets(t0, t1, ranges):
+    return any(r["from"] < t1 and r["to"] > t0 for r in ranges)
+
+
+def _apply_coverage(cmd, req_id, resp, state):
+    """Attach the coverage object for `state` to a view response, withholding
+    or nulling exactly as the server's §3 consumers do."""
+    cov = _COVERAGE_STATES[state]
+    incomplete = cov["verdict"] == "incomplete"
+    if incomplete and cmd in _COVERAGE_WITHHELD:
+        return {"id": req_id, "code": "coverage_unverified",
+                "fidelity": "incomplete", "coverage": cov}
+    resp = dict(resp, coverage=cov)
+    if incomplete:
+        resp["fidelity"] = "incomplete"
+        resp.pop("fidelity_ranges", None)
+    # Time-bucketed: a bucket not wholly inside the covered piece is null.
+    holes = list(cov["uncovered"])
+    if cov["verdict"] == "live_edge":
+        holes.append({"from": cov["covered_to"], "to": _TO_NS + _BUCKET_NS})
+    if cmd == "aas" and holes and "buckets" in resp:
+        bns = resp.get("bucket_ns", _BUCKET_NS)
+        out = []
+        for b in resp["buckets"]:
+            if _meets(b["t"], b["t"] + bns, holes):
+                b = ({"t": b["t"], "aas": [None] * len(b["aas"])} if "aas" in b
+                     else {k: (v if k == "t" else None) for k, v in b.items()})
+            out.append(b)
+        resp["buckets"] = out
+        if incomplete:
+            resp["max_aas"] = None
+    if cmd == "heatmap" and holes:
+        bns = resp.get("bucket_ns", _BUCKET_NS)
+        times = resp.get("times", [])
+        resp["cells"] = [c for c in resp.get("cells", [])
+                         if not _meets(times[c[0]], times[c[0]] + bns, holes)]
+        if incomplete:
+            resp["max_count"] = None
+            resp["total_events"] = None
+    if not incomplete and cov["idle"]["verdict"] != cov["verdict"]:
+        idle_null = ("ms", "pct", "aas", "count", "total_ms", "avg_us",
+                     "p50_us", "p95_us", "p99_us", "max_us")
+        if cmd == "time_model" and "rows" in resp:
+            rows, in_idle = [], False
+            for r in resp["rows"]:
+                if r.get("indent") == 0:
+                    in_idle = r.get("name") == "Idle"
+                elif r.get("indent") == 1:
+                    in_idle = False
+                if in_idle:
+                    r = {k: (None if k in idle_null else v) for k, v in r.items()}
+                rows.append(r)
+            resp["rows"] = rows
+            resp["idle_time_ms"] = None
+        if cmd == "top_events" and "rows" in resp:
+            resp["rows"] = [{k: (None if k in idle_null else v) for k, v in r.items()}
+                            if r.get("pct") is None else r for r in resp["rows"]]
+    return resp
+
+
 # ── Fidelity + control configuration (Phase B5) ───────────────────────────────
 # The mock can present a SAMPLED or MIXED window so the UI's fidelity shading +
 # unavailable panels can be driven deterministically. Configured via env (like
@@ -1021,6 +1147,10 @@ def handle_request(msg):
     # EXACT-required views over a sampled-only window return the structured
     # unavailable marker (mirrors src/server.c emit_unavailable). A mixed
     # window still has transition data, so it stays available.
+    if (_COVERAGE_STATE in _COVERAGE_STATES and
+            _COVERAGE_STATES[_COVERAGE_STATE]["verdict"] == "incomplete" and
+            cmd in _COVERAGE_WITHHELD):
+        return _apply_coverage(cmd, req_id, {}, _COVERAGE_STATE)
     if cmd in _EXACT_VIEWS and _FID.fidelity == "sampled":
         return {"id": req_id, "unavailable": "requires full-fidelity data",
                 "code": "full_fidelity_required",
@@ -1061,6 +1191,9 @@ def handle_request(msg):
                 row[col] = False
             gated.append(row)
         resp["rows"] = gated
+    if (_COVERAGE_STATE in _COVERAGE_STATES and "error" not in resp and
+            (cmd in _FIDELITY_VIEWS or cmd in _COVERAGE_RECORD)):
+        resp = _apply_coverage(cmd, req_id, resp, _COVERAGE_STATE)
     return resp
 
 

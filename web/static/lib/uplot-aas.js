@@ -88,6 +88,7 @@ import {
     buildFidelityShading, buildEscalationAnnotation, fidelityOf, fidelityLabel,
     ESC_MANUAL_COLOR, ESC_ANOMALY_COLOR, ESC_MANUAL_BORDER, ESC_ANOMALY_BORDER,
     fidelityBandStyle, NOT_CAPTURED_BAND_COLOR, NOT_CAPTURED_BORDER, INCOMPLETE_FIDELITY,
+    coverageOf, aasScaleMax,
 } from './builders/fidelity.js';
 
 /* ns→ms at the spec boundary — the ONE conversion site, same rule as the
@@ -372,7 +373,7 @@ export function buildUplotSpec(data, opts) {
     const { stacked, bands, stackIdxs } = stackSeries(values, hidden);
     const alignedData = [xs].concat(stacked);
 
-    const maxAas = (data && data.max_aas) || 0;
+    const maxAas = aasScaleMax(data);
     const compare = buildCompareGeometry(data, opts.compareData, {
         offsetNs: opts.compareOffsetNs,
         baselinePredates: opts.baselinePredates,
@@ -501,6 +502,7 @@ export function buildUplotSpec(data, opts) {
         maxAas,
         fidelity: fidelityOf(data),
         fidelityLabel: fidelityLabel(fidelityOf(data)),
+        coverage: coverageOf(data),
         shading,
         escalation: escAnno,
         axisRange: { from: axisFromNs, to: axisToNs },
@@ -783,7 +785,7 @@ export function overlayGeometry(data, opts, scaleWindow) {
             x1: nsToMs(b.to != null ? b.to : axisToNs),
             fill: style.fill,
             stroke: style.border,
-            ...(b.kind === 'none' || b.kind === INCOMPLETE_FIDELITY ? { label: style.label } : {}),
+            ...(b.kind === 'none' || b.kind === INCOMPLETE_FIDELITY ? { label: b.label || style.label } : {}),
             dash: [4, 4],
         });
     }
