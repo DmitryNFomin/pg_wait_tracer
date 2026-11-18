@@ -448,9 +448,9 @@ jobs:
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || fromJSON('["self-hosted","gate-box"]') }}
     env:
       PGWT_CI_CELL: ${{ github.run_id }}-${{ github.run_attempt }}-box-tier-ubuntu
-    # Measured box-check runs take 45-80 min; allow 150 min for the tier and
-    # lock queueing. Lock acquisition itself is bounded at 120 min below.
-    timeout-minutes: 150
+    # Measured box-check runs take 45-80 min; allow 210 min: up to 120 min of
+    # lock queueing (bounded below) plus the tier itself, with margin.
+    timeout-minutes: 210
     # Inherit workflow-level cancellation of superseded PR runs. No job-level
     # concurrency group: pending jobs from unrelated PRs must not cancel one
     # another (see sampled-overhead's concurrency history below).

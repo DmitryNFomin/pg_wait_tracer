@@ -731,7 +731,7 @@ def guard(workflow, launcher, shared):
     jobs = re.findall(r'(?ms)^  box-tier-ubuntu:\n(.*?)(?=^  [\w-]+:|\Z)', workflow)
     assert len(jobs) == 1, 'missing/ambiguous box-tier-ubuntu job'
     job = jobs[0]
-    assert re.search(r'^    timeout-minutes: 150$', job, re.M), 'tier timeout'
+    assert re.search(r'^    timeout-minutes: 210$', job, re.M), 'tier timeout'
     assert not re.search(r'^    (?:if|needs|concurrency):', job, re.M), 'tier must always run; inherit workflow concurrency'
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request'" in workflow, 'PR cancellation'
     assert "github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || fromJSON('[\"self-hosted\",\"gate-box\"]')" in job, 'fork-safe runner selection'
