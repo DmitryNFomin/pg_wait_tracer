@@ -295,7 +295,7 @@ elif name == 'rsync':
         (temp / (label + '.synced')).touch()
 elif name == 'ssh':
     command = args[-1]
-    if 'tests/run_all.sh --require-live' in command:
+    if 'bash scripts/box-tier.sh' in command:
         directory = scratch(re.search(r"^cd '([^']+)'", command).group(1))
         (temp / (label + '.directory')).write_text(str(directory))
         if os.environ.get('INTERLEAVE') == '1' and label == 'X':
@@ -304,7 +304,7 @@ elif name == 'ssh':
                 if time.monotonic() > deadline:
                     sys.exit('FAIL: Y never synced before X build')
                 time.sleep(0.01)
-        build = re.search(r'bash scripts/box-build.sh ([0-9a-f]+) ([0-9a-f]+)', command)
+        build = re.search(r'bash scripts/box-tier.sh ([0-9a-f]+) ([0-9a-f]+)', command)
         rc = subprocess.run(['bash', 'scripts/box-build.sh', *build.groups()], cwd=directory, timeout=10).returncode
         if rc == 0:
             shutil.copyfile(Path(directory, 'pgwt-server'), temp / (label + '.binary'))
@@ -367,10 +367,10 @@ assert_launcher() {
     grep -Fq -- "-> $tmp/destination/cccc." "$tmp/launcher-single.log" || { fail 'detached HEAD directory must be short SHA'; return 1; }
     python3 - "$tmp/calls-single" <<'PY' || return 1
 import sys
-commands = [s for s in open(sys.argv[1]) if 'tests/run_all.sh --require-live' in s]
+commands = [s for s in open(sys.argv[1]) if 'bash scripts/box-tier.sh' in s]
 assert len(commands) == 1, 'missing/ambiguous build SSH'
 line = commands[0]
-assert line.index('flock 9 || exit') < line.index('bash scripts/box-build.sh') < line.index('tests/run_all.sh --require-live'), 'build provenance must run under the existing flock'
+assert line.index('flock 9 || exit') < line.index('bash scripts/box-tier.sh'), 'shared build/live tier must run under the existing flock'
 PY
     [[ ! -d "$(cat "$tmp/single.directory")" ]] || { fail 'private directory not pruned'; return 1; }
     echo 'PASS: detached HEAD uses/logs SHA plus unique suffix; helper inside existing lock; private directory pruned'

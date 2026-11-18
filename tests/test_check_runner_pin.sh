@@ -713,6 +713,109 @@ else
 fi
 
 echo
+echo "== full box tier workflow wiring =="
+if python3 -B - "$SCRIPT_DIR/.." <<'PY'
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+root = Path(sys.argv[1]).resolve()
+workflow = (root / '.github/workflows/ci.yml').read_text()
+launcher = (root / 'scripts/box-check.sh').read_text()
+shared = (root / 'scripts/box-tier.sh').read_text()
+
+
+def guard(workflow, launcher, shared):
+    jobs = re.findall(r'(?ms)^  box-tier-ubuntu:\n(.*?)(?=^  [\w-]+:|\Z)', workflow)
+    assert len(jobs) == 1, 'missing/ambiguous box-tier-ubuntu job'
+    job = jobs[0]
+    assert re.search(r'^    timeout-minutes: 150$', job, re.M), 'tier timeout'
+    assert not re.search(r'^    (?:if|needs|concurrency):', job, re.M), 'tier must always run; inherit workflow concurrency'
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request'" in workflow, 'PR cancellation'
+    assert "github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || fromJSON('[\"self-hosted\",\"gate-box\"]')" in job, 'fork-safe runner selection'
+    steps = re.split(r'^      - ', job, flags=re.M)[1:]
+    assert steps and 'Refuse fork PR' in steps[0] and 'exit 1' in steps[0], 'fork refusal first'
+    assert 'head.repo.full_name != github.repository' in steps[0], 'fork refusal condition'
+    locked = [s for s in steps if 'exec 9>/tmp/pgwt-box-check.lock' in s]
+    assert len(locked) == 1, 'single lock step'
+    tier = locked[0]
+    assert tier.index('exec 9>') < tier.index('flock -w 7200 9') < tier.index('bash scripts/box-tier.sh'), 'lock spans shared build/live entry point'
+    assert not re.search(r'flock\s+-u|exec\s+9[>&]+-', tier), 'early lock release'
+    assert 'set -o pipefail' in tier and 'tee ' in tier and 'continue-on-error' not in job, 'tier failure propagation'
+    assert 'PGWT_EXPECT_PHASE_PROBES: "1"' in tier, 'Ubuntu phase expectation'
+    assert 'bash scripts/box-tier.sh $tree_hash $commit $pgarg' in launcher, 'box-check shared entry point'
+    assert 'bash scripts/box-build.sh "$tree_hash" "$commit"' in shared, 'verified clean build'
+    assert shared.index('bash scripts/box-build.sh') < shared.index('tests/run_all.sh --require-live'), 'build before full live tier'
+    assert 'sudo env "${test_env[@]}" tests/run_all.sh --require-live "$@"' in shared, 'required live tier and PG arguments'
+    for name in ('PGWT_EXPECT_PHASE_PROBES', 'PGWT_TEST_FORCE_NO_PHASE_PROBES', 'PGWT_PGPORT', 'PGWT_PG_PORT_BASE', 'PGWT_CI_CELL'):
+        assert name in shared, 'sudo environment forwarding: ' + name
+    for evidence in ('Executed:', 'Live UI smoke:', 'KNOWN_FAILING', 'UNEXPECTED PASS', 'tests/results/ui_live/summary.json', 'actions/upload-artifact@v4'):
+        assert evidence in job, 'summary/artifact evidence: ' + evidence
+    assert 'cleanup_gate_cell.py "$PGWT_CI_CELL"' in job, 'cell-scoped cancellation cleanup'
+
+
+guard(workflow, launcher, shared)
+print('PASS: full box tier job, fork refusal, single bounded lock, shared entry point, evidence and cancellation')
+controls = [
+    (workflow.replace('  box-tier-ubuntu:', '  missing-tier:'), launcher, shared),
+    (workflow.replace('flock -w 7200 9', 'true'), launcher, shared),
+    (workflow.replace('          bash scripts/box-tier.sh', '      - name: unlocked tier\n        run: bash scripts/box-tier.sh'), launcher, shared),
+    (workflow.replace('          bash scripts/box-tier.sh', '          flock -u 9\n          bash scripts/box-tier.sh'), launcher, shared),
+    (workflow.replace('bash scripts/box-tier.sh', 'bash scripts/box-build.sh'), launcher, shared),
+    (workflow, launcher.replace('bash scripts/box-tier.sh', 'bash scripts/box-build.sh'), shared),
+    (workflow, launcher, shared.replace('--require-live', '')),
+    (workflow.replace('          set -o pipefail', '          set +o pipefail'), launcher, shared),
+]
+# Explicitly verify pipefail, rather than accepting the word in set +o.
+for index, (wf, launch, helper) in enumerate(controls):
+    try:
+        guard(wf, launch, helper)
+    except (AssertionError, ValueError):
+        continue
+    raise AssertionError(f'broken workflow control {index + 1} survived')
+print(f'PASS: rejected {len(controls)} missing-tier, unlocked, split-step, divergent-entry and failure-masking controls')
+
+# Exercise the real shared script without running any build, PG or eBPF.
+# Mock the capability probe and build/sudo commands through BASH_ENV; all
+# outputs live in a disposable directory outside the repository.
+with tempfile.TemporaryDirectory(prefix='pgwt-box-tier-host-') as directory:
+    env_file = Path(directory) / 'mock-env'
+    env_file.write_text('''
+bpftool() { return 0; }
+[() {
+    if [[ "$1 $2 $3" == '! -r /sys/kernel/btf/vmlinux' ]]; then return 1; fi
+    builtin [ "$@"
+}
+bash() {
+    [[ "$*" == 'scripts/box-build.sh tree commit' ]] || return 99
+    echo BUILD
+    return "$BUILD_RC"
+}
+sudo() { printf 'TEST %s\\n' "$*"; return "$TEST_RC"; }
+''')
+    for build_rc, test_rc in ((0, 0), (17, 0), (0, 23)):
+        env = dict(BASH_ENV=str(env_file), BUILD_RC=str(build_rc), TEST_RC=str(test_rc),
+                   PGWT_EXPECT_PHASE_PROBES='1', PGWT_TEST_FORCE_NO_PHASE_PROBES='1',
+                   PGWT_PGPORT='55417', PGWT_PG_PORT_BASE='5500', PGWT_CI_CELL='fixture')
+        result = subprocess.run(['/bin/bash', str(root / 'scripts/box-tier.sh'), 'tree', 'commit', '--pg-version', '17'],
+                                env=env, text=True, capture_output=True, cwd=directory)
+        assert result.returncode == (build_rc or test_rc), result
+        assert ('TEST ' in result.stdout) == (build_rc == 0), result
+        if build_rc == 0:
+            for value in ('PGWT_EXPECT_PHASE_PROBES=1', 'PGWT_TEST_FORCE_NO_PHASE_PROBES=1',
+                          'PGWT_PGPORT=55417', 'PGWT_PG_PORT_BASE=5500', 'PGWT_CI_CELL=fixture',
+                          'tests/run_all.sh --require-live --pg-version 17'):
+                assert value in result.stdout, (value, result)
+print('PASS: shared script forwards PG/phase/cell environment and preserves build/test failures')
+PY
+then
+    report true 'full box tier workflow and shared entry point'
+else
+    report false 'full box tier workflow and shared entry point'
+fi
+
 echo "runner-pin guard self-test: $((tests_run - tests_failed))/$tests_run passed"
 if (( tests_failed > 0 )); then
     echo "runner-pin guard self-test: FAILED"
