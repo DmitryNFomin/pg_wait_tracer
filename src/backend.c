@@ -168,6 +168,14 @@ static void report_state_map_full(struct pgwt_daemon *d, pid_t pid)
 static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
                              uint64_t attach_ts, bool sweep_reseed)
 {
+    if (!sweep_reseed && getenv("PGWT_TEST_SKIP_UNPUBLISHED_WAIT_SEED")) {
+        struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+        if (be && be->exact_unpublished_generation &&
+            be->exact_unpublished_generation == d->escalation.generation) {
+            fprintf(stderr, "WARN: TEST ONLY skip unpublished wait seed PID %d\n", pid);
+            return 0;
+        }
+    }
     char mem_path[64];
     snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
     int mem_fd = open(mem_path, O_RDONLY);
@@ -398,9 +406,10 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
      * the all-backend snapshot. Seed it now before its watchpoint is armed.
      * Post-boundary query/activity edges already captured by the BPF fork
      * enrollment win over this separate seed during resolution. */
-    if (d->exact_probes.core.generation != 0)
+    if (d->exact_probes.core.generation != 0 &&
         pgwt_exact_seed_backend(d, be->pid,
-                                d->exact_probes.core.generation, false);
+                                d->exact_probes.core.generation, false) != 0)
+        d->counters.exact_preseed_late_attach_failures_total++;
     started_ns = pgwt_debug_block_begin(d);
     preseed_state_map(d, be->pid, be->wp_addr, be->attach_ts, false);
     pgwt_debug_block_end(d, "watchpoint_preseed", be->pid, started_ns);
