@@ -501,7 +501,7 @@ rsync -azr --checksum --from0 --files-from="$source_manifest.paths" -e "$rsync_e
 rsync -az -e "$rsync_e" "$source_manifest" "$target:$remote_dir/.pgwt-box-source-manifest" || exit 1
 
 pgarg=""; [[ -n "$PG" ]] && pgarg="--pg-version $PG"
-# The remote command below runs tests/run_all.sh via sudo, and default
+# The shared remote phase runs tests/run_all.sh via sudo, and default
 # sudoers policy resets the environment (env_reset) -- so PGWT_PGPORT /
 # PGWT_PG_PORT_BASE, documented overrides that tests/run_all.sh and
 # tests/ui_live_smoke.sh both read directly, never reached run_all.sh even
@@ -521,19 +521,6 @@ sudo_env="$sudo_env PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES"
 [[ -n "${PGWT_TEST_FORCE_NO_PHASE_PROBES:-}" ]] && sudo_env="$sudo_env PGWT_TEST_FORCE_NO_PHASE_PROBES=$PGWT_TEST_FORCE_NO_PHASE_PROBES"
 [[ -n "${PGWT_PGPORT:-}" ]] && sudo_env="$sudo_env PGWT_PGPORT=$PGWT_PGPORT"
 [[ -n "${PGWT_PG_PORT_BASE:-}" ]] && sudo_env="$sudo_env PGWT_PG_PORT_BASE=$PGWT_PG_PORT_BASE"
-# Preflight (runs on the box, inside the same flock, before `make`): a
-# kernel change without re-provisioning left bpftool's dispatcher unable to
-# find a matching linux-tools package ("bpftool not found for kernel
-# 6.8.0-139") -- the vmlinux.h generation step then died with an opaque
-# Makefile error. Fail loud and self-explaining here instead. Tests the
-# REAL failure mode only: `bpftool version` works AND the running kernel's
-# BTF is readable. NOT a `linux-tools-$(uname -r)` package-name check --
-# tests/provision-runner.sh deliberately falls back to linux-tools-generic
-# or a source-built /usr/local/bin/bpftool when the exact-version package
-# is unavailable, so that package's mere absence does not mean anything is
-# actually broken.
-preflight="if ! bpftool version >/dev/null 2>&1 || [ ! -r /sys/kernel/btf/vmlinux ]"
-preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel change: run tests/provision-runner.sh $OS on the box\"; exit 2; fi;"
 # shellcheck disable=SC2029
 # Lock file self-heal (reviewer round 2): a root-created 0644
 # /tmp/pgwt-box-check.lock (e.g. from a bare `provision-runner.sh` run
@@ -549,7 +536,9 @@ preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel
 # issue #93's live-UI-smoke test (tests/ui_live_smoke.sh checks for
 # web/pgwt and fails loudly if it is missing, same as the other binaries).
 #
-# box-build.sh verifies synced bytes, then unconditionally invalidates outputs
+# box-tier.sh preflights the kernel/BPF tools, then calls box-build.sh and
+# run_all.sh --require-live (including live UI smoke). box-build.sh verifies
+# synced bytes, then unconditionally invalidates outputs
 # with make clean-box. It removes the marker BEFORE verification/build, restores
 # it only on complete success, and logs built-from alongside tree-hash.
 # Keep this inside the existing lock on both box paths. Lock wait messages and
@@ -560,7 +549,7 @@ preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel
 # the tests' default -lbpf would silently select the old system library.
 lock_header='exec 9>/tmp/pgwt-box-check.lock; if flock -n 9; then echo "box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)"; else lock_wait_start_ns=$(date +%s%N); echo "box-check: waiting for /tmp/pgwt-box-check.lock"; flock 9 || exit; lock_wait_ms=$(( ($(date +%s%N) - lock_wait_start_ns) / 1000000 )); echo "box-check: lock acquired (waited_for_lock=yes, lock_wait_ms=${lock_wait_ms})"; fi;'
 ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
-    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && bash -c '$lock_header $preflight bash scripts/box-build.sh $tree_hash $commit && sudo env$sudo_env tests/run_all.sh --require-live $pgarg'" \
+    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && bash -c '$lock_header env OS=$OS$sudo_env bash scripts/box-tier.sh $tree_hash $commit $pgarg'" \
     2>&1 | tee -a "$log"
 rc=${PIPESTATUS[0]}
 
