@@ -80,6 +80,7 @@ def print_failure_diagnostics(text, after, failing_pids=()):
 class CohortFailure(AssertionError):
     def __init__(self, message, pids):
         super().__init__(f"{message}: {sorted(pids)[:DIAGNOSTIC_LINES]} (total {len(pids)})")
+        self.reason = message
         self.pids = set(pids)
 
 
@@ -439,11 +440,14 @@ def run_arm(pm_pid, skip_store, churn=False):
                     try:
                         known = classify_churn(text, {key: after[key] - before[key] for key in before
                                                       if type(before[key]) is int}, pids, short_lived)
-                    except AssertionError:
+                    except AssertionError as rejection:
                         # Rejected exceptions use the original assertion order,
                         # exception arguments and failing-PID diagnostics below.
                         # If master accepts the run, no exception is needed.
-                        pass
+                        # Name the rejection so a red run can be diagnosed.
+                        print(f"known-class classifier rejected: "
+                              f"{getattr(rejection, 'reason', str(rejection))} "
+                              f"pids={sorted(getattr(rejection, 'pids', ()))}")
                 has_known = bool(known["K1"] or known["K2"])
                 for key in ("ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
                             "state_map_full_total", "init_state_read_fail_total",
