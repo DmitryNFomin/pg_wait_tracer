@@ -85,7 +85,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_core_merge_contract \
             test_core_merge_adapter \
             test_transport_wire test_transport_producers test_percpu_transport \
-            test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure
+            test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure \
+            test_coverage_verdict
 
 .PHONY: all clean check
 
@@ -1250,6 +1251,16 @@ test_counter_vector: test_counter_vector.c ../src/counter_vector.c ../src/counte
 
 test_writer_failure: test_writer_failure.c $(BUILD)/event_writer.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4
+
+# Coverage label U2a (Refs #947, #871): the pure verdict against the frozen
+# answer table. The case table is generated from tests/fixtures/coverage/
+# into $(BUILD), so no build product enters the tree.
+COVERAGE_CASES_DIR = $(BUILD)/coverage
+test_coverage_verdict: test_coverage_verdict.c ../src/coverage.c ../src/coverage.h gen_coverage_cases.py \
+                       fixtures/coverage/coverage-table-inputs.md fixtures/coverage/coverage-answers-final.tsv
+	mkdir -p $(COVERAGE_CASES_DIR)
+	python3 -B gen_coverage_cases.py --output $(COVERAGE_CASES_DIR)/coverage_cases.h
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -I$(COVERAGE_CASES_DIR) -o $@ test_coverage_verdict.c ../src/coverage.c
 
 # Pilot helpers are built in an external temporary directory by the registered
 # Python route test; no generated fixtures or helper binaries enter the tree.
