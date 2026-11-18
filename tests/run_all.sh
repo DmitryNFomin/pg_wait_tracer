@@ -689,6 +689,7 @@ LIVE_TESTS=(
     # which makes the gate red just like a product failure (exit 1).
     "test_v9_open_cpu_wired|bash|test_v9_open_cpu_wired.sh"
     "test_escalation|bash|test_escalation.sh"
+    "test_preseed_startup_live|python3|test_preseed_startup_live.py"
     # Tiered-capture live tests (were built for A4/A5 but wired into
     # nothing — TST-7). test_cross_validate_tiered is the test that
     # justified tiered as the default mode.
@@ -731,6 +732,10 @@ if [[ $(id -u) -eq 0 ]] && pgrep -x postgres > /dev/null 2>&1; then
         # exclusions above; they are not missing required-live coverage.
         if [[ "$name" == "test_sampler_batch_live" && "$PG_VERSION" =~ ^(14|15|16)$ ]]; then
             exclude_test "$name" "status batch needs PostgreSQL 13, 17 or 18; running PG$PG_VERSION"
+            continue
+        fi
+        if [[ "$name" == "test_preseed_startup_live" && "$PG_VERSION" != "17" ]]; then
+            exclude_test "$name" "deterministic unpublished startup hold requires PostgreSQL 17; running PG$PG_VERSION"
             continue
         fi
         if [[ "$name" == "test_capture_smoke_full" ]]; then

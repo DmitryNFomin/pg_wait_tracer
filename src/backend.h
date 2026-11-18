@@ -17,6 +17,7 @@ struct pgwt_backend {
     int      bootstrap_fd;     /* bootstrap watchpoint fd (-1 if none) */
     int      pending_init_slot; /* 1-based position in pending_init[], 0 absent */
     uint64_t wp_addr;          /* PGPROC->wait_event_info address */
+    uint64_t exact_unpublished_generation; /* command-only proof, wait still needs seeding */
     /* Is wp_addr in a MAP_SHARED mapping? -1 unknown (not yet checked),
      * 0 process-local, 1 shared. SMP-2: the sampler may only batch-read
      * SHARED addresses through one pid; local ones need per-pid reads. */
