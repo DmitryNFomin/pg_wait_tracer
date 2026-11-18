@@ -82,6 +82,57 @@ while time.monotonic() < end: server.handle_request()
 """
 
 
+SOCKET_HOLDER = r"""
+import os, socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1)
+ready = sys.argv[1]
+pending = ready + '.tmp'
+with open(pending, 'w') as output:
+    output.write(str(s.getsockname()[1]))
+os.replace(pending, ready)
+time.sleep(60)
+"""
+
+
+class SocketHolderTests(HangGuardTestCase):
+    def test_ready_port_is_absent_until_the_complete_write(self):
+        with tempfile.TemporaryDirectory(prefix='holder-ready-') as tmp:
+            ready = Path(tmp) / 'holder.ready'
+            # Pause the actual shared holder after open creates the file,
+            # before write can fill it. A pipe handshake makes the old
+            # direct-to-ready writer fail without relying on scheduling.
+            pause_before_write = r"""
+import builtins, sys
+real_open = builtins.open
+def paused_open(*args, **kwargs):
+    output = real_open(*args, **kwargs)
+    print('opened', flush=True)
+    sys.stdin.readline()
+    return output
+builtins.open = paused_open
+"""
+            holder = subprocess.Popen(
+                [PYTHON, '-c', pause_before_write + SOCKET_HOLDER, str(ready)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual(holder.stdout.readline(), 'opened\n')
+                self.assertFalse(ready.exists(),
+                                 'ready file exposed before its port was written')
+                self.assertEqual(Path(str(ready) + '.tmp').read_text(), '')
+                holder.stdin.write('write now\n')
+                holder.stdin.flush()
+                await_file(ready, holder)
+                port = int(ready.read_text())
+                with socket.create_connection(('127.0.0.1', port)):
+                    pass
+                self.assertFalse(Path(str(ready) + '.tmp').exists())
+            finally:
+                if holder.poll() is None: holder.kill()
+                holder.wait()
+                holder.stdin.close()
+                holder.stdout.close()
+
+
 class HarnessTests(HangGuardTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='harness-ownership-')
@@ -283,7 +334,10 @@ pid = os.fork()
 if pid == 0:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+    ready = pathlib.Path(sys.argv[1])
+    pending = ready.with_suffix('.tmp')
+    pending.write_text(str(os.getpid()))
+    os.replace(pending, ready)
     time.sleep(120)
 else:
     while not pathlib.Path(sys.argv[1]).exists(): time.sleep(.01)
@@ -618,11 +672,7 @@ class ProcFallbackTests(HangGuardTestCase):
     def test_end_to_end_bare_ss_line_over_a_real_foreign_socket(self):
         base = Path(self.temp.name)
         ready = base / 'holder.ready'
-        (base / 'holdsock.py').write_text(
-            'import socket, sys, time\n'
-            's = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1)\n'
-            'open(sys.argv[1], "w").write(str(s.getsockname()[1]))\n'
-            'time.sleep(60)\n')
+        (base / 'holdsock.py').write_text(SOCKET_HOLDER)
         holder = subprocess.Popen([sys.executable, str(base / 'holdsock.py'), str(ready)])
         self.addCleanup(lambda: (holder.kill(), holder.wait()))
         await_file(ready, holder)
@@ -786,11 +836,7 @@ class LsofStderrTests(HangGuardTestCase):
         self.addCleanup(temp.cleanup)
         base = Path(temp.name)
         ready = base / 'holder.ready'
-        (base / 'hold.py').write_text(
-            'import socket, sys, time\n'
-            's = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1)\n'
-            'open(sys.argv[1], "w").write(str(s.getsockname()[1]))\n'
-            'time.sleep(60)\n')
+        (base / 'hold.py').write_text(SOCKET_HOLDER)
         holder = subprocess.Popen([sys.executable, str(base / 'hold.py'), str(ready)])
         self.addCleanup(lambda: (holder.kill(), holder.wait()))
         await_file(ready, holder)
