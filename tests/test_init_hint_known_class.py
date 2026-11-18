@@ -207,7 +207,7 @@ class KnownClassCases(unittest.TestCase):
         text, deltas, pids, short = fixture(k1=True)
         self.assertEqual(self.classify((text, deltas, pids, short - {11}))[0], 1)
 
-    def fake_arm(self, data, skip_store=False, churn=False, baseline=None):
+    def fake_arm(self, data, skip_store=False, churn=False, baseline=None, output=None):
         """Run the real live-arm assertions with only the external I/O replaced."""
         module = self.module
         text, deltas, pids, short = data
@@ -230,8 +230,37 @@ class KnownClassCases(unittest.TestCase):
              patch.object(module, "ctl", side_effect=[before, after]), \
              patch.object(module, "cohort", return_value=pids), \
              patch.object(module, "short_cohort", return_value=(pids, short)), \
-             redirect_stdout(io.StringIO()):
+             redirect_stdout(io.StringIO() if output is None else output):
             return module.run_arm(1, skip_store=skip_store, churn=churn)
+
+    def rejection_lines(self, data, raises, baseline=None):
+        output = io.StringIO()
+        if raises:
+            with self.assertRaises(AssertionError):
+                self.fake_arm(data, churn=True, baseline=baseline, output=output)
+        else:
+            self.fake_arm(data, churn=True, baseline=baseline, output=output)
+        return [line for line in output.getvalue().splitlines()
+                if line.startswith("known-class classifier rejected:")]
+
+    def test_rejection_reason_printed(self):
+        # A rejected classification names its reason and PIDs, then falls
+        # through to master's assertions unchanged.
+        text, deltas, pids, short = fixture(k1=True)
+        rejected = (text.replace("addr_shared=0", "addr_shared=1"), deltas, pids, short)
+        self.assertEqual(self.rejection_lines(rejected, raises=True), [
+            "known-class classifier rejected: "
+            "missing, partial or duplicate known-class diagnostic pids=[11]"])
+        text, deltas, pids, short = fixture()
+        text += "\n" + K2_WP.replace("pid=12 ", "pid=42 ")
+        self.assertEqual(self.rejection_lines((text, deltas, pids, short), raises=False,
+                                              baseline={"wp_attach_exit_race_total": 1}), [
+            "known-class classifier rejected: "
+            "wp_attach_exit_race_total delta does not match PID diagnostics pids=[]"])
+
+    def test_accepted_classification_prints_no_rejection(self):
+        for data in (fixture(), fixture(True, True)):
+            self.assertEqual(self.rejection_lines(data, raises=False), [])
 
     def test_long_lived_loss_stays_red(self):
         with self.assertRaisesRegex(AssertionError, "with-opportunity INIT loss"):
@@ -315,8 +344,12 @@ def mutants():
          '            raise CohortFailure(f"{key} must be zero", set())\n'
          '    for key in (*ATTACH_COUNTERS[:1],',
          "test_event_ring_drop_matches_master"),
-        ("rejected classifier overrides master", "                        pass\n",
+        ("rejected classifier overrides master",
+         "                              f\"pids={sorted(getattr(rejection, 'pids', ()))}\")\n",
+         "                              f\"pids={sorted(getattr(rejection, 'pids', ()))}\")\n"
          "                        raise\n", "test_baseline_exit_race_matches_master"),
+        ("rejection reason not printed", "                        print(f\"known-class classifier rejected: \"",
+         "                        (f\"known-class classifier rejected: \"", "test_rejection_reason_printed"),
     )
     for name, old, new, case in definitions:
         assert SOURCE.count(old) == 1, name
