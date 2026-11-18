@@ -1,5 +1,8 @@
 /* evidence-v1 consumer: preserve every wire digit; never derive a metric. */
 import { esc } from '../format.js';
+import {
+    buildCoverageNotice, coverageNoticeHtml, buildCoverageBadge, paneFidelityBadgeHtml,
+} from '../panels.js';
 
 const uint64Max = 18446744073709551615n;
 function decimal(value, name) {
@@ -35,7 +38,12 @@ const reasonSentences = new Map([
 
 export function pilotEvidenceHtml(response) {
     if (response.error) return '<p role="alert">' + esc(response.error) + '</p>';
-    let html = '<div class="pilot-metrics">';
+    // U3: the server ANDs its coverage verdict into the evidence; an
+    // incomplete one is shown as the coverage label, never as a value.
+    const notice = buildCoverageNotice(response);
+    if (notice) return coverageNoticeHtml(notice);
+    // complete / live_edge: the values stay, their marks ride along.
+    let html = paneFidelityBadgeHtml(buildCoverageBadge(response)) + '<div class="pilot-metrics">';
     let hasValue = false;
     for (const key of ['wait_time', 'completed_waits']) {
         const metric = response[key];

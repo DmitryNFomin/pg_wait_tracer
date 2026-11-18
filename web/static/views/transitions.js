@@ -41,7 +41,10 @@ import {
 import {
     isUnavailable, fidelityBandStyle,
 } from '../lib/builders/fidelity.js';
-import { mountUnavailablePanel } from '../lib/panels.js';
+import {
+    mountUnavailablePanel, buildCoverageNotice, coverageNoticeHtml,
+    buildCoverageBadge, paneFidelityBadgeHtml,
+} from '../lib/panels.js';
 import { esc } from '../lib/format.js';
 
 const DEFAULT_THRESHOLD = 20;
@@ -83,8 +86,16 @@ function renderFidelityChip(model) {
     chip.innerHTML = html;
 }
 
-const FIDELITY_HOST = '<div id="dfg-fidelity-chip" style="display:none;' +
+const FIDELITY_HOST = '<div id="dfg-coverage" style="padding:0 20px"></div>' +
+    '<div id="dfg-fidelity-chip" style="display:none;' +
     'padding:0 20px 8px;font-size:11px;color:#aaa"></div>';
+
+/* U3: complete / live_edge — the graph stays; "up to HH:MM:SS" and the
+ * in-flight mark ride along above it (buildCoverageBadge). */
+function renderCoverageBadge(model) {
+    const host = document.getElementById('dfg-coverage');
+    if (host) host.innerHTML = paneFidelityBadgeHtml(model.coverageBadge);
+}
 
 /* Preserve where inside the node the user grabbed it: the cursor delta moves
  * the BUILT centre by the same amount instead of snapping the centre under the
@@ -498,6 +509,9 @@ export function createTransitionsView() {
 
         build(data, ctx) {
             const t = data.transitions;
+            // U3: an incomplete coverage verdict withholds the whole graph.
+            const notice = buildCoverageNotice(t);
+            if (notice) return { coverageNotice: notice };
             // EXACT-required (A3): a sampled-only window returns the structured
             // "unavailable" marker for transitions — show the escalate panel.
             if (isUnavailable(t)) return { unavailable: t };
@@ -506,6 +520,7 @@ export function createTransitionsView() {
             const hasLinks = !!(t && t.links && t.links.length > 0);
             return {
                 ...buildTransitionsFidelity(t, ctx && ctx.timeRange),
+                coverageBadge: buildCoverageBadge(t),
                 transitions: t,
                 hasLinks,
                 total: (t && t.total) || 0,
@@ -518,6 +533,12 @@ export function createTransitionsView() {
             clearRenderData();
             mountEl = el;
             ctxRef = ctx;
+            if (model.coverageNotice) {
+                disposeChart();
+                if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
+                el.innerHTML = coverageNoticeHtml(model.coverageNotice);
+                return;
+            }
             if (model.unavailable) {
                 disposeChart();
                 mountUnavailablePanel(el, model.unavailable, ctx);
@@ -532,12 +553,14 @@ export function createTransitionsView() {
                 disposeChart();
                 el.innerHTML = FIDELITY_HOST +
                     '<p style="color:#888;padding:20px">No transitions found</p>';
+                renderCoverageBadge(model);
                 renderFidelityChip(model);
                 return;
             }
             dataRef = model.transitions;
 
             ensureShell(el);
+            renderCoverageBadge(model);
             renderFidelityChip(model);
             renderDFG(threshold);   // sets #dfg-total too (idle-hidden count included)
 
