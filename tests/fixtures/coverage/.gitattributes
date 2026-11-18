@@ -1,0 +1,3 @@
+# Byte-exact copy of the lead's answer file (CRLF rows, empty trailing
+# mark/note cells); whitespace checks would require editing the fixture.
+*.tsv -whitespace
