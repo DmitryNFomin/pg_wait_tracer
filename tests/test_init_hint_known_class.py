@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-only #933 signatures, remaining checks, arm ordering and caught mutants."""
+"""Host-only #959 signatures, remaining checks, arm ordering and caught mutants."""
 from contextlib import redirect_stdout
 import io
 from pathlib import Path
@@ -20,10 +20,15 @@ K2_INIT = ("INIT-LOST: clock=CLOCK_MONOTONIC pid=12 init_ts=2238395279097 "
            "no_opportunity=0 exit_ts_source=record")
 K2_WP = ("WP-ATTACH-FAIL: pid=12 site=watchpoint_open errno=3 resolve_errno=0 "
          "liveness=exiting liveness_result=1 liveness_errno=0 exit_proof=2")
+K3_EXIT = ("EXIT-BEFORE-ATTACH: pid=13 opportunity=unknown entry_present=1 bootstrap_armed=0 "
+           "post_arm_checked=0 post_arm_ptr=0x0 addr_shared=0 resolve_errno=0 shared_errno=0 "
+           "counter_deltas_valid=1 lifecycle_init_no_state_delta=0 wait_read_fail_delta=0")
+K3_WP = ("WP-ATTACH-FAIL: pid=13 site=bootstrap_watchpoint_open/backend_wait_addr_resolve "
+         "errno=3 resolve_errno=3 liveness=exiting liveness_result=1 liveness_errno=0 exit_proof=2")
 HEALTHY = "INFO: PID 99 initialized (client)"
 
 
-def fixture(k1=False, k2=False):
+def fixture(k1=False, k2=False, k3=False):
     text = [HEALTHY]
     pids = {99}
     deltas = dict.fromkeys((
@@ -49,6 +54,12 @@ def fixture(k1=False, k2=False):
         deltas["lifecycle_init_lost_total"] = 1
         deltas["lifecycle_init_lost_with_opportunity_total"] = 1
         deltas["wp_attach_exit_race_total"] = 1
+    if k3:
+        text.extend((K3_EXIT, K3_WP))
+        pids.add(13)
+        deltas["lifecycle_exit_before_attach_total"] += 1
+        deltas["lifecycle_exit_before_attach_unknown_total"] = 1
+        deltas["wp_attach_exit_race_total"] += 1
     return "\n".join(text), deltas, pids, set(pids)
 
 
@@ -58,7 +69,7 @@ class KnownClassCases(unittest.TestCase):
     def classify(self, data):
         try:
             result = self.module.classify_churn(*data)
-            return (93 if result["K1"] or result["K2"] else 0), result
+            return (93 if any(result.values()) else 0), result
         except AssertionError:
             return 1, None
 
@@ -66,13 +77,13 @@ class KnownClassCases(unittest.TestCase):
         self.assertEqual(self.classify(fixture())[0], 0)
 
     def test_k1_only(self):
-        self.assertEqual(self.classify(fixture(k1=True)), (93, {"K1": {11}, "K2": set()}))
+        self.assertEqual(self.classify(fixture(k1=True)), (93, {"K1": {11}, "K2": set(), "K3": set()}))
 
     def test_k2_only(self):
-        self.assertEqual(self.classify(fixture(k2=True)), (93, {"K1": set(), "K2": {12}}))
+        self.assertEqual(self.classify(fixture(k2=True)), (93, {"K1": set(), "K2": {12}, "K3": set()}))
 
     def test_both(self):
-        self.assertEqual(self.classify(fixture(True, True)), (93, {"K1": {11}, "K2": {12}}))
+        self.assertEqual(self.classify(fixture(True, True)), (93, {"K1": {11}, "K2": {12}, "K3": set()}))
 
     def test_unknown_only(self):
         text, deltas, pids, short = fixture(k1=True)
@@ -84,29 +95,91 @@ class KnownClassCases(unittest.TestCase):
         self.assertEqual(self.classify((text.replace("liveness=exiting", "liveness=live"),
                                         deltas, pids, short))[0], 1)
 
-    def test_run_02_unknown_retirement_stays_red(self):
-        # Exact daemon lines from master bc554a73, Ubuntu 6.8 PG18:
-        # tests/results/session-20261117/i933-churn-cap/run-02.log.
-        # This unarmed retirement is #948, outside the #933 exception.
-        lines = (
-            "WP-ATTACH-FAIL: pid=15990 site=bootstrap_watchpoint_open/backend_wait_addr_resolve "
-            "errno=3 resolve_errno=3 liveness=exiting liveness_result=1 liveness_errno=0 exit_proof=2\n"
-            "EXIT-BEFORE-ATTACH: pid=15990 opportunity=unknown entry_present=1 bootstrap_armed=0 "
-            "post_arm_checked=0 post_arm_ptr=0x0 addr_shared=0 resolve_errno=0 shared_errno=0 "
-            "counter_deltas_valid=1 lifecycle_init_no_state_delta=0 wait_read_fail_delta=0\n"
-            "INFO: PID 15990 exited (client)"
-        )
-        for known in (False, True):
-            with self.subTest(known_k1=known):
-                text, deltas, pids, short = fixture(k1=known)
-                deltas["lifecycle_exit_before_attach_total"] += 1
-                deltas["lifecycle_exit_before_attach_unknown_total"] = 1
-                deltas["wp_attach_exit_race_total"] = 1
-                data = (text + "\n" + lines, deltas, pids | {15990}, short | {15990})
-                self.assertEqual(self.classify(data)[0], 1)
-                first_class = "with_opportunity" if known else "unknown"
-                with self.assertRaisesRegex(AssertionError, f"{first_class} retirement delta must be zero"):
-                    self.fake_arm(data, churn=True)
+    def test_k3_cohort(self):
+        self.assertEqual(self.classify(fixture(k3=True)),
+                         (93, {"K1": set(), "K2": set(), "K3": {13}}))
+        self.assertEqual(self.fake_arm(fixture(k3=True), churn=True)["K3"], {13})
+
+    def test_k3_non_cohort(self):
+        text, deltas, pids, short = fixture(k3=True)
+        data = text, deltas, pids - {13}, short - {13}
+        self.assertEqual(self.classify(data)[0], 93)
+        self.assertEqual(self.fake_arm(data)["K3"], {13})
+
+    def test_k2_gone(self):
+        text, deltas, pids, short = fixture(k2=True)
+        text = text.replace("liveness=exiting liveness_result=1", "liveness=gone liveness_result=0")
+        text = text.replace("exit_proof=2", "exit_proof=1")
+        self.assertEqual(self.classify((text, deltas, pids, short))[0], 93)
+
+    def test_k3_gone(self):
+        text, deltas, pids, short = fixture(k3=True)
+        text = text.replace("liveness=exiting liveness_result=1", "liveness=gone liveness_result=0")
+        text = text.replace("exit_proof=2", "exit_proof=1").replace("errno=3 resolve_errno=3", "errno=3 resolve_errno=2")
+        self.assertEqual(self.classify((text, deltas, pids, short))[0], 93)
+
+    def test_non_cohort_k1_k2_long_lived(self):
+        text, deltas, _, _ = fixture(True, True)
+        data = text, deltas, {99}, set()
+        self.assertEqual(self.classify(data)[0], 93)
+        self.assertEqual(self.fake_arm(data), {"K1": {11}, "K2": {12}, "K3": set()})
+
+    def test_k3_live_attach_stays_red(self):
+        text, deltas, pids, short = fixture(k3=True)
+        # Leave counters unchanged to ensure the signature check itself fails.
+        text = text.replace("liveness=exiting", "liveness=live").replace("exit_proof=2", "exit_proof=0")
+        with self.assertRaisesRegex(AssertionError, "K3 attach failure lacks exact exit proof"):
+            self.module.classify_churn(text, deltas, pids, short)
+        self.assertEqual(self.classify((text, deltas, pids, short))[0], 1)
+
+    def test_k3_exact_exit_proof(self):
+        text, deltas, pids, short = fixture(k3=True)
+        # A positive proof code with inconsistent liveness is not the signature.
+        text = text.replace("liveness_result=1", "liveness_result=0")
+        self.assertEqual(self.classify((text, deltas, pids, short))[0], 1)
+
+    def test_k3_diagnostic_multiplicity(self):
+        text, deltas, pids, short = fixture(k3=True)
+        for changed in (text.replace(K3_WP, ""), text + "\n" + K3_WP,
+                        text.replace("pid=13 site=", "pid=14 site="), text + "\n" + K3_EXIT):
+            with self.subTest(text=changed):
+                self.assertEqual(self.classify((changed, deltas, pids, short))[0], 1)
+                self.assertTrue(self.rejection_lines((changed, deltas, pids, short), raises=True))
+
+    def test_k3_exact_fields(self):
+        text, deltas, pids, short = fixture(k3=True)
+        for old, new in (("post_arm_ptr=0x0", "post_arm_ptr=0x1"),
+                         ("bootstrap_armed=0", "bootstrap_armed=1"),
+                         ("counter_deltas_valid=1", "counter_deltas_valid=0"),
+                         ("errno=3 resolve_errno=3", "errno=3 resolve_errno=0"),
+                         ("liveness_errno=0", "liveness_errno=13")):
+            with self.subTest(field=old):
+                self.assertEqual(self.classify((text.replace(old, new), deltas, pids, short))[0], 1)
+
+    def test_k3_counter_mismatch(self):
+        text, deltas, pids, short = fixture(k3=True)
+        for key in ("lifecycle_exit_before_attach_unknown_total", "lifecycle_exit_before_attach_total",
+                    "wp_attach_exit_race_total"):
+            with self.subTest(counter=key):
+                bad = {**deltas, key: 2}
+                self.assertEqual(self.classify((text, bad, pids, short))[0], 1)
+                lines = self.rejection_lines((text, bad, pids, short), raises=True)
+                self.assertEqual(len(lines), 1)
+                self.assertIn(key, lines[0])
+
+    def test_non_cohort_overlap(self):
+        text, deltas, _, _ = fixture(k3=True)
+        self.assertEqual(self.classify((text + "\nINFO: PID 13 initialized (worker)",
+                                        deltas, {99}, set()))[0], 1)
+
+    def test_overlapping_classes(self):
+        text, deltas, pids, short = fixture(k1=True, k3=True)
+        text = text.replace("pid=13 ", "pid=11 ")
+        with self.assertRaisesRegex(AssertionError, "overlapping known-class outcomes"):
+            self.module.classify_churn(text, deltas, pids, short)
+
+    def test_all_classes_share_cap(self):
+        self.assertEqual(self.classify(fixture(True, True, True))[0], 1)
 
     def test_over_cap(self):
         text, deltas, _, _ = fixture(k1=True)
@@ -167,8 +240,8 @@ class KnownClassCases(unittest.TestCase):
         data = text, deltas, pids, short
         self.assertEqual(self.classify(data)[0], 0)
         outcome = self.fake_arm(data, churn=True)
-        self.assertEqual(outcome, {"K1": set(), "K2": set()})
-        with patch.object(self.module, "run_arm", side_effect=[None, outcome, None]), \
+        self.assertEqual(outcome, {"K1": set(), "K2": set(), "K3": set()})
+        with patch.object(self.module, "run_arm", side_effect=[outcome, outcome, None]), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(self.module.run_arms(1), 0)
 
@@ -193,7 +266,7 @@ class KnownClassCases(unittest.TestCase):
         data = text, deltas, pids, short
         self.assertEqual(self.classify(data)[0], 1)
         self.assertEqual(self.fake_arm(data, churn=True, baseline={"wp_attach_exit_race_total": 1}),
-                         {"K1": set(), "K2": set()})
+                         {"K1": set(), "K2": set(), "K3": set()})
 
     def test_remaining_pid_still_checked(self):
         text, deltas, pids, short = fixture(k1=True)
@@ -263,12 +336,13 @@ class KnownClassCases(unittest.TestCase):
             self.assertEqual(self.rejection_lines(data, raises=False), [])
 
     def test_long_lived_loss_stays_red(self):
-        with self.assertRaisesRegex(AssertionError, "with-opportunity INIT loss"):
-            self.fake_arm(fixture(k2=True))
+        for data in (fixture(k1=True), fixture(k2=True), fixture(k3=True)):
+            with self.subTest(data=data), self.assertRaises(AssertionError):
+                self.fake_arm(data)
 
     def test_churn_integration(self):
         self.assertEqual(self.fake_arm(fixture(True, True), churn=True),
-                         {"K1": {11}, "K2": {12}})
+                         {"K1": {11}, "K2": {12}, "K3": set()})
 
     def test_unclassified_attach_failure_preserves_master_args(self):
         text, deltas, pids, short = fixture()
@@ -296,7 +370,7 @@ class KnownClassCases(unittest.TestCase):
             calls.append((skip_store, churn))
             if skip_store and fail_control:
                 raise AssertionError("skipped-store control failed")
-            return {"K1": {11} if churn and known else set(), "K2": set()}
+            return {"K1": {11} if churn and known else set(), "K2": set(), "K3": set()}
 
         output = io.StringIO()
         with patch.object(self.module, "run_arm", side_effect=arm), redirect_stdout(output):
@@ -317,7 +391,35 @@ class KnownClassCases(unittest.TestCase):
         self.assertEqual(code, 93)
         self.assertEqual(calls, [(False, False), (False, True), (True, False)])
         self.assertEqual(output.strip(),
-                         "KNOWN-CLASS #933 arm=churn K1=[11] K2=[] count=1 cap=2")
+                         "KNOWN-CLASS #959 arm=churn K1=[11] K2=[] K3=[] count=1 cap=2")
+
+    def test_shared_cap_across_arms(self):
+        long_known = self.fake_arm((fixture(k1=True)[0], fixture(k1=True)[1], {99}, set()))
+        churn_known = self.fake_arm(fixture(k2=True, k3=True), churn=True)
+        with patch.object(self.module, "run_arm", side_effect=[long_known, churn_known, None]), \
+             redirect_stdout(io.StringIO()), \
+             self.assertRaisesRegex(AssertionError, "known-class shared run cap exceeded"):
+            self.module.run_arms(1)
+
+    def test_shared_cap_boundary_and_pid_reuse(self):
+        # Each arm has its own daemon: the same numeric PID is two losses.
+        known = {"K1": {11}, "K2": set(), "K3": set()}
+        output = io.StringIO()
+        with patch.object(self.module, "run_arm", side_effect=[known, known, None]), redirect_stdout(output):
+            self.assertEqual(self.module.run_arms(1), 93)
+        self.assertEqual(output.getvalue().count("count=2 cap=2"), 2)
+
+    def test_long_cohort_no_opportunity_stays_red(self):
+        text, deltas, pids, short = fixture()
+        text += "\n" + K2_INIT.replace("pid=12 ", "pid=42 ").replace("no_opportunity=0", "no_opportunity=1")
+        deltas["lifecycle_init_lost_total"] = 1
+        deltas["lifecycle_init_lost_no_opportunity_total"] = 1
+        # Include a valid non-cohort exception: it cannot excuse a missed cohort PID.
+        text += "\n" + K1
+        deltas["lifecycle_exit_before_attach_total"] = 1
+        deltas["lifecycle_exit_before_attach_with_opportunity_total"] = 1
+        with self.assertRaisesRegex(AssertionError, "long-lived cohort PID did not attach"):
+            self.fake_arm((text, deltas, pids | {42}, short))
 
     def test_clean_arms_exit_zero(self):
         code, calls, output = self.run_arms(known=False)
@@ -329,10 +431,27 @@ class KnownClassCases(unittest.TestCase):
 def mutants():
     definitions = (
         ("classifier always known", "    records = {prefix: {} for prefix in",
-         '    return {"K1": {11}, "K2": set()}\n    records = {prefix: {} for prefix in',
+         '    return {"K1": {11}, "K2": set(), "K3": set()}\n    records = {prefix: {} for prefix in',
          "test_unknown_only"),
         ("cap ignored", "if len(known) > KNOWN_CLASS_CAP:", "if False:", "test_over_cap"),
         ("diagnostic requirement dropped", "if not valid:", "if False:", "test_partial_diagnostic"),
+        ("K3 exit proof dropped", '            if not exit_proved(wp[0]):',
+         '            if False:', "test_k3_exact_exit_proof"),
+        ("K3 duplicate WP accepted", 'len(retired) != 1 or len(wp) != 1 or init:',
+         'len(retired) != 1 or not wp or init:', "test_k3_diagnostic_multiplicity"),
+        ("non-cohort acceptance removed", 'if known & pids - short_lived:',
+         'if not known <= pids & short_lived:', "test_non_cohort_k1_k2_long_lived"),
+        ("K2 gone proof removed", '(("exiting", "1", "2"), ("gone", "0", "1"))',
+         '(("exiting", "1", "2"),)', "test_k2_gone"),
+        ("long-lived classification disabled", '                if not skip_store:\n',
+         '                if churn and not skip_store:\n', "test_non_cohort_k1_k2_long_lived"),
+        ("cap only per arm", '    if count > KNOWN_CLASS_CAP:',
+         '    if False:', "test_shared_cap_across_arms"),
+        ("long-lived cohort accepted", 'if known & pids - short_lived:',
+         'if False:', "test_not_short_lived"),
+        ("long-lived attachment requirement dropped",
+         'if not churn and not skip_store and pids - attached:',
+         'if False:', "test_long_cohort_no_opportunity_stays_red"),
         ("third arm skipped", "    run_arm(pm_pid, skip_store=True)\n", "",
          "test_third_arm_failure_stays_red"),
         ("unclassified attach args changed", "error = AssertionError((key, after[key]))",

@@ -175,11 +175,12 @@ KNOWN_FAILING=(
     # Exit 79 requires valid captures, tolerance-only under-reads <=15.0 pp;
     # see the measured provenance and regression-tripwire comment in the test.
     'test_cross_validate_tiered|675|el8@4.18|exit=79'
-    # Ubuntu / 6.8: accepts only diagnosed #933 churn K1/K2 within the PID cap
-    # (exit 93), after all cohort checks and the skipped-store control pass.
+    # Ubuntu / 6.8: accepts only diagnosed #959 K1/K2/K3 in either recovery arm,
+    # including non-cohort children, within a shared cap of 2 PIDs (exit 93),
+    # after all cohort checks and the skipped-store control pass.
     # Any other exit stays red.
-    # Remove in the A2 PR (owner, #933 comment 6941834132: only until the needed PR lands).
-    'test_init_hint_recovery|933|ubuntu@6.8|exit=93'
+    # Owner decision: #933 comment 6984201938; remove in the PR that fixes #959.
+    'test_init_hint_recovery|959|ubuntu@6.8|exit=93'
 )
 
 # Read the runner's host, never a caller's OS/identity environment variables.
