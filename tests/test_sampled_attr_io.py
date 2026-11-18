@@ -263,7 +263,9 @@ int main(int argc, char **argv) {
 }
 ''')
         command = shlex.split(os.environ.get("CC", "cc")) + [
-            "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-D_FORTIFY_SOURCE=2",
+            "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
+            *shlex.split(os.environ.get("CFLAGS", "")),
+            "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=2",
             "-Werror=unused-result", "-Dfchown=pgwt_test_fchown", "-include", str(header),
             "-I" + str(ROOT / "src"), str(source), str(ROOT / "src/event_writer.c"),
             "-llz4", "-o", str(directory / "group-failure")]
@@ -438,7 +440,8 @@ int main(void)
         path.write_text(source)
         binary = path.with_suffix("")
         compiled = run(shlex.split(os.environ.get("CC", "cc")) +
-                       ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(path), "-o", str(binary)])
+                       ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                        *shlex.split(os.environ.get("CFLAGS", "")), str(path), "-o", str(binary)])
         assert compiled.returncode == 0, compiled.stderr
         result = run([str(binary)])
         assert result.returncode == 0, result.stderr
@@ -598,6 +601,39 @@ def main():
         result = run([str(build("baseline", source))])
         assert result.returncode == 0, result.stdout + result.stderr
         print(result.stdout, end="")
+        retirement_mutations = [
+            ("retirement_record_not_saved", ".address = r->status_addr, .pid = r->pid,",
+             ".address = 0, .pid = r->pid,",
+             "PG13 acceptance records address pid start time and generation after checks"),
+            ("retirement_candidate_promoted",
+             "r->shared = r->candidate = r->computed_hint = true;",
+             "r->shared = r->candidate = r->computed_hint = true;\n"
+             "            r->accepted = (struct pgwt_pgbs_acceptance){.address=r->status_addr,.pid=r->pid,.start_time=r->start_time,.shm_generation=layout->shm_generation};",
+             "PG13 candidate and computed hint never create acceptance record"),
+            ("retirement_sampler_observation_lost",
+             "reader->accepted.exit_observed = pgwt_pgbs_read_retirement(",
+             "reader->accepted.exit_observed = 0 * pgwt_pgbs_read_retirement(",
+             "PG13 sampler preserves retirement before invalidating accepted address"),
+            ("retirement_keep_batch_record_in_recovery",
+             "if (layout && layout->major == 13)\n        for (size_t i = 0; i < n; i++) {",
+             "if (false && layout && layout->major == 13)\n        for (size_t i = 0; i < n; i++) {",
+             "PG13 generation change clears acceptance record"),
+            ("retirement_keep_resolver_record_in_recovery",
+             "if (layout && layout->major == 13 && targets && n <= PGWT_PGBS_BATCH_MAX)",
+             "if (false && layout && layout->major == 13 && targets && n <= PGWT_PGBS_BATCH_MAX)",
+             "PG13 resolver clears acceptance before recovery early return"),
+            ("retirement_reset_keeps_record",
+             "    memset(reader, 0, sizeof(*reader));",
+             "    struct pgwt_pgbs_acceptance kept = reader->accepted;\n"
+             "    memset(reader, 0, sizeof(*reader));\n    reader->accepted = kept;",
+             "PG13 reader reset clears acceptance and retirement"),
+        ]
+        for label, before, after, assertion in retirement_mutations:
+            assert source.count(before) == 1, (label, "mutation anchor changed")
+            result = run([str(build(label, source.replace(before, after))), "retirement"])
+            assert result.returncode == 1 and f"FAIL: {assertion}" in result.stderr, (
+                label, result.returncode, result.stdout, result.stderr)
+            print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
         pg13_mutations = [
             ("pg13_scan_with_known_base", "    if (layout->status_array_base) return;",
              "    /* scan even though the computed base is available */",
@@ -828,7 +864,7 @@ def main():
             assert result.returncode == 1 and f"FAIL: {assertion}" in result.stderr, (label, result)
             print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
 
-        total = len(recovery_mutations) + len(pg13_mutations) + len(pg13_policy_mutations) + len(mutations) + len(other_mutations)
+        total = len(recovery_mutations) + len(retirement_mutations) + len(pg13_mutations) + len(pg13_policy_mutations) + len(mutations) + len(other_mutations)
         print(f"sampled_attr_io mutants: {total}/{total} built, reached and rejected by named assertions")
 
 

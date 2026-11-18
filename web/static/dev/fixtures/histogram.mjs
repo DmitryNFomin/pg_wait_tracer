@@ -7,6 +7,7 @@
  */
 
 import { BASE_NS, MIN_NS } from './base.mjs';
+import { heatmapWindow } from './coverage.mjs';
 
 /* The server's 16 log2 latency bands (µs), verbatim from the mock. */
 const LAT_LABELS = ['<1', '1-2', '2-4', '4-8', '8-16', '16-32', '32-64',
@@ -81,6 +82,16 @@ export const states = {
         tags: ['SEMANTICS', 'OCCLUSION', 'FEEDBACK'],
         opts: { captureFromNs: BASE_NS + 15 * MIN_NS },
         data: denseData(15),
+    },
+    'coverage-capture-loss': {
+        description: 'Incomplete coverage: the uncovered buckets are shaded and labelled, their cells absent; the colour scale follows the cells sent.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        data: heatmapWindow('capture_loss'),
+    },
+    'coverage-not-recorded': {
+        description: 'A legacy capture (no coverage record): the whole window is uncovered, no cells arrive, and the coverage notice stands in place of "No data" — never both.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        data: heatmapWindow('not_recorded'),
     },
     'one-hot-cell': {
         description: 'One 50 000-count cell over a ≤16 floor: heavy-tail worst case for the linear rainbow ramp (P8).',

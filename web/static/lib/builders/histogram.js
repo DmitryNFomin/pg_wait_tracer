@@ -17,6 +17,48 @@
  */
 
 import { fmtTime, fmtCount, esc } from '../format.js';
+import { coverageOf, fidelityBandStyle, INCOMPLETE_FIDELITY } from './fidelity.js';
+
+/* U3: dedicated series for the server's uncovered ranges (coverage verdict). */
+export const HEATMAP_COVERAGE_SERIES = 'pgwt-heatmap-coverage';
+
+/* Bucket indices whose [t, t + bucket_ns) meets an uncovered range with a
+ * non-empty interior; their cells are missing, never a measured count. */
+export function uncoveredBucketIndices(times, bucketNs, uncovered) {
+    const out = [];
+    if (!uncovered || !uncovered.length) return out;
+    times.forEach((t, i) => {
+        const end = t + (bucketNs > 0 ? bucketNs : 0);
+        if (uncovered.some(u => u.from < end && u.to > t)) out.push(i);
+    });
+    return out;
+}
+
+/* The colour-scale input in the raw-count domain. A withheld window has no
+ * whole-window max_count; the scale then follows the cells outside the
+ * uncovered buckets. Shared with the view's sticky max (views/histogram.js). */
+export function heatmapScaleMax(data) {
+    if (!data) return 1;
+    if (Number.isFinite(data.max_count) && data.max_count > 0) return data.max_count;
+    const cov = coverageOf(data);
+    if (!(cov && cov.withheld)) return data.max_count || 1;
+    const skip = new Set(uncoveredBucketIndices(data.times || [], data.bucket_ns || 0, cov.uncovered));
+    let max = 1;
+    for (const c of data.cells || []) {
+        if (!skip.has(c[0]) && Number.isFinite(c[2]) && c[2] > max) max = c[2];
+    }
+    return max;
+}
+
+function indexRuns(idx) {
+    const runs = [];
+    for (const i of idx) {
+        const last = runs[runs.length - 1];
+        if (last && i === last[1] + 1) last[1] = i;
+        else runs.push([i, i]);
+    }
+    return runs;
+}
 
 /* P8: single-hue perceptually-ordered ramp — violet (H≈288), monotone
  * lightness, dark→light = few→many on the dark surface. Replaces the 6-stop
@@ -68,8 +110,12 @@ export function buildHeatmapOption(data, opts) {
     // color map collapses everything but the hottest cell into the darkest
     // stops. Color therefore maps log1p(count); the raw count rides along in
     // dimension 3 for the tooltip.
-    const hmData = data.cells.map(c => [c[0], c[1], Math.log1p(c[2]), c[2]]);
-    const rawMax = data.max_count || 1;
+    const cov = coverageOf(data);
+    const uncoveredIdx = uncoveredBucketIndices(rawTimes, hbns, cov ? cov.uncovered : []);
+    const uncoveredSet = new Set(uncoveredIdx);
+    const cells = data.cells.filter(c => !uncoveredSet.has(c[0]));
+    const hmData = cells.map(c => [c[0], c[1], Math.log1p(c[2]), c[2]]);
+    const rawMax = heatmapScaleMax(data);
     const vmaxRaw = opts.maxCount != null ? opts.maxCount : rawMax;
 
     const series = [{
@@ -125,6 +171,25 @@ export function buildHeatmapOption(data, opts) {
         });
     }
 
+    if (uncoveredIdx.length) {
+        const style = fidelityBandStyle(INCOMPLETE_FIDELITY);
+        series.push({
+            name: HEATMAP_COVERAGE_SERIES, type: 'line', data: [], silent: true,
+            showSymbol: false,
+            markArea: {
+                silent: true,
+                label: { show: true, position: 'insideTop', color: '#999',
+                    fontSize: 10, formatter: style.label },
+                data: indexRuns(uncoveredIdx).map(([a, b]) => [
+                    { xAxis: a, itemStyle: { color: style.fill,
+                        borderColor: style.border, borderWidth: 1,
+                        borderType: 'dashed' } },
+                    { xAxis: b },
+                ]),
+            },
+        });
+    }
+
     const option = {
         backgroundColor: 'transparent',
         animation: false,
@@ -167,7 +232,8 @@ export function buildHeatmapOption(data, opts) {
         },
         series,
     };
-    return { option, hasData: true, rawMax, notCapturedCount };
+    return { option, hasData: true, rawMax, notCapturedCount,
+        coverage: cov, uncoveredCount: uncoveredIdx.length };
 }
 
 /* PURE: derive the class/event selector model from a top_events row list.

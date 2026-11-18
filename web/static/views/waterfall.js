@@ -11,7 +11,10 @@ import {
 } from '../lib/builders/waterfall.js';
 import { backendActivityHtml } from '../lib/builders/backend-span.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
-import { mountUnavailablePanel } from '../lib/panels.js';
+import {
+    mountUnavailablePanel, buildCoverageBadge, paneFidelityBadgeHtml,
+    buildCoverageNotice, coverageEmptyStateHtml,
+} from '../lib/panels.js';
 import { attachSelection } from '../lib/selection.js';
 import { esc, fmtTimeNs } from '../lib/format.js';
 
@@ -30,6 +33,7 @@ export function createWaterfallView() {
     let preferredPid = null;
     let detailRef = null;
     let detailOpts = null;
+    let detailNotice = null;   // U3: coverage notice of the detail response
     let currentWindow = null;
     // #222: which slice requests() asks the server for -- see
     // EXECUTIONS_SORT_* in lib/builders/waterfall.js for why the default is
@@ -70,6 +74,7 @@ export function createWaterfallView() {
             '</div>' +
             ' ' + execScopeNoteHtml() +
             ' <div id="executions-disclosure" class="exec-scope-note" hidden></div>' +
+            ' <div id="executions-coverage"></div>' +
             ' <div id="executions-table"></div>' +
             '</section>' +
             '<section class="waterfall-pane">' +
@@ -214,7 +219,8 @@ export function createWaterfallView() {
             Object.assign({}, detailOpts, from == null ? {} : { from, to }));
         if (!model.hasData) {
             disposeChart();
-            host.innerHTML = '<div class="loading">No execution events captured</div>';
+            host.innerHTML = coverageEmptyStateHtml(detailNotice,
+                '<div class="loading">No execution events captured</div>');
             return;
         }
         currentWindow = { from: model.windowFrom, to: model.windowTo };
@@ -327,6 +333,15 @@ export function createWaterfallView() {
                 executionSelectionPool((data.executions && data.executions.rows) || [], null);
             const undrawable = allExecutionsUndrawable(candidatePool);
             return { table, waterfall: wf, detail: data.detail,
+                // U3: record-level — rows stay, the coverage label rides along.
+                coverageBadge: buildCoverageBadge(data.executions) ||
+                    buildCoverageBadge(data.detail),
+                // ... and under an incomplete verdict the notice replaces
+                // every "No execution(s) …" placeholder.
+                coverageNotice: buildCoverageNotice(data.executions) ||
+                    buildCoverageNotice(data.detail),
+                detailNotice: buildCoverageNotice(data.detail) ||
+                    buildCoverageNotice(data.executions),
                 selected: data.selected, detailEnd: data.detailEnd,
                 allUndrawable: undrawable,
                 undrawableText: undrawable
@@ -346,6 +361,7 @@ export function createWaterfallView() {
         mount(el, model, ctx) {
             ctxRef = ctx;
             detailRef = null; detailOpts = null; currentWindow = null;
+            detailNotice = model.detailNotice || null;
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
             if (model.unavailable) {
                 disposeChart();
@@ -357,6 +373,8 @@ export function createWaterfallView() {
             const disclosure = document.getElementById('executions-disclosure');
             disclosure.textContent = model.table.disclosure || '';
             disclosure.hidden = !model.table.disclosure;
+            document.getElementById('executions-coverage').innerHTML =
+                paneFidelityBadgeHtml(model.coverageBadge);
             document.getElementById('waterfall-context').innerHTML = model.context || '';
             document.getElementById('waterfall-backend-activity').innerHTML = model.backendActivity || '';
             const countsLabel = document.getElementById('executions-counts-label');
@@ -371,7 +389,9 @@ export function createWaterfallView() {
             if (!model.table.hasRows) {
                 document.querySelector('.execution-list').classList.remove('list-has-more');
                 disposeChart();
-                tableHost.innerHTML = '<div class="loading">No executions match the selected query/session filters and time range.</div>';
+                if (model.coverageNotice) document.getElementById('executions-coverage').innerHTML = '';
+                tableHost.innerHTML = coverageEmptyStateHtml(model.coverageNotice,
+                    '<div class="loading">No executions match the selected query/session filters and time range.</div>');
                 pane.style.display = 'none';
                 return;
             }
@@ -384,9 +404,10 @@ export function createWaterfallView() {
             if (!model.detail || !model.waterfall) {
                 disposeChart();
                 document.getElementById('waterfall-chart').innerHTML =
+                    coverageEmptyStateHtml(model.detailNotice,
                     '<div class="loading">' + (model.selected
                         ? 'No detail was returned for the selected execution.'
-                        : 'No execution matches the selected query/session filters and time range.') + '</div>';
+                        : 'No execution matches the selected query/session filters and time range.') + '</div>');
                 return;
             }
             // #587 / #537: every candidate is undrawable (not just

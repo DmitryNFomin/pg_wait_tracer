@@ -14,7 +14,7 @@ import tempfile
 
 RUNNER = Path(__file__).with_name("run_all.sh").read_text()
 ENTRY = "test_cross_validate_tiered|675|el8@4.18|exit=79"
-CHURN_ENTRY = "test_init_hint_recovery|933|ubuntu@6.8|exit=93"
+CHURN_ENTRY = "test_init_hint_recovery|959|ubuntu@6.8|exit=93"
 CHURN_TEST = "test_init_hint_recovery"
 TIERED = Path(__file__).with_name("test_cross_validate_tiered.sh").read_text()
 TEST = "test_cross_validate_tiered"
@@ -142,7 +142,7 @@ with tempfile.TemporaryDirectory(prefix="pgwt-known-failing-") as temp:
     ]
     for label, os_name, release, rc, expected, mutant in churn_cases:
         def check_churn(result):
-            summary = check_result(result, test=CHURN_TEST, issue=933, expected_exit=93, **expected)
+            summary = check_result(result, test=CHURN_TEST, issue=959, expected_exit=93, **expected)
             assert summary["os"] == os_name
             assert summary["kernel"] == ".".join(release.split(".")[:2])
             if rc == 1:
