@@ -21,6 +21,9 @@
 #   PGWT_BOX          ssh target for the default (Ubuntu) box, e.g. root@1.2.3.4
 #   PGWT_BOX_EL8 / PGWT_BOX_EL9 / PGWT_BOX_UBUNTU   per-OS targets
 #   PGWT_BOX_DIR      remote checkout root (default ~/pgwt-check)
+#   PGWT_BOX_OUTAGE_SECONDS  total failed-poll/outage budget (default 1800s)
+#   PGWT_BOX_POLL_SECONDS    healthy poll interval (default 10s); transport
+#                     failures back off 2, 4, 8, 16, then 30s, within that budget
 #   PGWT_PGPORT / PGWT_PG_PORT_BASE   forwarded to the remote tests/run_all.sh
 #                     (via `sudo env ...`, since sudo's default env_reset would
 #                     otherwise drop them) when set on the Mac side; see
@@ -88,6 +91,11 @@ OS="${OS:-ubuntu}"
 PG="${PG:-}"
 EPHEMERAL="${EPHEMERAL:-0}"
 KEEP="${KEEP:-0}"
+outage_bound="${PGWT_BOX_OUTAGE_SECONDS:-1800}"
+poll_interval="${PGWT_BOX_POLL_SECONDS:-10}"
+for value in "$outage_bound" "$poll_interval"; do
+    [[ "$value" =~ ^[1-9][0-9]*$ ]] || { echo 'box-check: poll/outage seconds must be positive integers' >&2; exit 2; }
+done
 
 # Bound dead connections so failures reach the EXIT cleanup trap. Keep the
 # same transport options on direct SSH calls and rsync's SSH subprocesses.
@@ -372,16 +380,22 @@ rsync_e="ssh ${ssh_keepalive[*]}"
 # too (KEEP=1 retains it for debugging). Persistent runs remove only their own
 # directory after pulling artifacts, on failure as well as success.
 source_manifest=""
+poll_reply=""
+remote_started=0
 run_cleanup() {
     local rc=$?
     [[ -z "$source_manifest" ]] || rm -f "$source_manifest" "$source_manifest.paths"
+    [[ -z "$poll_reply" ]] || rm -f "$poll_reply"
     if [[ "$EPHEMERAL" == 1 ]]; then
         ephemeral_cleanup
     elif [[ -n "$remote_dir" ]]; then
         # OpenSSH uses the first value; retain cleanup's shorter connect timeout.
-        if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "${ssh_keepalive[@]}" "$target" "sudo rm -rf -- '$remote_dir'"; then
+        # A lost launch acknowledgement can leave the PID unknown locally.
+        # In that case retain the directory too; never interrupt a gate run.
+        if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "${ssh_keepalive[@]}" "$target" \
+            "if [ '$remote_started' = 0 ] || [ -f '$remote_dir/.box-check.exit' ] || { [ -s '$remote_dir/.box-check.pid' ] && ! kill -0 \"\$(cat '$remote_dir/.box-check.pid')\" 2>/dev/null; }; then sudo rm -rf -- '$remote_dir'; else echo 'box-check: retaining active remote run at $target:$remote_dir'; fi"; then
             echo "box-check: WARNING: could not prune $target:$remote_dir; remove it manually" >&2
-            rc=1
+            [[ "$rc" -ne 0 ]] || rc=1
         fi
     fi
     exit "$rc"
@@ -548,10 +562,95 @@ sudo_env="$sudo_env PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES"
 # library to the tests sub-make. On EL8 these must be the bundled versions;
 # the tests' default -lbpf would silently select the old system library.
 lock_header='exec 9>/tmp/pgwt-box-check.lock; if flock -n 9; then echo "box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)"; else lock_wait_start_ns=$(date +%s%N); echo "box-check: waiting for /tmp/pgwt-box-check.lock"; flock 9 || exit; lock_wait_ms=$(( ($(date +%s%N) - lock_wait_start_ns) / 1000000 )); echo "box-check: lock acquired (waited_for_lock=yes, lock_wait_ms=${lock_wait_ms})"; fi;'
-ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
-    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && bash -c '$lock_header env OS=$OS$sudo_env bash scripts/box-tier.sh $tree_hash $commit $pgarg'" \
-    2>&1 | tee -a "$log"
-rc=${PIPESTATUS[0]}
+# Detach the shared box tier (including live UI smoke), retaining fd 9
+# until it finishes. Provisioning and source rsync stay attached. No new
+# whole-run timeout is introduced: the caller's existing deadline still applies.
+# The EXIT trap publishes the status atomically, after ALL worker log writes.
+worker="trap 'rc=\$?; printf \"%s\\n\" \"\$rc\" > .box-check.exit.tmp; mv .box-check.exit.tmp .box-check.exit' EXIT; $lock_header env OS=$OS$sudo_env bash scripts/box-tier.sh $tree_hash $commit $pgarg"
+# Quote the command for the remote login shell, including the trap's quotes.
+worker_quoted="'${worker//\'/\'\\\'\'}'"
+remote_started=1
+remote_pid=$(ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
+    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && { nohup setsid bash -c $worker_quoted > .box-check.log 2>&1 < /dev/null & echo \$! > .box-check.pid; cat .box-check.pid; }" 2>>"$log") || true
+[[ "$remote_pid" =~ ^[0-9]+$ ]] || remote_pid=unknown
+echo "box-check: detached pid=$remote_pid remote log=$target:$remote_dir/.box-check.log" | tee -a "$log"
+
+poll_reply=$(mktemp) || exit 1
+offset=0
+outage_used=0
+outage_start=0
+backoff=2
+transport_give_up() {
+    local identity="$target"
+    [[ "$EPHEMERAL" != 1 ]] || identity="VM id=$server_id"
+    echo "box-check: FATAL transport outage exceeded ${outage_bound}s for $identity; remote log=$remote_dir/.box-check.log pid=$remote_pid" | tee -a "$log" >&2
+    exit 76
+}
+while :; do
+    poll_start=$(date +%s)
+    if [[ "$outage_start" -ne 0 ]] && (( outage_used + poll_start - outage_start >= outage_bound )); then
+        transport_give_up
+    fi
+    # Status is sampled BEFORE log size: a published exit guarantees this
+    # snapshot includes the final bytes. A failed/partial SSH response is
+    # discarded, leaving offset unchanged for the next transport attempt.
+    if ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
+        "cd '$remote_dir' && python3 - '$offset'" >"$poll_reply" 2>>"$log" <<'POLL'
+import os
+import pathlib
+import sys
+offset = int(sys.argv[1])
+status = pathlib.Path('.box-check.exit')
+rc = status.read_text().strip() if status.exists() else 'running'
+pid = pathlib.Path('.box-check.pid').read_text().strip()
+with open('.box-check.log', 'rb') as log:
+    size = os.fstat(log.fileno()).st_size
+    if size < offset:
+        raise RuntimeError('remote log shrank')
+    print(size, rc, pid, flush=True)
+    log.seek(offset)
+    remaining = size - offset
+    while remaining:
+        chunk = log.read(min(65536, remaining))
+        if not chunk:
+            raise RuntimeError('remote log truncated')
+        sys.stdout.buffer.write(chunk)
+        remaining -= len(chunk)
+POLL
+    then
+        read -r size status pid < "$poll_reply"
+        received=$(tail -n +2 "$poll_reply" | wc -c | tr -d ' ')
+        if [[ "$size" =~ ^[0-9]+$ && "$pid" =~ ^[0-9]+$ &&
+              ( "$status" == running || "$status" =~ ^[0-9]+$ ) ]] &&
+              (( size >= offset && received == size - offset )); then
+            if [[ "$outage_start" -ne 0 ]]; then
+                outage_used=$((outage_used + $(date +%s) - outage_start))
+                (( outage_used <= outage_bound )) || transport_give_up
+                outage_start=0
+            fi
+            tail -n +2 "$poll_reply" | tee -a "$log"
+            offset=$size
+            remote_pid=$pid
+            backoff=2
+            if [[ "$status" != running ]]; then
+                rc=$status
+                break
+            fi
+            sleep "$poll_interval"
+            continue
+        fi
+    fi
+    [[ "$outage_start" -ne 0 ]] || outage_start=$poll_start
+    remaining=$((outage_bound - outage_used - $(date +%s) + outage_start))
+    if (( remaining <= 0 )); then
+        transport_give_up
+    fi
+    delay=$backoff
+    (( delay <= remaining )) || delay=$remaining
+    sleep "$delay"
+    backoff=$((backoff * 2))
+    (( backoff <= 30 )) || backoff=30
+done
 
 # issue #93: pull the live-UI-smoke artifacts back regardless of rc — a
 # failing run's frames/video are exactly what a reviewer needs (a `-n` skip
