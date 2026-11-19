@@ -80,7 +80,7 @@ struct pgwt_escalation {
 
     /* Lifetime stats (control-socket metrics). */
     uint64_t  windows_total;      /* escalation windows opened */
-    uint64_t  denied_total;       /* manual escalates denied (over budget) */
+    uint64_t  denied_total;       /* escalation denials, including preseed failures */
     uint64_t  budget_closed_total;/* windows closed mid-flight by the budget clamp (ESC-1) */
 };
 

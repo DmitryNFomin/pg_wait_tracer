@@ -70,7 +70,7 @@ static int maps_prefix_lines;
 static uint32_t wait_words[1024];
 static uint64_t refusal_wait_addr;
 static uint32_t refusal_wait_value;
-static FILE *proc_file;
+static FILE *proc_files[8];
 static int private_target, private_reader, incarnation = 1;
 static int tear_row = -1, transient_tear, short_row = -1, fault_row = -1;
 static int reader_gone, mutate_on_span, max_iovs, after_copy[1024], visits[1024];
@@ -156,25 +156,37 @@ static int io_open(const char *path, int flags, ...)
 {
     (void)flags;
     if (strstr(path, "/stat") || strstr(path, "/maps")) {
-        proc_opens++; proc_file = io_fopen(path, "r"); fopens--;
-        return proc_file ? 103 : -1;
+        proc_opens++;
+        for (size_t i = 0; i < sizeof(proc_files)/sizeof(*proc_files); ++i) {
+            if (proc_files[i]) continue;
+            proc_files[i] = io_fopen(path, "r"); fopens--;
+            return proc_files[i] ? 103 + (int)i : -1;
+        }
+        abort();
     }
     opens++; return 101;
 }
 static int io_openat(int fd, const char *path, int flags, ...)
 { (void)fd; (void)path; (void)flags; openats++; return 101; }
 static int io_close(int fd) {
-    if (fd == 103) { proc_closes++; fclose(proc_file); proc_file = NULL; return 0; }
+    if (fd >= 103 && fd < 111) {
+        proc_closes++; fclose(proc_files[fd-103]); proc_files[fd-103] = NULL; return 0;
+    }
     closes++; return 0;
 }
 static ssize_t io_read(int fd, void *buf, size_t size)
 {
-    if (fd != 103) { errno = EBADF; return -1; }
-    proc_reads++; return (ssize_t)fread(buf, 1, size, proc_file);
+    if (fd < 103 || fd >= 111 || !proc_files[fd-103]) { errno = EBADF; return -1; }
+    proc_reads++; return (ssize_t)fread(buf, 1, size, proc_files[fd-103]);
 }
 static ssize_t io_pread(int fd, void *buf, size_t size, off_t offset)
 {
-    (void)fd; reads++;
+    if (fd >= 103 && fd < 111 && proc_files[fd-103]) {
+        proc_reads++;
+        if (fseek(proc_files[fd-103], (long)offset, SEEK_SET) != 0) return -1;
+        return (ssize_t)fread(buf, 1, size, proc_files[fd-103]);
+    }
+    reads++;
     uintptr_t addr = (uintptr_t)offset;
     if (addr == (uintptr_t)&anchor_backend_id && size == 4) {
         memcpy(buf, &anchor_backend_id, size); return (ssize_t)size;
@@ -705,7 +717,7 @@ void pgwt_bm_write(struct pgwt_backend_meta_writer *bm, pid_t pid, const struct 
 const char *pgwt_backend_type_name(enum pgwt_backend_type type) { (void)type; return "client"; }
 static void report_state_map_full(struct pgwt_daemon *d, pid_t pid)
 { (void)d; (void)pid; }
-static void seed_state_entry(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
+void pgwt_sampler_seed_state_entry(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
 { (void)d; (void)pid; (void)addr; }
 static int read_init_state(void *ctx, pid_t pid, struct pgwt_pid_state *state)
 { (void)ctx; (void)pid; memset(state, 0, sizeof(*state)); return 0; }
@@ -1515,12 +1527,92 @@ static void test_retry_and_idle(int major)
     release_daemon(d);
 }
 
+static void test_preseed_cold_wait_hook(void)
+{
+    struct pgwt_daemon *d = new_daemon(17);
+    struct pgwt_backend *be = alloc_backend(&d->backends, 1000, false);
+    wait_addr = test_wait(17, 0);
+    CHECK(setenv("PGWT_TEST_SKIP_SAMPLER_WAIT_ADDR", "1", 1) == 0, "enable cold wait cache hook");
+    CHECK(sample_registry(d, clock_ns) == 0 && be->wp_addr == 0 &&
+          be->sampled_reader.pid == 1000,
+          "cold wait cache hook preserves enrollment and prevents sampler resolution");
+    CHECK(unsetenv("PGWT_TEST_SKIP_SAMPLER_WAIT_ADDR") == 0, "disable cold wait cache hook");
+    CHECK(sample_registry(d, clock_ns + 1) == 1 && be->wp_addr == wait_addr,
+          "sampler resolves cold wait cache normally with test hook off");
+    release_daemon(d);
+    puts("preseed cold wait cache hook: enrolled, unresolved while enabled, default resolution restored PASS");
+}
 #endif
+static void test_pg13_retirement(void)
+{
+    for (int other=0; other<2; ++other) {
+        fixture(13, 1); pg13_anchor(511); pg13_pending(0); pg13_discover(1);
+        CHECK(cache[0].candidate && cache[0].status_addr && !cache[0].accepted.address,
+              "PG13 candidate and computed hint never create acceptance record");
+        batch();
+        CHECK(!cache[0].candidate && cache[0].accepted.address == entries[0] &&
+              cache[0].accepted.pid == 1000 && cache[0].accepted.start_time == 1 &&
+              cache[0].accepted.shm_generation == layout.shm_generation &&
+              !cache[0].accepted.exit_observed,
+              "PG13 acceptance records address pid start time and generation after checks");
+        put(0, &layout.st_procpid, other ? 2000 : 0);
+        /* Slot shutdown/reuse can also change the activity pointer. */
+        if (other) put(0, &layout.st_activity_raw, (uintptr_t)activity[1]);
+        batch();
+        CHECK(targets[0].rc < 0 && !cache[0].status_addr &&
+              cache[0].accepted.address == entries[0] &&
+              cache[0].accepted.exit_observed == (other ? PGWT_PGBS_RETIRED_OTHER_PID : PGWT_PGBS_RETIRED_ZERO),
+              "PG13 sampler preserves retirement before invalidating accepted address");
+#ifdef PGWT_LIFECYCLE_SOURCE
+        struct pgwt_backend be = {.pid=1000,.pgbs_addr=entries[0],.sampled_reader=cache[0]};
+        finish_sampled_attr(&be, -1, EAGAIN, 100);
+        CHECK(!be.pgbs_addr && be.sampled_reader.accepted.exit_observed == cache[0].accepted.exit_observed,
+              "PG13 sampler finish preserves retained retirement");
+#endif
+        int fd=io_open("/proc/1000/stat", O_RDONLY | O_CLOEXEC);
+        CHECK(pgwt_pgbs_read_retirement(1000, 42, fd, &cache[0].accepted, &layout) ==
+              (other ? PGWT_PGBS_RETIRED_OTHER_PID : PGWT_PGBS_RETIRED_ZERO),
+              "PG13 sampler retirement remains usable after address cleared");
+        io_close(fd);
+        pgwt_pgbs_reader_reset(&cache[0]);
+        CHECK(!cache[0].accepted.address && !cache[0].accepted.exit_observed,
+              "PG13 reader reset clears acceptance and retirement");
+    }
+    for (int invalid=0; invalid<5; ++invalid) {
+        fixture(13, 1); pg13_anchor(511); pg13_pending(0); pg13_discover(1);
+        if (invalid != 0) batch();
+        put(0, &layout.st_procpid, 0);
+        if (invalid == 1) incarnation=2;
+        if (invalid == 2) mapping_incarnation=2;
+        if (invalid == 3) put(0, &layout.st_changecount, 21);
+        if (invalid == 4) short_row=0;
+        batch();
+        CHECK(!cache[0].accepted.exit_observed,
+              "PG13 sampler never retains candidate reused torn short or stale-generation proof");
+    }
+    fixture(13, 1); pg13_anchor(511); pg13_pending(0); pg13_discover(1); batch();
+    layout.shm_generation++;
+    batch();
+    CHECK(!cache[0].accepted.address, "PG13 generation change clears acceptance record");
+    fixture(13, 1); pg13_anchor(511); pg13_pending(0); pg13_discover(1); batch();
+    layout.pg13_recovery=PGWT_PGBS_PG13_PENDING;
+    batch();
+    CHECK(!cache[0].accepted.address, "PG13 recovery not READY clears acceptance record");
+    fixture(13, 1); pg13_anchor(511); pg13_pending(0); pg13_discover(1); batch();
+    layout.pg13_recovery=PGWT_PGBS_PG13_DEGRADED;
+    pg13_discover(1);
+    CHECK(!cache[0].accepted.address, "PG13 resolver clears acceptance before recovery early return");
+    fixture(13, 1); pg13_anchor(511); pg13_pending(0); pg13_discover(1);
+    incarnation=2; batch();
+    CHECK(!cache[0].accepted.address, "PG13 failed incarnation check never creates acceptance record");
+    puts("PG13 acceptance and sampler retirement lifecycle: PASS");
+}
 int main(int argc, char **argv)
 {
     (void)io_openat; /* catches an accidentally reintroduced openat */
     if (argc == 2) {
-        if (!strcmp(argv[1], "pg13")) {
+        if (!strcmp(argv[1], "retirement")) test_pg13_retirement();
+        else if (!strcmp(argv[1], "pg13")) {
             test_pg13_computed(); test_pg13_guards();
             test_pg13_pending_backend_id_known_base(); test_pg13_rejected_computed_hint();
         }
@@ -1541,10 +1633,12 @@ int main(int argc, char **argv)
 #endif
         else return 2;
     } else {
+        test_pg13_retirement();
         test_pg13_computed(); test_pg13_guards();
         test_pg13_pending_backend_id_known_base(); test_pg13_rejected_computed_hint();
 #ifdef PGWT_LIFECYCLE_SOURCE
         test_pg13_registry(); test_pg13_recovery();
+        test_preseed_cold_wait_hook();
 #endif
         for (int i = 0; i < 3; i++) {
         const int major[] = {13,17,18};

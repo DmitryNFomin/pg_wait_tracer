@@ -6,7 +6,8 @@
  * builder function to exercise:
  *   states['<kebab-name>'] = {
  *     description, tags,
- *     fn: 'shading' | 'annotation' | 'unavailable' | 'metrics' | 'escalate' | 'pane' | 'compare',
+ *     fn: 'shading' | 'annotation' | 'unavailable' | 'metrics' | 'escalate' | 'pane' | 'compare'
+ *         | 'coverage',   // U3: the coverage-withheld notice (lib/panels.js)
  *     args: [...],   // the function's positional arguments, pure data
  *   }
  * The gallery renders shading/annotation models as a band track over the
@@ -18,6 +19,7 @@
  */
 
 import { BASE_NS, MIN_NS } from './base.mjs';
+import { COVERAGE, withheld } from './coverage.mjs';
 
 const WIN = { from: BASE_NS, to: BASE_NS + 15 * MIN_NS };
 /* Last on-axis x = last bucket START (< win.to) — the very gap that made the
@@ -161,6 +163,36 @@ export const states = {
         tags: ['FEEDBACK', 'SEMANTICS', 'fidelity', 'compare'],
         fn: 'compare',
         args: [{ fidelity: 'future-pause-verdict' }, { fidelity: 'exact' }, {}],
+    },
+    'coverage-capture-loss': {
+        description: 'Withheld whole-window pane: the coverage label with its cause and the one uncovered range — never a number, never zero.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        fn: 'coverage',
+        args: [withheld('capture_loss')],
+    },
+    'coverage-restart-postgres': {
+        description: 'Withheld pane across a PostgreSQL restart: the restart cause named, the downtime listed.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        fn: 'coverage',
+        args: [withheld('restart_postgres')],
+    },
+    'pane-in-flight-excluded': {
+        description: 'Live complete window whose open waits are not counted: the in-flight time excluded mark on an otherwise exact pane.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        fn: 'pane',
+        args: [{ fidelity: 'exact', coverage: COVERAGE.complete_xf }],
+    },
+    'pane-live-edge': {
+        description: 'Live window whose last watermark trails its end: whole-window numbers labelled "up to HH:MM:SS", the clipped range named "Live — not yet confirmed after HH:MM:SS", plus the in-flight mark.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        fn: 'pane',
+        args: [{ fidelity: 'exact', coverage: COVERAGE.live_edge_xf }],
+    },
+    'pane-idle-unverified': {
+        description: 'DB time complete, idle coverage not: the Idle time unverified mark (events pane).',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        fn: 'pane',
+        args: [{ fidelity: 'exact', coverage: COVERAGE.idle_unverified }, { idle: true }],
     },
     'compare-unknown-unavailable': {
         description: 'Incomplete capture and an unavailable baseline explain why there is no comparison.',

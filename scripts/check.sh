@@ -490,6 +490,9 @@ step "cross-validate tolerance derivation + bypass suite (issues #294/#306/#321)
 run bash tests/test_xval_tolerance_derivation.sh
 
 if [[ $FAST -eq 0 ]]; then
+    step "overhead gate liveness and stall evidence controls (#951)"
+    run python3 -B tests/test_overhead_harness.py
+
     # ── Port allocation (so two `make check` runs on this Mac don't collide) ─
     # One free base per run, laid out at FIXED OFFSETS below so every mock
     # server this run spawns gets a run-private port; no lock (that would

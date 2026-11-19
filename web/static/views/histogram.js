@@ -22,10 +22,24 @@
  *     ctx.onDrill (time-bucket isolate; the app's registry routes it).
  */
 
-import { buildHeatmapOption, buildSelectorModel } from '../lib/builders/histogram.js';
+import {
+    buildHeatmapOption, buildSelectorModel, heatmapScaleMax,
+} from '../lib/builders/histogram.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
-import { mountUnavailablePanel } from '../lib/panels.js';
-import { fmtCount } from '../lib/format.js';
+import {
+    mountUnavailablePanel, buildCoverageBadge, paneFidelityBadgeHtml,
+    buildCoverageNotice, coverageEmptyStateHtml,
+} from '../lib/panels.js';
+import { fmtCount, esc } from '../lib/format.js';
+
+/* U3: the selectors are built from top_events, a whole-window command the
+ * server withholds on an incomplete window. Then they are not an empty list:
+ * both are disabled and say why, with the coverage label. PURE. */
+export function selectorCoverageHtml(notice) {
+    if (!notice) return '';
+    return '<span class="selector-coverage" role="status" style="color:#aaa;font-size:11px">' +
+        esc(notice.label) + '</span>';
+}
 
 const BUCKETS = () =>
     Math.min(Math.floor((typeof window !== 'undefined' ? window.innerWidth : 1800) / 6), 300);
@@ -49,6 +63,7 @@ export function createHistogramView() {
     let ctxRef = null;         // last ctx (selector edits + cell clicks need it)
     let lastData = null;       // last heatmap payload (cell-click → bucket time)
     let vmaxState = null;      // {key,span,anchor,filters,value}, raw-count domain
+    let eventsNotice = null;   // U3: top_events withheld -> selectors disabled
 
     function fetchHeatmap(filters) {
         return ctxRef.transport.request(ctxRef.channel('heatmap'), 'heatmap', {
@@ -66,7 +81,7 @@ export function createHistogramView() {
         const span = ctxRef.timeRange.span();
         const anchor = ctxRef.timeRange.to;
         const filterKey = JSON.stringify(ctxRef.filters.snapshot());
-        const raw = (data && data.max_count) || 1;
+        const raw = heatmapScaleMax(data);
         vmaxState = nextStickyMax(vmaxState, raw,
             { span, anchor, filters: filterKey,
               live: ctxRef.isLiveTick ? ctxRef.isLiveTick() : false });
@@ -91,6 +106,11 @@ export function createHistogramView() {
     function renderHeatmap(data) {
         const host = document.getElementById('heatmap-container');
         if (!host) return;
+        // U3: the coverage label for this window (time-bucketed: the cells
+        // outside the uncovered ranges stay, the label rides along).
+        const covHost = document.getElementById('heatmap-coverage');
+        const notice = buildCoverageNotice(data);
+        if (covHost) covHost.innerHTML = paneFidelityBadgeHtml(buildCoverageBadge(data));
         // EXACT-required (A3): heatmap is unavailable over a sampled-only window.
         if (isUnavailable(data)) {
             if (chart) { chart.dispose(); chart = null; }
@@ -106,7 +126,12 @@ export function createHistogramView() {
         const model = buildHeatmapOption(data, { maxCount: stickyMax(data), captureFromNs });
         if (!model.hasData) {
             if (chart) { chart.dispose(); chart = null; }
-            host.innerHTML = '<div class="loading">No data for selected event/range</div>';
+            // U3: an empty grid under an incomplete verdict is time the
+            // capture never covered, not "no data": the notice replaces the
+            // placeholder and carries the label (the badge would repeat it).
+            if (notice && covHost) covHost.innerHTML = '';
+            host.innerHTML = coverageEmptyStateHtml(notice,
+                '<div class="loading">No data for selected event/range</div>');
             return;
         }
         if (!chart) {
@@ -182,6 +207,15 @@ export function createHistogramView() {
         const ae = typeof document !== 'undefined' ? document.activeElement : null;
         const model = buildSelectorModel(events, fmtCount);
         const f = ctxRef.filters.filters;
+        const note = document.getElementById('hm-coverage');
+        if (note) note.innerHTML = selectorCoverageHtml(eventsNotice);
+        classSelect.disabled = !!eventsNotice;
+        eventSelect.disabled = !!eventsNotice;
+        if (eventsNotice) {
+            classSelect.innerHTML = '<option value="">All</option>';
+            eventSelect.innerHTML = '<option value="">All</option>';
+            return;
+        }
 
         if (ae !== classSelect) {
             classSelect.innerHTML = '<option value="">All</option>';
@@ -221,7 +255,9 @@ export function createHistogramView() {
             '  <select id="hm-class"><option value="">All</option></select>' +
             '  <label>Event</label>' +
             '  <select id="hm-event"><option value="">All</option></select>' +
+            '  <span id="hm-coverage"></span>' +
             '</div>' +
+            '<div id="heatmap-coverage"></div>' +
             '<div id="heatmap-container"></div>';
         document.getElementById('hm-class').addEventListener('change', () => {
             populateEventSelect();
@@ -240,7 +276,7 @@ export function createHistogramView() {
                 'top_events', { from: ctx.timeRange.from, to: ctx.timeRange.to, filters: {} });
             events = (evData && evData.rows) || [];
             const hm = await fetchHeatmap(ctx.filters.snapshot());
-            return { events, heatmap: hm };
+            return { events, eventsNotice: buildCoverageNotice(evData), heatmap: hm };
         },
 
         build(data, ctx) {
@@ -252,6 +288,7 @@ export function createHistogramView() {
             const captureFromNs = ctx && ctx.server ? ctx.server.fromNs : null;
             return {
                 selectors: buildSelectorModel(data.events, fmtCount),
+                eventsNotice: data.eventsNotice || null,
                 heatmap: buildHeatmapOption(data.heatmap, { captureFromNs }),
                 raw: data.heatmap,
             };
@@ -262,6 +299,7 @@ export function createHistogramView() {
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
             el = container;
             ensureShell(container);
+            eventsNotice = model.eventsNotice || null;
             populateSelectors();
             renderHeatmap(model.raw);
         },

@@ -47,6 +47,16 @@ struct pgwt_counters {
     uint64_t wp_attach_failures_live_total;
     uint64_t wp_attach_failures_unknown_total;
     uint64_t wp_attach_failures_gone_total; /* non-ESRCH failure on a gone target */
+    uint64_t exact_preseed_no_command_total;
+    uint64_t exact_preseed_gone_total, exact_preseed_exiting_total;
+    uint64_t exact_preseed_null_entry_total, exact_preseed_startup_total;
+    uint64_t exact_preseed_unpublished_total, exact_preseed_reread_total;
+    uint64_t exact_preseed_wait_addr_refreshed_total;
+    uint64_t exact_preseed_torn_exhausted_total;
+    uint64_t exact_preseed_retired_zero_total, exact_preseed_retired_other_pid_total;
+    uint64_t exact_preseed_failures_total;
+    uint64_t exact_preseed_overwrite_refusals_total;
+    uint64_t exact_preseed_late_attach_failures_total;
     uint64_t prev_events_total;        /* events_total at previous timer tick */
     double   events_per_sec;           /* recent rate, refreshed each tick */
 

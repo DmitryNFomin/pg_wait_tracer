@@ -754,7 +754,7 @@ static int dump_qid_index(struct pgwt_daemon *d, struct pgwt_sampler *s,
  * no on_watchpoint in sampled mode to create the entry. Idempotent
  * (BPF_NOEXIST). CAP-1: a full map here means this backend's samples lose
  * query attribution — counted + logged loudly, never silent. */
-static void seed_state_entry(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
+void pgwt_sampler_seed_state_entry(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
 {
     if (!d->skel)
         return;
@@ -1232,6 +1232,12 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
          * or lacking a status row pass here before becoming sampled targets. */
         if (pgwt_sampler_enroll_backend(be, tick_ts) != 0)
             continue;
+        /* TEST ONLY, default off: keep fork-registered backends unresolved
+         * until preseed, so the startup-lock test exercises a cold cache. */
+        if (be->wp_addr == 0 && getenv("PGWT_TEST_SKIP_SAMPLER_WAIT_ADDR")) {
+            fprintf(stderr, "WARN: TEST ONLY skip sampler wait address PID %d\n", be->pid);
+            continue;
+        }
         /* In sampled mode no bootstrap watchpoint resolves wp_addr, so a
          * freshly-forked backend arrives with wp_addr == 0. Lazily resolve
          * it via the version-appropriate path (PG17+ my_wait_event_info
@@ -1258,7 +1264,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                 be->wp_addr_shared = -1;
                 /* Seed state for the degraded attribution fallback and
                  * future exact watchpoint enrollment (idempotent). */
-                seed_state_entry(d, be->pid, be->wp_addr);
+                pgwt_sampler_seed_state_entry(d, be->pid, be->wp_addr);
             }
         }
         /* T2: classify the process ONCE it is far enough through init to

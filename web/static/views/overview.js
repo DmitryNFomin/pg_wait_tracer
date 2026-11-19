@@ -12,6 +12,7 @@
 import { buildTableModel, buildTruncationRow, orderResetKey } from '../lib/table.js';
 import {
     overviewConfig, compareOverviewConfig, createOverviewOrder, isIdleRow,
+    maskUnverifiedIdleTimeModel,
 } from '../lib/builders/table-configs.js';
 import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
 import { shiftWindow } from '../lib/camera.js';
@@ -20,7 +21,9 @@ import {
     buildPaneFidelity, paneFidelityBadgeHtml,
     buildComparePaneFidelity, compareFidelityHtml,
     baselineUnavailableHtml,
+    buildCoverageNotice, buildCompareCoverageNotice, coverageNoticeHtml,
 } from '../lib/panels.js';
+import { coverageOf, IDLE_UNVERIFIED_LABEL } from '../lib/builders/fidelity.js';
 import { fmtMs, fmtAas } from '../lib/format.js';
 
 /* PURE: time_model response -> summary metrics array. Exported for testing. */
@@ -41,9 +44,21 @@ export function buildSummary(data, numCpus, window) {
         }
     }
     out.push({ label: 'AAS', value: aas });
-    if (idleRow) out.push({ label: 'Idle', value: fmtMs(idleRow.ms) });
+    // U3: the server's idle verdict, never a number while it is unverified.
+    const cov = coverageOf(data);
+    if (cov && cov.idleUnverified) out.push({ label: 'Idle', value: IDLE_UNVERIFIED_LABEL });
+    else if (idleRow) out.push({ label: 'Idle', value: fmtMs(idleRow.ms) });
     out.push({ label: 'CPUs', value: String(numCpus) });
     return out;
+}
+
+function idleMasked(data) {
+    const cov = coverageOf(data);
+    return maskUnverifiedIdleTimeModel(data && data.rows, !!(cov && cov.idleUnverified));
+}
+
+function withIdleMasked(data) {
+    return data ? Object.assign({}, data, { rows: idleMasked(data) }) : data;
 }
 
 function summaryHtml(metrics) {
@@ -99,12 +114,23 @@ export function createOverviewView() {
         },
 
         build(data, ctx) {
+            // U3: an incomplete coverage verdict withholds the whole-window
+            // table and summary; in compare mode either side withholds the
+            // derived differences.
+            const notice = (data && data.compare)
+                ? (data.baselineUnavailable ? buildCoverageNotice(data.a)
+                    : buildCompareCoverageNotice(data.a, data.b))
+                : buildCoverageNotice(data);
+            if (notice) {
+                return { coverageNotice: notice, summary: [], hasRows: false,
+                    compare: !!(data && data.compare) };
+            }
             if (data && data.compare && data.baselineUnavailable) {
                 const primary = data.a;
                 maybeResetOrder(ctx, true);
                 return {
                     table: buildTableModel(overviewConfig,
-                        order.apply(primary && primary.rows), null),
+                        order.apply(idleMasked(primary)), null),
                     summary: buildSummary(primary, ctx.server.numCpus, {
                         from: ctx.timeRange.from, to: ctx.timeRange.to,
                         captureFromNs: ctx.server.fromNs }),
@@ -115,7 +141,8 @@ export function createOverviewView() {
                 };
             }
             if (data && data.compare) {
-                const delta = buildDeltaComparison('overview', data.a, data.b,
+                const delta = buildDeltaComparison('overview',
+                    withIdleMasked(data.a), withIdleMasked(data.b),
                     { baselineUnavailable: data.baselinePredates });
                 const sort = defaultDeltaSort(ctx.getSort('overview'));
                 return {
@@ -141,7 +168,7 @@ export function createOverviewView() {
             // just the #440 hysteresis pass within each sibling group.
             maybeResetOrder(ctx, false);
             const table = buildTableModel(overviewConfig,
-                order.apply(data && data.rows), null);
+                order.apply(idleMasked(data)), null);
             const summary = buildSummary(data, ctx.server.numCpus, {
                 from: ctx.timeRange.from, to: ctx.timeRange.to,
                 captureFromNs: ctx.server.fromNs });
@@ -159,6 +186,10 @@ export function createOverviewView() {
         mount(el, model, ctx) {
             const summaryEl = ctx.summaryEl;
             if (summaryEl) summaryEl.innerHTML = summaryHtml(model.summary);
+            if (model.coverageNotice) {
+                el.innerHTML = coverageNoticeHtml(model.coverageNotice);
+                return;
+            }
 
             if (!model.hasRows) {
                 el.innerHTML = baselineUnavailableHtml(model.baselineUnavailable) +

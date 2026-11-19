@@ -17,7 +17,9 @@ import {
     createOrderResetGate, orderResetKey,
 } from '../lib/table.js';
 import { sessionsConfig, sessionsScopeNoteHtml } from '../lib/builders/table-configs.js';
-import { buildPaneFidelity, paneFidelityBadgeHtml } from '../lib/panels.js';
+import {
+    buildPaneFidelity, paneFidelityBadgeHtml, buildCoverageNotice, coverageNoticeHtml,
+} from '../lib/panels.js';
 
 /* PURE: top_sessions response + sort -> render model. Exported for testing.
  * U2 (review P10): carries the pane fidelity badge (sampled/mixed numbers are
@@ -28,6 +30,9 @@ import { buildPaneFidelity, paneFidelityBadgeHtml } from '../lib/panels.js';
  * order (a REAL production call always passes one — createSessionsView()
  * below). */
 export function buildSessionsModel(data, sort, orderTracker) {
+    // U3: an incomplete coverage verdict withholds the whole table.
+    const notice = buildCoverageNotice(data);
+    if (notice) return { coverageNotice: notice, hasRows: false };
     const rows = (data && data.rows) || [];
     const ordered = orderTracker ? applyDefaultOrder(orderTracker, rows, sort) : rows;
     return {
@@ -67,6 +72,10 @@ export function createSessionsView() {
 
         mount(el, model, ctx) {
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
+            if (model.coverageNotice) {
+                el.innerHTML = coverageNoticeHtml(model.coverageNotice);
+                return;
+            }
             if (!model.hasRows) {
                 el.innerHTML = paneFidelityBadgeHtml(model.paneFidelity) +
                     '<div class="loading">No data for selected range</div>';

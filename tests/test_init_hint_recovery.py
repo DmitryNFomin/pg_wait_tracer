@@ -9,6 +9,7 @@ Missing stimulus, metrics or attachment fails; no retries of a failed cohort.
 Owner decision #871 comment 6863203475 excludes counted no-opportunity losses
 from integrity; every other loss must be zero in recovery arms. The store-skipped
 control must instead produce a with-opportunity loss and fail the integrity gate.
+The temporary #959 exception recognises only the capped signatures below.
 Run only on Linux as root: tests/run_all.sh registers this in its live tier.
 """
 import argparse
@@ -37,7 +38,9 @@ EXIT_CLASSES = {key: f"lifecycle_exit_before_attach_{key}_total" for key in
                 ("with_opportunity", "no_opportunity", "unknown")}
 DIAGNOSTIC_LINES = 40
 DIAGNOSTIC_WIDTH = 512
-# Temporary #933 exception; remove with the A2 PR.
+# Temporary #959 exception (owner, #933 comment 6984201938).
+# Remove in the PR that fixes #959. Ubuntu 6.8 only, via run_all.sh.
+# The owner kept the shared run cap at 2 when widening to K1/K2/K3 in either arm.
 # max observed 1 per run in 20 runs on master bc554a73 (Ubuntu 6.8 PG18,
 # tests/results/session-20261117/i933-churn-cap); cap 2 = observed max + 1;
 # regression tripwire, not a rate bound.
@@ -80,6 +83,7 @@ def print_failure_diagnostics(text, after, failing_pids=()):
 class CohortFailure(AssertionError):
     def __init__(self, message, pids):
         super().__init__(f"{message}: {sorted(pids)[:DIAGNOSTIC_LINES]} (total {len(pids)})")
+        self.reason = message
         self.pids = set(pids)
 
 
@@ -167,9 +171,10 @@ def check_cohort(text, pids, short_lived, before, after):
 def classify_churn(text, deltas, pids, short_lived):
     """Pure, fail-closed classification; validate every remaining cohort check.
 
-    Only the two complete measured signatures may be removed from the strict
+    Only the three complete measured signatures may be removed from the strict
     cohort check. Counter reconciliation covers the entire daemon stream, so
-    an unrelated PID or an undiagnosed increment cannot hide behind them.
+    an undiagnosed increment cannot hide behind them. Non-cohort postmaster
+    children need the same signatures; cohort members must be short-lived.
     """
     records = {prefix: {} for prefix in
                ("INIT-LOST:", "WP-ATTACH-FAIL:", "EXIT-BEFORE-ATTACH:")}
@@ -189,15 +194,23 @@ def classify_churn(text, deltas, pids, short_lived):
         r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=0(?: |$)", text)))
     k1 = set(retirement["with_opportunity"])
     k2 = set(init_with)
-    known = k1 | k2
-    if not known <= pids & short_lived or k1 & k2:
-        raise CohortFailure("unknown or overlapping known-class outcome", known)
+    k3 = set(retirement["unknown"])
+    known = k1 | k2 | k3
+    if k1 & k2 or k1 & k3 or k2 & k3:
+        raise CohortFailure("overlapping known-class outcomes", known)
+    if known & pids - short_lived:
+        raise CohortFailure("known-class cohort PID is not short-lived", known & pids - short_lived)
     if len(known) > KNOWN_CLASS_CAP:
         raise CohortFailure("known-class cap exceeded", known)
 
     def exact(fields, expected, numeric=()):
         return (all(fields.get(key) == value for key, value in expected.items()) and
                 all(fields.get(key, "").isdigit() for key in numeric))
+
+    def exit_proved(fields):
+        return (fields.get("liveness_errno") == "0" and
+                (fields.get("liveness"), fields.get("liveness_result"), fields.get("exit_proof"))
+                in (("exiting", "1", "2"), ("gone", "0", "1")))
 
     for pid in known:
         init = records["INIT-LOST:"].get(pid, [])
@@ -221,11 +234,25 @@ def classify_churn(text, deltas, pids, short_lived):
                            "batch_records", "since_epoll_return_ns"))
             valid = valid and 0 < int(fields["init_ts"]) < int(fields["exit_ts"])
             valid = valid and exact(wp[0], {
-                "site": "watchpoint_open", "errno": "3", "resolve_errno": "0",
-                "liveness": "exiting", "liveness_result": "1", "liveness_errno": "0",
-                "exit_proof": "2"})
+                "site": "watchpoint_open", "errno": "3", "resolve_errno": "0"})
+            valid = valid and exit_proved(wp[0])
+        elif pid in k3:
+            if len(retired) != 1 or len(wp) != 1 or init:
+                raise CohortFailure("K3 requires one retirement, one attach failure and no INIT loss", {pid})
+            valid = exact(retired[0], {
+                "opportunity": "unknown", "entry_present": "1", "bootstrap_armed": "0",
+                "post_arm_checked": "0", "post_arm_ptr": "0x0", "addr_shared": "0",
+                "resolve_errno": "0", "shared_errno": "0", "counter_deltas_valid": "1",
+                "lifecycle_init_no_state_delta": "0", "wait_read_fail_delta": "0"})
+            if not exit_proved(wp[0]):
+                raise CohortFailure("K3 attach failure lacks exact exit proof", {pid})
+            valid = valid and exact(wp[0], {
+                "site": "bootstrap_watchpoint_open/backend_wait_addr_resolve", "errno": "3"})
+            valid = valid and (wp[0].get("liveness"), wp[0].get("resolve_errno")) in (
+                ("exiting", "3"), ("gone", "2"))
         if not valid:
-            raise CohortFailure("missing, partial or duplicate known-class diagnostic", {pid})
+            raise CohortFailure("K3 signature mismatch" if pid in k3 else
+                                "missing, partial or duplicate known-class diagnostic", {pid})
     attached = set(map(int, re.findall(r"INFO: PID (\d+) initialized \(", text)))
     if known & attached:
         raise CohortFailure("overlapping attached and known-class outcome", known & attached)
@@ -239,6 +266,7 @@ def classify_churn(text, deltas, pids, short_lived):
             raise CohortFailure(f"{key} must be zero", set())
     # Require exact agreement before subtracting any diagnosed outcome.
     for key, count in ((EXIT_CLASSES["with_opportunity"], len(k1)),
+                       (EXIT_CLASSES["unknown"], len(k3)),
                        ("lifecycle_init_lost_with_opportunity_total", len(k2))):
         if deltas[key] != count:
             raise CohortFailure(f"{key} does not match known-class PIDs", known)
@@ -247,11 +275,12 @@ def classify_churn(text, deltas, pids, short_lived):
             deltas["lifecycle_init_lost_no_opportunity_total"]):
         raise CohortFailure("INIT loss counters disagree", set())
     remaining = dict(deltas)
-    for key, count in ((EXIT_BEFORE_ATTACH, len(k1)),
+    for key, count in ((EXIT_BEFORE_ATTACH, len(k1) + len(k3)),
                        (EXIT_CLASSES["with_opportunity"], len(k1)),
+                       (EXIT_CLASSES["unknown"], len(k3)),
                        ("lifecycle_init_lost_total", len(k2)),
                        ("lifecycle_init_lost_with_opportunity_total", len(k2)),
-                       ("wp_attach_exit_race_total", len(k2))):
+                       ("wp_attach_exit_race_total", len(k2) + len(k3))):
         remaining[key] -= count
     kept = []
     for line in text.splitlines():
@@ -262,7 +291,7 @@ def classify_churn(text, deltas, pids, short_lived):
         kept.append(line)
     check_cohort("\n".join(kept), pids - known, short_lived - known,
                  dict.fromkeys(remaining, 0), remaining)
-    return {"K1": k1, "K2": k2}
+    return {"K1": k1, "K2": k2, "K3": k3}
 
 
 def ctl(directory):
@@ -382,7 +411,7 @@ def short_cohort():
 
 
 def run_arm(pm_pid, skip_store, churn=False):
-    known = {"K1": set(), "K2": set()}
+    known = {"K1": set(), "K2": set(), "K3": set()}
     with tempfile.TemporaryDirectory(prefix="pgwt_init_hint_") as tmp:
         directory = Path(tmp)
         log = directory / "daemon.stderr"
@@ -435,16 +464,19 @@ def run_arm(pm_pid, skip_store, churn=False):
                     after["lifecycle_init_lost_with_opportunity_total"] +
                     after["lifecycle_init_lost_no_opportunity_total"]), after
                 assert hint_delta > 0, "no bootstrap INIT hint was actually suppressed"
-                if churn and not skip_store:
+                if not skip_store:
                     try:
                         known = classify_churn(text, {key: after[key] - before[key] for key in before
                                                       if type(before[key]) is int}, pids, short_lived)
-                    except AssertionError:
+                    except AssertionError as rejection:
                         # Rejected exceptions use the original assertion order,
                         # exception arguments and failing-PID diagnostics below.
                         # If master accepts the run, no exception is needed.
-                        pass
-                has_known = bool(known["K1"] or known["K2"])
+                        # Name the rejection so a red run can be diagnosed.
+                        print(f"known-class classifier rejected: "
+                              f"{getattr(rejection, 'reason', str(rejection))} "
+                              f"pids={sorted(getattr(rejection, 'pids', ()))}")
+                has_known = any(known.values())
                 for key in ("ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
                             "state_map_full_total", "init_state_read_fail_total",
                             "wp_attach_failures_total"):
@@ -462,6 +494,8 @@ def run_arm(pm_pid, skip_store, churn=False):
                                                 set(retirement_diagnostics(text)[key]))
                 attach_counts = Counter(int(pid) for pid in re.findall(r"INFO: PID (\d+) initialized \(", text))
                 attached = set(attach_counts)
+                if not churn and not skip_store and pids - attached:
+                    raise CohortFailure("long-lived cohort PID did not attach", pids - attached)
                 pending = {int(pid) for pid in re.findall(r"fork detected PID (\d+), bootstrap watchpoint attached", text)}
                 assert pids & pending, "no cohort backend entered pending bootstrap"
                 if churn:
@@ -502,13 +536,19 @@ def run_arm(pm_pid, skip_store, churn=False):
 
 
 def run_arms(pm_pid):
-    run_arm(pm_pid, skip_store=False)
-    known = run_arm(pm_pid, skip_store=False, churn=True)
+    long_known = run_arm(pm_pid, skip_store=False)
+    churn_known = run_arm(pm_pid, skip_store=False, churn=True)
     run_arm(pm_pid, skip_store=True)
-    count = len(known["K1"] | known["K2"])
+    count = sum(len(pids) for arm in (long_known, churn_known) for pids in arm.values())
+    if count > KNOWN_CLASS_CAP:
+        raise CohortFailure("known-class shared run cap exceeded",
+                            set().union(*long_known.values(), *churn_known.values()))
     if count:
-        print(f"KNOWN-CLASS #933 arm=churn K1={sorted(known['K1'])} "
-              f"K2={sorted(known['K2'])} count={count} cap={KNOWN_CLASS_CAP}")
+        for name, known in (("long-lived", long_known), ("churn", churn_known)):
+            if any(known.values()):
+                print(f"KNOWN-CLASS #959 arm={name} K1={sorted(known['K1'])} "
+                      f"K2={sorted(known['K2'])} K3={sorted(known['K3'])} "
+                      f"count={count} cap={KNOWN_CLASS_CAP}")
         return KNOWN_CLASS_EXIT
     print("test_init_hint_recovery: PASS")
     return 0

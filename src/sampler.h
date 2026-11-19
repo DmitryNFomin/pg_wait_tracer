@@ -44,6 +44,10 @@
 struct pgwt_daemon;
 struct pgwt_metrics;
 
+/* Idempotent state-map seed shared by lazy sampling and UNPUBLISHED preseed.
+ * Uses BPF_NOEXIST; preserves captured state and reports capacity failures. */
+void pgwt_sampler_seed_state_entry(struct pgwt_daemon *d, pid_t pid, uint64_t addr);
+
 struct pgwt_sampler_sched {
     int requested;      /* nice value asked for */
     int applied;        /* nice value read back; 20 if readback failed */
