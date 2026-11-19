@@ -52,7 +52,8 @@ Evidence kinds:
   These cells say **attested**: the generator checks link syntax and the hash,
   not the link's contents or approval. The initial manifest leaves links unset
   for human review; hashes alone cannot turn a cell green.
-- `core-status`: `contract` names the record to read in both artifact modes.
+- `core-status`: `contract` names the record to read in both artifact modes
+  (`wait_time-v1.json`, `merge-v1.json`, or `evidence-v1.json`).
   The overall state, every claim row, and every required proof must pass,
   with an empty errors list and matching tree hashes in status and provenance.
   Proof ids must match the frozen claim. At least one independent `case:`
@@ -75,3 +76,49 @@ state, reason, evidence ids, and source paths or links; it stores no colours.
 
 Run `python3 -B tests/test_ledger.py` for the self-test. It is also registered
 in the normal deterministic runner, `scripts/check.sh`.
+
+The merge and evidence manifests add contract claim rows without changing the
+existing release claims. Only their `broken_versions` cells have a producer;
+empty attestation, platform, interface and retirement requirements remain red.
+Their status files use the same claim/proof/run/provenance structure as wait_time.
+Each per-id record must have its exact pass spelling; duplicate records fail,
+missing records are NOT-RUN, and a changed tree discards all three contracts'
+evidence. Mutation records bind the registered definition and actually compiled
+source hashes and name their intended proof. Equivalent guard deletions are
+reported separately and cannot satisfy the killed-mutant requirement.
+
+`scripts/core-status.sh` runs all portable proof suites once. The regular proof stage in `scripts/check.sh`
+uses these runs instead of repeating the merge, replay, codec, redelivery,
+report, merge index, merge index mutant and merge queue mutant commands
+(the last also prints the queue baseline). It still runs
+`tests/test_core_merge_queue.py` for its symbol check and informational
+timings. Proof suites are never skipped using stored status. Set
+`PGWT_CORE_STATUS_DIR=/absolute/scratch/directory` to redirect this run's JSON
+and logs outside the default `tests/results/core_status/` directory; this is an
+output destination only, never an evidence input to the status producer.
+`scripts/check.sh` creates a fresh output directory for its status step and
+passes it to `bash tests/test_core_status.sh /absolute/output/directory`.
+Before replay, the self-test requires all three reports to match the current
+tree and contract hashes, contain the complete proof and runner inventories,
+and have successful runs with intact logs matching their recorded SHA256s.
+A different tree, missing report/proof/runner, unsuccessful run or changed log
+is refused before replay. Only raw runner transcripts become parser fixtures;
+the machinery derives proof and claim states again, including the controls
+that remove or corrupt evidence and seed falsely green claim derivation.
+Standalone `bash tests/test_core_status.sh` still makes its own real baseline.
+The real wait-time controls and failing C baseline checks run in either mode.
+The two CI status modes move and upload every top-level output file.
+
+A failing or missing proof prints its id, affected claim ids and runner log
+path on the console, followed by its first failing record when available.
+The gate removes its temporary output directory on green and retains it on red
+so those paths can be read after failure. If a runner could not start, its log explains that it did not run.
+
+Local macOS measurements on 2026-11-14 of the commands in the CI `core-status`
+job: **plain 588.8 s**, **ASan/UBSan 1260.2 s**, **1849.0 s serial total**
+(checkout and artifact upload excluded). The sanitizer mode uses
+`CFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer'`.
+The gate self-test took 308.1 s using its preceding status run; standalone,
+including its own real plain baseline, it took 918.1 s. The plain timing
+was measured around that standalone baseline subprocess on the invoking tree,
+with output redirected to temporary storage. Hosted runner timings may differ.

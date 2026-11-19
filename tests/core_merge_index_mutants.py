@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Mutants must build, reach their case, and fail only the intended assertion."""
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -11,16 +13,57 @@ import time
 sys.dont_write_bytecode = True
 import test_core_merge_index as checks
 
+# Module-level registries: scripts/core_status_contracts.py binds each printed
+# kill to its definition and the mutated source that was built.
+# (name, case, original text, replacement)
+MUTATIONS = (
+    ("wrong_probe", "probe", "slot = (slot + 1) & (m->index_capacity - 1);", "break;"),
+    ("missed_insert", "insert", "m->generation_index[bucket] = m->attachment_count;",
+     "m->generation_index[bucket] = 0;"),
+    ("stale_undo_entry", "plan_reset", "m->planned[m->touched[i]] = 0;",
+     "m->planned[m->touched[i]] = i + 1;"),
+)
+
+
+def binding(definition, mutated, intended_proof):
+    dh = hashlib.sha256(json.dumps(definition, separators=(",", ":")).encode()).hexdigest()
+    sh = hashlib.sha256(mutated.encode()).hexdigest()
+    return f" definition-sha256={dh} source-sha256={sh} intended-proof={intended_proof}"
+
+
+def cost_mutations(source):
+    """(name, [(original text, replacement)], intended work assertion)."""
+    # Cost mutants use 1,000 retained generations: a scan still exceeds 64
+    # visits by a wide margin, while quadratic population finishes quickly.
+    attachment = source[source.index("static struct generation_state *attachment("):
+                        source.index("/* touched[plan slot]")]
+    scan = """static struct generation_state *attachment(pgwt_merge *m, const pgwt_merge_record *r)
+{
+    MERGE_WORK(LOOKUP, 0);
+    for (size_t i = 0; i < m->attachment_count; ++i) {
+        MERGE_WORK(INDEX, 1);
+        if (m->attachments[i].proof.pid == r->pid && m->attachments[i].proof.g == r->g)
+            return &m->attachments[i];
+    }
+    return NULL;
+}
+
+"""
+    return (
+        ("linear_scan", [(attachment, scan)], "work lookup visits <= 64"),
+        ("whole_table_copy", [
+            ("size_t plan_capacity = c->attachment_capacity < c->staged_capacity ?\n"
+             "            c->attachment_capacity : c->staged_capacity;",
+             "size_t plan_capacity = c->attachment_capacity;"),
+            ("    m->touched_count = 0;", "    m->touched_count = 0;\n"
+             "    copy_generations(m->prospective, m->attachments, m->attachment_count);")],
+         "work copied slots <= 16"),
+    )
+
 
 def main():
     source = (checks.ROOT / "src/core/merge.c").read_text()
-    mutations = (
-        ("wrong_probe", "probe", "slot = (slot + 1) & (m->index_capacity - 1);", "break;"),
-        ("missed_insert", "insert", "m->generation_index[bucket] = m->attachment_count;",
-         "m->generation_index[bucket] = 0;"),
-        ("stale_undo_entry", "plan_reset", "m->planned[m->touched[i]] = 0;",
-         "m->planned[m->touched[i]] = i + 1;"),
-    )
+    mutations = MUTATIONS
     env = dict(os.environ, ASAN_OPTIONS="halt_on_error=1:exitcode=86",
                UBSAN_OPTIONS="halt_on_error=1:exitcode=87:print_stacktrace=1")
     with tempfile.TemporaryDirectory(prefix="pgwt-merge-index-mutants-") as directory:
@@ -35,7 +78,8 @@ def main():
             if source.count(before) != 1:
                 raise RuntimeError(f"{name}: mutation anchor must occur exactly once")
             mutant = work / "mutant.c"
-            mutant.write_text(source.replace(before, after, 1))
+            mutated = source.replace(before, after, 1)
+            mutant.write_text(mutated)
             binary = checks.build(work, base, mutant)
             result = subprocess.run([str(binary), "--case", case], cwd=checks.ROOT,
                                     env=env, text=True, capture_output=True, timeout=30)
@@ -45,39 +89,14 @@ def main():
                     len(intended) != 1 or log.count("MISMATCH") != 1 or
                     re.search(r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log)):
                 raise RuntimeError(f"{name}: not an intended kill (exit {result.returncode})\n{log}")
-            print(f"{name} KILLED: {intended[0]}", flush=True)
-        # Keep the differential mutants above unchanged. Cost mutants use
-        # 1,000 retained generations: a scan still exceeds 64 visits by a wide
-        # margin, while quadratic population finishes quickly.
-        attachment = source[source.index("static struct generation_state *attachment("):
-                            source.index("/* touched[plan slot]")]
-        scan = """static struct generation_state *attachment(pgwt_merge *m, const pgwt_merge_record *r)
-{
-    MERGE_WORK(LOOKUP, 0);
-    for (size_t i = 0; i < m->attachment_count; ++i) {
-        MERGE_WORK(INDEX, 1);
-        if (m->attachments[i].proof.pid == r->pid && m->attachments[i].proof.g == r->g)
-            return &m->attachments[i];
-    }
-    return NULL;
-}
-
-"""
-        cost_mutations = (
-            ("linear_scan", [(attachment, scan)], "work lookup visits <= 64"),
-            ("whole_table_copy", [
-                ("size_t plan_capacity = c->attachment_capacity < c->staged_capacity ?\n"
-                 "            c->attachment_capacity : c->staged_capacity;",
-                 "size_t plan_capacity = c->attachment_capacity;"),
-                ("    m->touched_count = 0;", "    m->touched_count = 0;\n"
-                 "    copy_generations(m->prospective, m->attachments, m->attachment_count);")],
-             "work copied slots <= 16"),
-        )
+            print(f"{name} KILLED: {intended[0]}" +
+                  binding([name, case, before, after], mutated, "case:index/" + case), flush=True)
+        # Keep the differential mutants above unchanged.
         binary = checks.build(work, base, checks.ROOT / "src/core/merge.c", instrument=True)
         log = checks.run([str(binary), "--work-small"], env=env)
         if "index work PASS" not in log:
             raise RuntimeError("baseline did not pass cost case")
-        for name, edits, assertion in cost_mutations:
+        for name, edits, assertion in cost_mutations(source):
             mutated = source
             for before, after in edits:
                 if mutated.count(before) != 1:
@@ -96,7 +115,8 @@ def main():
                     log.splitlines().count(intended) != 1 or log.count("MISMATCH") != 1 or
                     re.search(r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log)):
                 raise RuntimeError(f"{name}: not an intended kill (exit {result.returncode})\n{log}")
-            print(f"{name} KILLED: retained=1000, {elapsed:.3f}s, {intended}", flush=True)
+            print(f"{name} KILLED: retained=1000, {elapsed:.3f}s, {intended}" +
+                  binding([name, edits, assertion], mutated, "case:index/work"), flush=True)
     print("core merge index mutants: 3/3 differential, 2/2 deterministic cost killed")
 
 

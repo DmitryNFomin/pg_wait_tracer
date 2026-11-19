@@ -13,6 +13,7 @@ import copy
 import importlib.util
 import json
 import os
+import hashlib
 from pathlib import Path
 import shlex
 import subprocess
@@ -196,7 +197,9 @@ def mutants(work, db, oracle):
                 if field not in str(error): raise RuntimeError(name + " failed wrong assertion: " + str(error)) from error
             else:
                 raise RuntimeError(name + " survived")
-        print(f"report mutant {name}: KILLED case={witness} assertion={field}", flush=True)
+        dh = hashlib.sha256(json.dumps([name, old, new, witness, field], separators=(",", ":")).encode()).hexdigest()
+        sh = hashlib.sha256(source.read_bytes()).hexdigest()
+        print(f"report mutant {name}: KILLED case={witness} assertion={field} definition-sha256={dh} source-sha256={sh} intended-proof=case:report/{witness}", flush=True)
 
 
 def main():
@@ -211,10 +214,13 @@ def main():
         binary = work / "report-test"
         build(binary)
         native = execute([binary, CONTRACT])
+        print("REPORT BASELINE BEGIN", flush=True)
         print(native.stdout, end="", flush=True)
+        print("REPORT BASELINE END", flush=True)
         if native.returncode: raise RuntimeError("native/r3 test failed:\n" + native.stderr)
         for case in db["cases"]:
             stops = run_case(binary, work, db, case, oracle)
+            print(f"report case_{case['case']} PASS", flush=True)
             for stop in stops:
                 print(f"report case {case['case']}: STOP file={stop['file']} position={stop['position']} reason={stop['reason']}", flush=True)
         print("report REDELIVERY comparison: 50/50 (state, final stop, descriptor baselines, LIFE and coverage)", flush=True)

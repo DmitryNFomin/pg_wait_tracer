@@ -625,7 +625,7 @@ static bool scenario_files(const evidence_case *c, const pgwt_codec_decoded *dec
         if (link) continue;
         pgwt_evidence_record *records=calloc(f->record_count ? f->record_count : 1,sizeof(*records));
         if (!records) exit(2);
-        memcpy(records,f->records,f->record_count*sizeof(*records));f->records=records;
+        if (f->record_count) { memcpy(records,f->records,f->record_count*sizeof(*records)); } f->records=records;
         size_t fault=SIZE_MAX;
         for (size_t j=0;j<f->record_count;++j) {
             pgwt_evidence_record *r=&records[j];
@@ -785,7 +785,7 @@ static void scenario(const char *path, const char *expected, const char *project
     if (id<28 || id>30) for (size_t i=0;i<c.input.file_count && ok;++i) {
         pgwt_evidence_file f=c.files[i];
         pgwt_evidence_record *records=calloc(f.record_count ? f.record_count : 1,sizeof(*records));if (!records) exit(2);
-        memcpy(records,f.records,f.record_count*sizeof(*records));f.records=records;f.present=true;
+        if (f.record_count) { memcpy(records,f.records,f.record_count*sizeof(*records)); } f.records=records;f.present=true;
         for (size_t j=0;j<f.record_count;++j) {
             if (records[j].unsupported_shape) {
                 records[j].unsupported_shape=false;records[j].t=records[j].t ? records[j].t : 1;

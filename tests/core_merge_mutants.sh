@@ -4,6 +4,8 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 exec python3 - "$repo" <<'PYTHON'
 import os
+import hashlib
+import json
 from pathlib import Path
 import re
 import shlex
@@ -184,6 +186,8 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
         log = run.stdout + run.stderr
         if re.search(r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log):
             return "RUNTIME_ERROR", log
+        if baseline and run.returncode != 0:
+            return "BASELINE_FAILED", log
         if guard:
             case, assertion = guard
             reached = f"guard {case} REACHED {assertion}"
@@ -213,8 +217,11 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"baseline ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
+    print("MERGE BASELINE BEGIN", flush=True)
+    print(detail, end="", flush=True)
+    print("MERGE BASELINE END", flush=True)
     if result != "SURVIVED":
-        print(f"baseline ERROR ({result}): {detail}", file=sys.stderr)
+        print(f"baseline ERROR ({result}); see per-id output above", file=sys.stderr)
         sys.exit(2)
     targets = {name: (case, assertion) for name, _, case, assertion in guard_mutations}
     all_mutations = mutations + [(name, edits, case) for name, edits, case, _ in guard_mutations]
@@ -234,7 +241,16 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
             result, detail = "ERROR", str(exc)
         if result == "KILLED":
             killed += 1
-            print(f"{name} KILLED: {detail}", flush=True)
+            definition = [name, edits, explanation, targets.get(name), fixture_targets.get(name)]
+            dh = hashlib.sha256(json.dumps(definition, separators=(",", ":")).encode()).hexdigest()
+            built_source = work / ("tests/test_core_merge_contract.c" if name == "M10" else "src/core/merge.c")
+            sh = hashlib.sha256(built_source.read_bytes()).hexdigest()
+            if name in targets:
+                intended_proof = 'case:guard/' + targets[name][0]
+            else:
+                reached = re.match(r'row ([0-9]+/[NQ]) MISMATCH ', detail)
+                intended_proof = 'case:row-' + reached[1]
+            print(f"{name} KILLED: {detail} definition-sha256={dh} source-sha256={sh} intended-proof={intended_proof}", flush=True)
         elif result == "SURVIVED":
             print(f"{name} SURVIVED: {explanation}", flush=True)
             failed = True
