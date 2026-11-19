@@ -317,7 +317,7 @@ Restart always requires LIFE and fresh ATTACH_OK under a new capture, even withi
 no stitching over downtime, no inherited frontiers, no exit inferred for survivors. A boot change
 creates a different clock domain; windows cannot cross it. Loss history resets only with that new capture.
 
-v2/v3/v4 traces have no v1 evidence records. They retain their legacy decoding/sample semantics, but
+v2/v3/v4/v6 traces have no v1 evidence records. They retain their legacy decoding/sample semantics, but
 for this exact adapter have unknown LIFE, coverage=[], waits=[], open=null, and LIFE_INVALID.
 Do not infer life from first/last transition, PID metadata, escalation markers, synthetic flushes,
 legacy checkpoints, or closed-clean flags. They yield unavailable, never a measured zero from absence.
