@@ -13,15 +13,25 @@ and no restarts.
 
 It runs in **two tiers** (default `--mode tiered`):
 
-- An always-on, low-overhead **sampled** tier (ASH-style, pure userspace via
-  `process_vm_readv` — ~0% impact on PostgreSQL) that you leave running 24/7.
+- A continuous **sampled** tier (ASH-style, userspace reads via
+  `process_vm_readv`), measured at **94.6–102.5% of no-tracer TPS retained**
+  on cx33 (4 vCPU,
+  AMD EPYC-Rome), PG18.6, Ubuntu 24.04 / 6.8.0-139-generic and EL8 /
+  4.18.0-553.157.1.el8_10.x86_64, select-only (`-R 8000` or unthrottled)
+  and TPC-B (unthrottled), 16 clients, scale 100, shared_buffers 2 GB,
+  fsync off; on cx43 (8 vCPU, AMD EPYC-Rome), Ubuntu 24.04 /
+  6.8.0-139-generic, PG18.6, unthrottled TPC-B, 8 clients, scale 100,
+  shared_buffers 2 GB, fsync on, added PostgreSQL CPU reached **+19.2 µs/tx**;
+  see the [overhead tables](#overhead).
 - On-demand or anomaly-triggered **escalation** to the exact
   **hardware-watchpoint** tier, which captures every `wait_event_info`
   transition with nanosecond precision during bounded, budgeted windows.
 
 This gives you Active Session History continuously, plus exact, every-transition
-detail exactly when you need it — without paying the watchpoint overhead all the
-time. The sampler's top-5 wait-event *ranking* matches the exact tier's
+detail during escalation. Escalation is automatic on anomaly rules, including
+CPU saturation, and incurs the full-mode cost while active; at saturation the
+measured full mode kept about half of no-tracer throughput on the cx33 tests
+[below](#overhead). The sampler's top-5 wait-event *ranking* matches the exact tier's
 (5/5 events, every rate, every run measured) — but its CPU-share estimate still
 runs low, by a tenth to a quarter, after the
 [read-order bias](https://github.com/DmitryNFomin/pg_wait_tracer/issues/294)
@@ -39,14 +49,16 @@ Key capabilities:
   available as pure `--mode sampled` or always-on exact `--mode full`
 - **Escalation**: bounded, budgeted full-fidelity windows, triggered manually
   (web UI "Escalate" button / control socket) or automatically by anomaly rules
-  (AAS-vs-baseline and lock-class-fraction, with cooldown/hysteresis)
+  (AAS-vs-baseline, lock-class-fraction and CPU saturation, with cooldown/hysteresis)
 - **Control socket**: `{trace_dir}/pgwt.sock` JSON-line `status`/`metrics`/
   `escalate`/`deescalate`, proxied by `pgwt-server` for the web client, with
   Prometheus-ready self-observability metrics
 - **Diagnostic views**: time model, events, sessions, queries, histogram,
   timeline, transition graph, concurrency, per-execution waterfall, execution
   latency scatter, and transition matrix — each tagged with its data
-  fidelity (sampled / exact / mixed); exact-only views prompt to escalate over
+  fidelity (sampled / exact / mixed). Execute/plan phase probes are unavailable
+  on the measured EL8 4.18 kernel (`kernel_no_ref_ctr`), so its Waterfall/Scatter
+  executions are absent. Exact-only views prompt to escalate over
   sampled-only windows instead of silently showing nothing
 - **Web investigation client** (`pgwt`): browser UI with ECharts AAS chart,
   color-coded drill-down tables, percentage bars, summary metrics, concurrency
@@ -68,12 +80,11 @@ Key capabilities:
 - **Dynamic event names**: auto-discovers wait event names from PostgreSQL
   (PG17+) via `pg_wait_events`, forward-compatible with PG19+
 
-In the default tiered mode the always-on sampler has **~0% impact on
-PostgreSQL** (the daemon itself uses ~0.6% of one core at 10 Hz). The exact
-watchpoint tier — used only during bounded escalation windows — costs ~6% on
-write-heavy OLTP, up to ~30% on read-heavy workloads with high buffer miss
-rates (measured on Hetzner cx43, 8 vCPU/16 GB RAM — see
-[Performance](#performance) for the full benchmark environment and details).
+Default `tiered` mode can add substantial PostgreSQL CPU cost and reduce
+throughput when it escalates. A time budget limits how long escalation lasts,
+not its instantaneous cost. Below saturation, unchanged throughput can conceal
+extra PostgreSQL CPU per transaction. See [Performance](#performance) for the
+measurements, their hardware and workload conditions, and the escalation state.
 
 > **Requirements — Linux only.** pg_wait_tracer relies on Linux-specific
 > facilities (eBPF, `process_vm_readv`, `perf_event_open`, CPU hardware
@@ -158,11 +169,11 @@ the same ground).
 make
 
 # Run (auto-discovers single PG instance, must be root).
-# Default capture tier is "tiered": a low-overhead always-on sampler that
-# escalates to exact watchpoint tracing on demand (safe to leave running 24/7).
+# Default "tiered": sampling plus manual or automatic anomaly escalation.
+# Escalation incurs full-mode cost while active; see Performance below.
 sudo ./pg_wait_tracer
 
-# Force always-on exact watchpoint tracing (the original behavior, 6-30% overhead)
+# Force continuous exact watchpoint tracing; assess its measured cost below.
 sudo ./pg_wait_tracer --mode full
 
 # One-shot: collect one 10-second interval and exit
@@ -191,13 +202,21 @@ captured. The default is **`tiered`**.
 
 | Mode | Fidelity | PG overhead | What it does |
 |------|----------|-------------|--------------|
-| `tiered` *(default)* | sampled, escalates to exact | ~0% baseline, bounded during escalation | Always-on userspace sampler (`process_vm_readv`); escalates to full watchpoint tracing for bounded, budgeted windows — on demand (control socket / web UI) or on anomaly. The "leave it running 24/7" posture. |
-| `sampled` | sampled | ~0% on PostgreSQL | Pure-userspace ASH-style sampling at a fixed rate. No watchpoints, never escalates. |
-| `full` | exact | 6-30% (workload-dependent, measured on Hetzner cx43, 8 vCPU/16 GB) | Always-on hardware watchpoints — every `wait_event_info` transition captured exactly. The original behavior, now opt-in. |
+| `tiered` *(default)* | sampled, escalates to exact | Sampled cost between windows; full-mode cost during escalation ([measurements](#overhead)) | Continuous userspace sampler (`process_vm_readv`); escalates for bounded, budgeted windows on demand or automatically on anomaly, including CPU saturation. |
+| `sampled` | sampled | 94.6–102.5% of no-tracer TPS retained; up to +19.2 µs/tx PostgreSQL CPU (conditions immediately below) | Userspace ASH-style sampling at a fixed rate. No watchpoints, never escalates. |
+| `full` | exact wait transitions; other evidence depends on probes | Substantial CPU cost and throughput loss in these tests ([measurements](#overhead)) | Continuous hardware watchpoints capture `wait_event_info` transitions. Query/command attribution and execution phases also need exact uprobes; see [flag trade-offs](#performance-tuning-flags). |
 | `coop` | exact | — | Cooperative (PostgreSQL extension) tier — **stub only**: the interface is frozen but the provider advertises itself and then returns "not available in this build". The real implementation ships in the separate PG-extension track. |
 
+Sampled measurements: **94.6–102.5% of no-tracer TPS retained** on cx33 (4 vCPU,
+  AMD EPYC-Rome), PG18.6, Ubuntu 24.04 / 6.8.0-139-generic and EL8 /
+  4.18.0-553.157.1.el8_10.x86_64, select-only (`-R 8000` or unthrottled)
+  and TPC-B (unthrottled), 16 clients, scale 100, shared_buffers 2 GB,
+  fsync off; on cx43 (8 vCPU, AMD EPYC-Rome), Ubuntu 24.04 /
+  6.8.0-139-generic, PG18.6, unthrottled TPC-B, 8 clients, scale 100,
+  shared_buffers 2 GB, fsync on, added PostgreSQL CPU reached **+19.2 µs/tx**. See [Overhead](#overhead) for each arm.
+
 ```bash
-# Default — low-overhead always-on, escalate on demand
+# Default — continuous sampling, with manual or automatic escalation
 sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces
 
 # Force exact watchpoint tracing for a focused investigation
@@ -211,7 +230,11 @@ In `tiered` mode, EXACT-required views (histogram, transitions, fingerprints,
 lock chains, interference, concurrency, executions/waterfall, execution
 scatter, and transition matrix) report `requires full-fidelity data`
 over windows with no escalation, rather than returning silently empty results
-— the web client renders an explicit "escalate to capture" state.
+— the web client renders an explicit "escalate to capture" state. Execution
+Waterfall and Scatter also need execute/plan phase probes: on the measured
+EL8 4.18 kernel these never attach in any mode (`kernel_no_ref_ctr`), so
+escalation cannot supply those executions there. See the
+[probe limitations](#performance-tuning-flags).
 
 ### Escalation
 
@@ -599,7 +622,7 @@ per interval, no screen clearing).
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--mode <MODE>` | — | `tiered` | Capture tier: `tiered` (always-on sampler + on-demand escalation), `sampled`, `full` (exact watchpoints), `coop` (stub). See [Capture Tiers](#capture-tiers---mode) |
+| `--mode <MODE>` | — | `tiered` | Capture tier: `tiered` (continuous sampler + manual/anomaly escalation, including CPU saturation), `sampled`, `full` (exact watchpoints), `coop` (stub). See [Capture Tiers](#capture-tiers---mode) |
 | `--sample-rate <HZ>` | — | `10` | Sampling rate for `sampled`/`tiered` (1-1000 Hz) |
 | `--escalation-budget <S>` | — | `300` | `tiered`: full-fidelity seconds allowed per rolling hour. `0` = escalation **disabled** (deny all); `unlimited` = no cap. Over-budget requests are clamped to the remainder; enforced mid-window. |
 
@@ -633,8 +656,12 @@ rule and the CPU saturation guard. The lock rule retains its own configuration.
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--lightweight` | — | off | BPF accumulator only (no ringbuf). ~5.5% overhead, loses histogram/session/query views |
-| `--skip-query-id` | — | off | Skip query_id reads in BPF. Saves ~1.5% overhead, disables query_event view |
+| `--skip-usdt` | — | off | In `--mode full`, disables every exact uprobe, leaving hardware watchpoints. Loses execution phases, command/query edges and first-occurrence query text; query and command-scoped numbers can be wrong. See [measured recoveries and trade-offs](#performance-tuning-flags). |
+| `--lightweight` | — | off | In `--mode full`, disables every exact uprobe and drops the event ring buffer. Only time_model/system_event accumulators remain; no session/query/histogram views or event trace recording. Command-scoped numbers can be wrong; see [measured recoveries and trade-offs](#performance-tuning-flags). |
+| `--skip-query-id` | — | off | Disables CLI query_event and first-occurrence query-text capture; does not remove the exact uprobes. The measured throughput change was small and sometimes negative; see [results](#overhead). |
+
+Execute/plan phase data is already unavailable in every mode on the measured
+EL8 4.18 kernel (`kernel_no_ref_ctr`), even without these flags.
 
 ### Other
 
@@ -1498,9 +1525,20 @@ two ways, and the default `tiered` mode uses both:
 
 **Sampled tier (always-on, default).** A userspace sampler reads each backend's
 `wait_event_info` directly with `process_vm_readv` at a fixed rate
-(`--sample-rate`, default 10 Hz). There is no watchpoint, no debug exception,
-and nothing injected into PostgreSQL — the cost falls entirely on the daemon
-(~0.6% of one core at 10 Hz), so PostgreSQL sees ~0% impact. This produces
+(`--sample-rate`, default 10 Hz). The validated userspace path avoids exact
+uprobes and hardware watchpoints between escalation windows. Pure sampled mode
+measured
+**94.6–102.5% of no-tracer TPS retained** on cx33 (4 vCPU,
+AMD EPYC-Rome), PG18.6, Ubuntu 24.04 / 6.8.0-139-generic and EL8 /
+4.18.0-553.157.1.el8_10.x86_64, select-only (`-R 8000` or unthrottled)
+and TPC-B (unthrottled), 16 clients, scale 100, shared_buffers 2 GB,
+fsync off; on cx43 (8 vCPU, AMD EPYC-Rome), Ubuntu 24.04 /
+6.8.0-139-generic, PG18.6, unthrottled TPC-B, 8 clients, scale 100,
+shared_buffers 2 GB, fsync on, added PostgreSQL CPU reached **+19.2 µs/tx**.
+Shared CPU resources still matter;
+daemon CPU alone does not establish application overhead. Default
+`tiered` mode automatically enables the full tier on anomaly, including CPU
+saturation, and pays its cost while active ([measurements](#overhead)). This produces
 ASH-style estimates of where time is spent. The top-5 wait-event ranking
 matches the exact tier's (5/5 events, every rate, every run measured), but
 the CPU-share *magnitude* disagreement is workload- and hardware-dependent,
@@ -1597,8 +1635,11 @@ not a scheduling class.
 **Full tier (exact, during escalation).** A **CPU hardware debug register**
 (watchpoint) traps every write to `wait_event_info` in each backend. PostgreSQL
 updates this field on every wait event transition (entering a wait, leaving a
-wait, changing wait type), so this captures every transition exactly — at the
-cost of a CPU debug exception per write (see [Performance](#performance)). In
+wait, changing wait type). The full tier also uses exact uprobes for command
+and query attribution and for supported execution phases (unavailable on the
+measured EL8 4.18 kernel, `kernel_no_ref_ctr`). See
+[Performance](#performance) for the total measured cost; its split between
+uprobe traps and watchpoint exceptions has not been measured. In
 `tiered` mode this runs only during bounded escalation windows; `--mode full`
 runs it always-on.
 
@@ -1621,7 +1662,8 @@ written by the daemon) is read with a streaming block reader for live mode.
 
 This design means:
 - **No PostgreSQL patches or extensions required** — works with stock binaries
-- **~0% impact by default** — the always-on sampled tier never touches a backend
+- **Cost depends on the active tier** — default anomaly escalation incurs
+  full-mode cost while active; see the [measured conditions](#overhead)
 - **Exact when you need it** — escalate to the full tier to capture every
   transition (histograms, transitions, lock chains) during a bounded window
 - **No lock contention** — ring buffer is lock-free
@@ -1633,61 +1675,173 @@ This design means:
 
 ### Overhead
 
-**The default sampled tier has ~0% impact on PostgreSQL.** It reads each
-backend's `wait_event_info` from userspace (`process_vm_readv`) at 10 Hz; the
-cost (~0.6% of one core at 10 Hz) falls entirely on the daemon, never on a
-backend. The numbers in this section apply to the **full hardware-watchpoint
-tier** — used always-on with `--mode full`, or only during bounded escalation
-windows in the default `tiered` mode.
+**Unchanged throughput below saturation does not mean unchanged CPU cost.**
+At saturation, full mode kept about half of no-tracer throughput on both cx33
+OSes in the measurements below. Pure sampled mode measured
+**94.6–102.5% of no-tracer TPS retained** on cx33 (4 vCPU,
+AMD EPYC-Rome), PG18.6, Ubuntu 24.04 / 6.8.0-139-generic and EL8 /
+4.18.0-553.157.1.el8_10.x86_64, select-only (`-R 8000` or unthrottled)
+and TPC-B (unthrottled), 16 clients, scale 100, shared_buffers 2 GB,
+fsync off; on cx43 (8 vCPU, AMD EPYC-Rome), Ubuntu 24.04 /
+6.8.0-139-generic, PG18.6, unthrottled TPC-B, 8 clients, scale 100,
+shared_buffers 2 GB, fsync on, added PostgreSQL CPU reached **+19.2 µs/tx**.
+These observations do not establish a guarantee
+for other machines or workloads.
 
-The full tier uses CPU hardware debug registers (watchpoints) to trap every
-write to `wait_event_info`. Its overhead rises with the **wait event transition
-rate** — how many times per second backends change wait state. Removing the BPF
-work recovers only 1-3 percentage points (see `--lightweight` and
-`--skip-query-id` below), so most of the cost lies outside BPF and userspace
-processing; we have not decomposed what the rest is.
+Default `tiered` mode escalates automatically on anomaly rules, including a
+rule that fires on CPU saturation. While escalated it enables the full tier
+and incurs full-mode cost for that window. The default escalation budget is
+**300 s per rolling hour** (`--escalation-budget`, verified in
+`src/pg_wait_tracer.c`); it limits duration, not instantaneous CPU or throughput
+loss. Pure `--mode sampled` never escalates.
 
-**Benchmark environment:** Hetzner cx43 (8 vCPU, 16 GB RAM), Rocky 9.7,
-PostgreSQL 18, pgbench scale 100, 8 clients, 60-second runs, 5 repetitions.
+These are measurements of master `bc554a73`, PostgreSQL **18.6**, from
+[issue #950](https://github.com/DmitryNFomin/pg_wait_tracer/issues/950).
+Tracer throughput percentages below are **TPS retained relative to no
+tracer**. CPU deltas are PostgreSQL process CPU **µs per transaction above no
+tracer**; they do not include the daemon's CPU. Values above the no-tracer
+throughput or negative CPU deltas describe run variation, not a claimed speedup.
 
-#### Write-heavy OLTP (pgbench TPC-B, shared_buffers = 2 GB)
+#### cx33 lever measurements — 2026-11-17
 
-Baseline: ~5,000 TPS, ~40K transitions/sec.
+Both tables: **Hetzner cx33, 4 vCPU, AMD EPYC-Rome, PostgreSQL 18.6**;
+pgbench **16 clients, scale 100, shared_buffers = 2 GB, fsync off**. Columns
+identify select-only throttled at **`-R 8000`**, select-only unthrottled, or
+TPC-B unthrottled. Each cell is **TPS retained / PostgreSQL CPU delta in
+µs/tx**, copied from `overhead-levers/table.txt`, median of **3** repetitions.
+These arms use only `--mode full` or `--mode sampled`: escalation reason
+`none`, **0** escalation windows; none are default-tiered measurements.
 
-| Mode | TPS Overhead |
-|------|:---:|
-| **Full trace** (`--mode full`) | **6%** |
-| Full trace + `--skip-query-id` | 5% |
-| `--lightweight` | 4% |
-| **Sampled** (default tier) | **~0%** |
+**Ubuntu 24.04, kernel 6.8.0-139-generic**, with the cx33 conditions above:
 
-#### Read-heavy with high buffer miss rate (pgbench SELECT-only, shared_buffers = 128 MB)
+| Mode / flags | Select-only, `-R 8000` | Select-only, unthrottled | TPC-B, unthrottled |
+|---|---:|---:|---:|
+| `--mode full` | 100.3% / +71.2 | 48.0% / +93.3 | 48.8% / +620.2 |
+| `--mode full --skip-usdt` | 100.1% / +15.3 | 74.4% / +27.7 | 73.3% / +219.7 |
+| `--mode full --lightweight` | 100.1% / +27.4 | 77.1% / +23.8 | 72.2% / +226.2 |
+| `--mode full --skip-query-id` | 100.2% / +76.9 | 46.5% / +98.0 | 48.3% / +634.3 |
+| `--mode sampled` | 100.2% / -9.1 | 94.6% / +5.4 | 98.8% / +3.5 |
 
-Baseline: ~108,000 TPS, ~220K transitions/sec. Data fits in OS page cache
-so each IO:DataFileRead completes in microseconds, generating a very high
-transition rate.
+**EL8, kernel 4.18.0-553.157.1.el8_10.x86_64**, with the same cx33 conditions:
 
-| Mode | TPS Overhead |
-|------|:---:|
-| **Full trace** (`--mode full`) | **29%** |
-| Full trace + `--skip-query-id` | 26% |
-| `--lightweight` | 28% |
-| **Sampled** (default tier) | **~0%** |
+| Mode / flags | Select-only, `-R 8000` | Select-only, unthrottled | TPC-B, unthrottled |
+|---|---:|---:|---:|
+| `--mode full` | 99.9% / +59.2 | 52.3% / +61.7 | 51.7% / +426.6 |
+| `--mode full --skip-usdt` | 100.0% / +19.5 | 78.2% / +18.9 | 73.9% / +161.4 |
+| `--mode full --lightweight` | 100.0% / +21.4 | 80.3% / +16.6 | 75.9% / +145.7 |
+| `--mode full --skip-query-id` | 100.0% / +57.2 | 54.2% / +57.9 | 51.3% / +428.9 |
+| `--mode sampled` | 99.9% / -1.5 | 100.6% / -0.0 | 102.5% / -7.8 |
 
-The `--lightweight` and `--skip-query-id` flags save only 1-3 percentage points
-because the bottleneck is the hardware debug exception itself, not the BPF work
-done inside it — see [What one watchpoint fire costs](#what-one-watchpoint-fire-costs).
-This worst case is exactly why the full tier is gated behind escalation by
-default — you only pay it during the bounded window you asked for.
+Throttled below saturation, TPS did not change materially, but PostgreSQL CPU
+per transaction rose in full mode. In the issue's rounded reporting of this
+**cx33 4-vCPU AMD EPYC-Rome, PG18.6, select-only `-R 8000`, 16-client,
+scale-100, shared_buffers 2-GB, fsync-off** set, turning off every exact uprobe
+(watchpoints still on, `--mode full --skip-usdt`) cut the added CPU from
+**+71 to +15 µs/tx on Ubuntu 24.04 / 6.8.0-139-generic**, and from
+**+59 to +20 µs/tx on EL8 / 4.18.0-553.157.1.el8_10.x86_64**. The TPC-B
+unthrottled full-mode CPU costs are in the same tables; throttled TPC-B was
+not measured. The split between uprobe traps and watchpoint exceptions has
+not been measured.
+
+#### Earlier default-tiered measurements — 2026-11-17 session
+
+The earlier `tracer-cost` and `tracer-cost-why` sets also used **cx33, 4 vCPU,
+PostgreSQL 18.6, select-only pgbench, 16 clients**, with **scale 10,
+shared_buffers = 1 GB, fsync off** (configuration recorded in the saved
+drivers). These differ from the later lever set's scale and shared_buffers.
+The saved `info.json` files identify **AMD EPYC-Rome on Ubuntu** and
+**Intel Xeon Skylake on EL8** in `tracer-cost`; `tracer-cost-why` used
+**Intel Xeon Skylake on both OSes**. All were recorded on **2026-11-17**.
+The following per-run ranges for unthrottled default `tiered` mode use the
+no-tracer median in the first set and mean in the second set. Percentages
+are rounded to whole percent from the TPS entries in the named tables.
+These are whole-run results, including sampled time when a run escalated.
+
+| Set / OS / kernel / CPU (earlier cx33 conditions above) | Did not escalate: % of no-tracer TPS retained | Escalated during run: % of no-tracer TPS retained |
+|---|---:|---:|
+| `tracer-cost`, Ubuntu 24.04 / 6.8.0-139-generic / AMD EPYC-Rome | 95–96% | 55% |
+| `tracer-cost`, EL8 / 4.18.0-553.157.1.el8_10.x86_64 / Intel Xeon Skylake | — | 55–62% |
+| `tracer-cost-why`, Ubuntu 24.04 / 6.8.0-139-generic / Intel Xeon Skylake | — | 57–62% |
+| `tracer-cost-why`, EL8 / 4.18.0-553.157.1.el8_10.x86_64 / Intel Xeon Skylake | 96% | 61–63% |
+
+A dash means no run in that state in the table, not an overhead estimate.
+
+**In the second measurement set it escalated in 11 of 12 runs**, about
+**4 s** after load started, after a **5 s** idle warmup, as reported in the
+issue body. These observed escalations used the AAS anomaly rule; CPU
+saturation is also an automatic trigger in the default policy. This frequency
+is specific to that measurement set, not a production forecast.
+
+The second set (`tracer-cost-why/table.txt`, same earlier cx33 workload
+conditions above) used **Intel Xeon Skylake on both OSes**, as recorded in
+its saved `info.json` files. Clean-run means below exclude the separate
+instrumented profile runs.
+Tiered rows that escalated include both sampled and escalated time; they are
+not measurements of the escalated interval alone.
+
+| OS / kernel / CPU (cx33 4 vCPU, PG18.6) | Select-only load, 16 clients, scale 10, shared_buffers 1 GB, fsync off | Mode / escalation state | TPS retained | PostgreSQL CPU delta (µs/tx) |
+|---|---|---|---:|---:|
+| Ubuntu 24.04 / 6.8.0-139-generic / Intel Xeon Skylake | `-R 8000` | `full` | 100.0% | +120 |
+| Ubuntu 24.04 / 6.8.0-139-generic / Intel Xeon Skylake | `-R 8000` | `tiered`, all runs escalated | 100.0% | +104 |
+| Ubuntu 24.04 / 6.8.0-139-generic / Intel Xeon Skylake | unthrottled | `full` | 50.7% | +122 |
+| Ubuntu 24.04 / 6.8.0-139-generic / Intel Xeon Skylake | unthrottled | `tiered`, all runs escalated | 59.8% | +94 |
+| EL8 / 4.18.0-553.157.1.el8_10.x86_64 / Intel Xeon Skylake | `-R 8000` | `full` | 100.0% | +93 |
+| EL8 / 4.18.0-553.157.1.el8_10.x86_64 / Intel Xeon Skylake | `-R 8000` | `tiered`, all runs escalated | 99.9% | +92 |
+| EL8 / 4.18.0-553.157.1.el8_10.x86_64 / Intel Xeon Skylake | unthrottled | `full` | 51.8% | +97 |
+| EL8 / 4.18.0-553.157.1.el8_10.x86_64 / Intel Xeon Skylake | unthrottled | `tiered`, one run did not escalate | 73.4% | +49 |
+
+Absolute µs/tx varies with the CPU; there is no single portable transaction
+cost. On **2026-11-17**, the earlier `tracer-cost-why` full-mode,
+select-only `-R 8000` set on **Intel Xeon Skylake** added **+120 µs/tx on
+Ubuntu** and **+93 µs/tx on EL8**, under the earlier cx33 conditions above.
+The later `overhead-levers` set on **AMD EPYC-Rome** added **+71 µs/tx on
+Ubuntu** and **+59 µs/tx on EL8**, under its cx33 conditions above. Their
+OS/kernel and PG versions are listed with each set. Scale and shared_buffers
+also differed; these observations do not establish a controlled CPU comparison.
+
+#### cx43 reproduction and historical benchmark
+
+**2026-11-17 reproduction:** Hetzner **cx43, 8 vCPU, AMD EPYC-Rome,
+Ubuntu 24.04, kernel 6.8.0-139-generic, PostgreSQL 18.6**; pgbench **scale
+100, fsync on**, all workloads **unthrottled**. Select-only uses
+**shared_buffers = 128 MB**; TPC-B uses **2 GB**. Results from
+`overhead-levers/table.txt` are medians of **5** repetitions for **8** clients
+and **3** repetitions for **16** clients. No tiered arms or escalation.
+
+| Workload / clients (cx43 reproduction conditions above) | `--mode full`: TPS retained | `--mode sampled`: TPS retained |
+|---|---:|---:|
+| Select-only / 8 | 54.8% | 97.6% |
+| TPC-B / 8 | 72.4% | 96.6% |
+| Select-only / 16 | 49.5% | 100.6% |
+
+**Historical benchmark, recorded in the README on 2026-03-22; not reproduced.**
+The **2026-03-22 claim** for `--mode full` was **71% of no-tracer TPS
+retained** for select-only and **94% retained** for TPC-B on **cx43, 8 vCPU,
+Rocky 9.7, PostgreSQL 18, pgbench scale 100, 8 clients**, with shared_buffers
+as listed below. CPU model, kernel release, fsync and throttling were not
+recorded there.
+Beside today's reproduction above, the old workload-specific claims were:
+
+| Historical `--mode full` workload (Rocky cx43 conditions above) | 2026-03-22 claim: % of no-tracer TPS retained, not reproduced | Today's `--mode full` TPS retained (Ubuntu cx43 conditions above) |
+|---|---:|---:|
+| Select-only, shared_buffers 128 MB | 71% | 54.8% |
+| TPC-B, shared_buffers 2 GB | 94% | 72.4% |
+
+The OS changed, so this is a reproduction attempt, not a same-OS comparison.
+Other PostgreSQL versions, other CPUs, and write-heavy workloads at other
+scales were not measured in this campaign. These results do not establish
+an overhead envelope for them.
 
 #### What one watchpoint fire costs
+
+**Historical microbenchmarks, recorded 2026-10-23:** bare watchpoints in KVM guests (Intel Xeon Skylake, AMD EPYC-Rome and AMD EPYC-Genoa), no PostgreSQL; harness setups are stated below.
 
 Earlier revisions of this README put the per-fire cost at a few hundred
 nanoseconds. **That figure was wrong by more than an order of magnitude and has
 been withdrawn** ([#505](https://github.com/DmitryNFomin/pg_wait_tracer/issues/505)).
 Everything below is measured on a bare watchpoint with no PostgreSQL attached,
-3 runs per point; full data and method in
-[`tests/results/issue502-intel-comparison/`](tests/results/issue502-intel-comparison/README.md).
+3 runs per point. The original `tests/results/issue502-intel-comparison/`
+evidence directory is not in the repository; the measured values follow here.
 
 **Per fire, in a tight write loop** (2 M writes, `HW_BREAKPOINT_W`, user-space
 only, no BPF). Two independent harnesses agree within 3-6%:
@@ -1710,23 +1864,22 @@ rate that matters is per-process:**
 | 30,000 | 12.04 us | 6.04 us |
 | ~150-190K (tight loop) | 6.58 us | 5.26 us |
 
-A process that sleeps between fires pays several times the tight-loop cost. If
-PostgreSQL backends sleep between fires — which fits how wait events work,
-though these runs did not measure backend sleep behaviour directly — then the
-figure that applies to a real backend is the expensive end of that range, not
-the cheap one. We have not established the cause of the rate dependence either.
+In this harness, sleeping between fires cost several times the tight-loop
+cost. These runs did not measure PostgreSQL backend sleep behaviour or
+establish the cause of the rate dependence.
 
 Two components *were* separated, and they are not the ones this README used to
 name:
 
-- **BPF is not the cost.** At a paced 30K/s: 18.36 us/write with a BPF program
+- **BPF attachment comparison.** At a paced 30K/s: 18.36 us/write with a BPF program
   attached vs 18.35 us/write with the default perf handler and no BPF at all
   (gate-1; gate-2 10.84 vs 10.95). n=3 each.
 - **Arming costs nothing per write and everything per context switch.** A
   watchpoint armed on an address that is *never* written adds zero per write in
-  a tight loop, but 6.4-8.7 us (Intel) / 3.4-4.7 us (AMD) per schedule-in. At
-  gate-2's production switch rate that is 7-10% of the total — small, but not
-  zero, which is how the issue had it recorded.
+  a tight loop, but 6.4-8.7 us (Intel) / 3.4-4.7 us (AMD) per schedule-in.
+  The historical extrapolation at gate-2's production switch rate was 7-10%
+  of total cost; it does not
+  decompose the PostgreSQL workload cost measured in the 2026-11-17 sets.
 
 **These microbenchmarks do not decompose the workload overhead measured above,
 and this README no longer tries to.** The obvious arithmetic
@@ -1835,60 +1988,67 @@ the exact tier when you need a trustworthy CPU number rather than the ranking.
 
 #### What drives overhead
 
-Overhead rises with transitions/sec — across the two workloads above, 5.5x the
-transition rate came with 4.8x the overhead, which is suggestive but is two
-points on two different workloads, not a demonstrated linear law. Workloads
-with more transitions per second see higher overhead:
-
-- **Low overhead** (<10%): write-heavy OLTP, long-running queries, workloads
-  where data fits in shared_buffers (buffer hits don't trigger wait events)
-- **Medium overhead** (10-20%): mixed read/write with moderate buffer miss rates
-- **High overhead** (20-30%): very high TPS with small shared_buffers relative
-  to working set, where most reads miss shared_buffers but hit OS page cache
-  (fast IO completions = rapid transitions)
-
-**Where the cost comes from:**
-
-An earlier revision of this README split the cost 70% / 25% / 5% between the
-debug exception, lock amplification and BPF. **That split was never measured**
-and has been withdrawn with the per-fire figure it rested on
-([#505](https://github.com/DmitryNFomin/pg_wait_tracer/issues/505)). Exactly one
-part of it was ever measured, and it is the only part stated here:
-
-- **BPF and userspace are not the cost.** Measured directly: attaching the BPF
-  program changes the per-write cost by 0.01 us
-  ([above](#what-one-watchpoint-fire-costs)). The TPS tables agree — removing
-  that work recovers only 1-3 pp of the 29% and 1-2 pp of the 6%.
-- **Debug-register save/restore per context switch is real but minor** — 7-10%
-  of the total at gate-2's production switch rate.
-- **The rest is not decomposed.** The trap itself and extended lock hold times
-  (the exception can fire while a backend holds LWLocks) are both plausible
-  contributors. We have not measured their shares and do not claim them.
+The measured cost depends on the workload, CPU, load and active capture tier.
+Below saturation, unchanged TPS can hide extra PostgreSQL CPU per transaction;
+at saturation, the same instrumentation reduces throughput. The
+[measurement sets above](#overhead) do not establish a transition-rate law,
+a general workload cost band, or a division of cost among mechanisms.
+The split between uprobe traps and watchpoint exceptions has not been measured.
 
 ### Performance tuning flags
 
-| Flag | Effect | Trade-off |
-|------|--------|-----------|
-| `--skip-query-id` | Skips 1 `bpf_probe_read_user` per event (~100-200 ns) | query_event view unavailable |
-| `--lightweight` | BPF accumulates in per-CPU hash map, no ring buffer | Only time_model and system_event views. No per-PID, per-query, histogram, or trace recording |
+The **cx33 4-vCPU AMD EPYC-Rome, PostgreSQL 18.6, 16-client, scale-100,
+shared_buffers 2-GB, fsync-off, unthrottled select-only and TPC-B** results
+above cover **Ubuntu 24.04 / 6.8.0-139-generic** and **EL8 /
+4.18.0-553.157.1.el8_10.x86_64**. In those `--mode full` arms, `--skip-usdt`
+and `--lightweight` recovered **22-29 percentage points of no-tracer TPS**, as
+summarized in the issue; `--skip-query-id` recovered about **0-2 points** and
+sometimes reduced TPS. The per-arm tables give the actual retained throughput.
+These are measured changes under those conditions, not fixed flag savings.
 
-These flags provide marginal improvement (1-3 percentage points) because the
-dominant cost is the hardware debug exception, not BPF processing. They are
-most useful for write-heavy OLTP where transitions/sec is moderate.
+| Flag | Effect in `--mode full` | What the user gives up |
+|---|---|---|
+| `--skip-usdt` | Attaches **no exact uprobe**; hardware watchpoints stay | Waterfall/Scatter executions and execute/plan phase data are absent. Command start/end markers, query edges and first-occurrence query text are lost. ClientRead attribution and CPU/DB Time totals are unreliable; see below. |
+| `--lightweight` | Attaches **no exact uprobe**; hardware watchpoints stay; drops the event ring buffer and accumulates in per-CPU maps | Same missing command/query/phase evidence as `--skip-usdt`. Only time_model and system_event views remain; no per-PID, per-query, histogram or event trace recording. ClientRead attribution and CPU/DB Time totals are unreliable. |
+| `--skip-query-id` | Keeps the exact uprobes; suppresses first-occurrence query-text capture | CLI query_event is refused; newly observed SQL text is not captured by the exact query probe. It does not offer the uprobe-removal recovery measured for the other flags. |
 
-**Recommendations:**
+For `--mode full`, the startup mask is **0** with either `--skip-usdt` or
+`--lightweight` (`src/exact_probe.c`, `pgwt_exact_probe_startup_mask`). The
+saved `ctl.json` masks confirm **0** for the skip-usdt arms, versus **15**
+for full on Ubuntu and **3** for full on EL8. This disables attribution
+uprobes as well as phase probes. The tiered escalation acquire path is
+different: with `--skip-usdt` it still requests the attribution probes, so the
+full-mode lever measurements do not establish savings for tiered mode with
+`--skip-usdt`. `--lightweight` is refused outside `--mode full`.
 
-- **Default `tiered` mode** is appropriate for almost all production use: the
-  always-on sampler costs PostgreSQL ~0%, and you escalate to the full tier on
-  demand (or let anomaly rules do it) when you need exact, per-transition detail.
-- Use **`--mode full`** for a focused investigation where you want every
-  transition captured for the whole run and the overhead is acceptable.
-- The performance-tuning flags below apply to the full tier. Use
-  `--lightweight` when you only need time_model and system_event views, or
-  `--skip-query-id` if you don't need per-query wait attribution.
-- Monitor full-tier overhead on your workload — if baseline TPS is very high
-  (>50K) with high buffer miss rates, escalation windows can be costly; keep
-  `--escalation-budget` conservative.
+Without command markers and query edges, **ClientRead attribution and
+CPU/DB Time totals are unreliable**, including the remaining
+time_model/system_event output with `--lightweight`. The direction of error
+was not measured. Hardware wait transitions alone do not restore command
+boundaries. The trace also loses first-occurrence SQL text from the exact
+query probe. These losses follow the query and activity probe paths in
+`src/bpf/pg_wait_tracer.bpf.c`.
+
+On the measured **EL8 4.18.0-553.157.1.el8_10.x86_64** kernel, execute and
+plan phase probes never attach in any mode: capability reports
+`kernel_no_ref_ctr`. Waterfall/Scatter executions are absent even without
+these flags; full mode still has attribution uprobes. Thus the EL8 flag
+recovery cannot be called a saving from disabling execute/plan phases.
+
+**Deployment advice:**
+
+- Choose `tiered` only with allowance for automatic escalation, including on
+  CPU saturation: while active it incurs the full-mode cost shown for the
+  measured workload [above](#overhead). Check that cost against your CPU and
+  throughput headroom; the budget bounds time, not instantaneous impact.
+- Use `--mode sampled` when automatic escalation is unacceptable. It never
+  escalates; its measured overhead here does not establish a guarantee for
+  your hardware or workload.
+- Use `--mode full` for a focused investigation when its measured CPU cost
+  and throughput loss are acceptable.
+- Use tuning flags only when their missing evidence and unreliable
+  ClientRead attribution and CPU/DB Time totals are acceptable. In particular,
+  `--lightweight` is not an equivalent capture with cheaper output.
 
 ### BPF optimizations
 
@@ -1908,20 +2068,17 @@ The following optimizations are applied automatically:
 
 ### Future: PostgreSQL-native wait event timing
 
-The hardware watchpoint overhead is fundamentally limited by the CPU debug
-exception cost — 5.3 to 22.3 us per fire on the VMs we measure on, depending on
-the per-process fire rate; see
-[What one watchpoint fire costs](#what-one-watchpoint-fire-costs). A
-[proposed PostgreSQL patch](https://github.com/DmitryNFomin/postgres/pull/1)
-adds Oracle-style internal wait event instrumentation — two VDSO
-`clock_gettime()` calls per event (~70-100 ns total) — achieving near-zero
-measurable overhead.
+A [proposed PostgreSQL patch](https://github.com/DmitryNFomin/postgres/pull/1)
+adds Oracle-style internal wait event instrumentation with VDSO
+`clock_gettime()` calls. Its overhead was not measured in the campaign above;
+those tracer measurements do not predict the patch's cost or quantify how
+much of the tracer's cost it would avoid.
 
 #### What the patch provides
 
 Compile-time option: `./configure --enable-wait-event-timing` (or
-`meson setup -Dwait_event_timing=true`). When compiled without the flag,
-the binary is identical to stock PostgreSQL — zero overhead by construction.
+`meson setup -Dwait_event_timing=true`). The instrumentation is conditional
+on this build option.
 
 When compiled with the flag, two runtime GUCs control the features:
 
@@ -1940,9 +2097,9 @@ Oracle equivalents achieved:
 | `V$SQL` wait stats (per-query attribution) | `pg_stat_get_wait_event_timing_by_query()` |
 | 10046 trace (per-event stream) | `pg_stat_get_wait_event_trace(backend_id)` |
 
-#### Benchmark methodology
+#### Historical benchmarks
 
-All benchmarks: Hetzner cx43 (8 shared vCPU, 16 GB RAM), Rocky 9.7,
+**Recorded 2026-03-24:** these PG-patch benchmarks used Hetzner cx43 (8 shared vCPU, 16 GB RAM), Rocky 9.7,
 PG 19devel built from source, pgbench scale 100, 8 clients, SELECT-only
 with `shared_buffers = 128 MB` (data in OS page cache) — worst case at
 ~220K wait event transitions/sec, 60-second runs.
@@ -1976,24 +2133,8 @@ directory, toggling GUCs between server restarts, 5 rounds:
 
 Result: **< 0.5% difference** between GUC off and all features enabled.
 All three configurations are within run-to-run variance — indistinguishable.
-
-**Comparison with hardware watchpoints.** The worst-case overhead column comes
-from the earlier same-environment benchmarks; the watchpoint per-event figure is
-the separate cx33 microbenchmark described in
-[What one watchpoint fire costs](#what-one-watchpoint-fire-costs), and the patch
-figure is an estimate for two VDSO calls, not a measurement:
-
-| Approach | Worst-case overhead | Per-event cost |
-|---|:---:|---|
-| PG patch (all features ON) | **< 0.5%** | ~70-100 ns (VDSO, no kernel trap) |
-| pg_wait_tracer (hardware watchpoint) | **29%** | 5.3-22.3 us measured (CPU #DB exception, KVM guests, rate-dependent) |
-
-The reason the patch overhead is near-zero despite ~220K events/sec: VDSO
-`clock_gettime(CLOCK_MONOTONIC)` reads a memory-mapped kernel page without
-leaving userspace — no syscall, no context switch, no trap.  Counter updates
-hit hot L1 cache lines owned by the backend.  Hardware watchpoints, by
-contrast, trigger a CPU debug exception on every event, requiring full
-kernel entry/exit with pipeline flush and KPTI page table switch.
+These patch runs are separate from the 2026-11-17 tracer measurements and
+provide no matched comparison with them.
 
 All 243 PostgreSQL regression tests pass with the patch
 (`make check` — both with and without the compile flag).
