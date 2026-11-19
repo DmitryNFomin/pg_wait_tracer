@@ -171,6 +171,7 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
     (work / "src/core").mkdir(parents=True)
     (work / "tests").mkdir()
     shutil.copy2(repo / "src/core/pgwt_merge.h", work / "src/core/pgwt_merge.h")
+    shutil.copy2(repo / "src/core/pgwt_diagnostics.h", work / "src/core/pgwt_diagnostics.h")
     def build_and_run(source, test_source=original_test, guard=None, baseline=False, target=None):
         (work / "tests/test_core_merge_contract.c").write_text(test_source)
         (work / "src/core/merge.c").write_text(source)

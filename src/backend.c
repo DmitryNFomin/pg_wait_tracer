@@ -288,6 +288,9 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
             .init_ts = prev.init_ts,
             .init_stored = prev.init_stored,
             .init_store_failed = prev.init_store_failed,
+            .bootstrap_fired = prev.bootstrap_fired,
+            .wp_ever_live = 1,
+            .cookie = d->exact_perf ? prev.cookie : 0,
             /* S3: exact CPU is accumulated by the sched_switch program into
              * cpu_ns_total/on_cpu_ts. Seed the base at 0 (deltas count from
              * attach); open the on-CPU stretch here iff the backend is running
@@ -389,6 +392,9 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
     int target_fd = open_watchpoint_target(be->pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
     be->wp_fd = pgwt_open_watchpoint_disabled(be->pid, be->wp_addr, wp_prog_fd);
+    if (d->attach_timeline)
+        pgwt_timeline_phase(d->attach_timeline, be->pid, be->init_diag_cookie,
+                            PGWT_TL_WAIT_OPEN, be->wp_fd >= 0);
     if (be->wp_fd < 0) {
         int error = errno;
         pgwt_debug_block_end(d, "watchpoint_open_failed", be->pid, started_ns);
@@ -416,6 +422,9 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
 
     started_ns = pgwt_debug_block_begin(d);
     int enable_rc = pgwt_watchpoint_enable(be->wp_fd);
+    if (d->attach_timeline)
+        pgwt_timeline_phase(d->attach_timeline, be->pid, be->init_diag_cookie,
+                            PGWT_TL_WAIT_ENABLE, enable_rc == 0);
     if (enable_rc != 0) {
         int error = errno;
         pgwt_debug_block_end(d, "watchpoint_enable_failed", be->pid, started_ns);
@@ -1054,6 +1063,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     }
 
     pgwt_sampler_enroll_backend(be, now_ns());
+    be->init_diag_cookie = d->init_diagnostics.receipt_cookie;
 
     /* Sampled mode: no bootstrap watchpoint. Register the backend now; the
      * sampler lazily resolves wp_addr once the backend sets the pointer. */
@@ -1074,8 +1084,14 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     int bootstrap_prog_fd = bpf_program__fd(d->skel->progs.on_bootstrap);
     int target_fd = open_watchpoint_target(child_pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
+    if (d->attach_timeline)
+        pgwt_timeline_phase(d->attach_timeline, child_pid, be->init_diag_cookie,
+                            PGWT_TL_BOOT_START, true);
     be->bootstrap_fd = pgwt_open_watchpoint(child_pid, d->my_wait_ptr_addr,
                                              bootstrap_prog_fd);
+    if (d->attach_timeline)
+        pgwt_timeline_phase(d->attach_timeline, child_pid, be->init_diag_cookie,
+                            PGWT_TL_BOOT_END, be->bootstrap_fd >= 0);
     if (be->bootstrap_fd < 0) {
         int error = errno;
         pgwt_debug_block_end(d, "bootstrap_watchpoint_open_failed", child_pid, started_ns);
@@ -1221,6 +1237,7 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
             remember_enrollment_refusal(d, pid);
             return -1;
         }
+        be->init_diag_cookie = d->init_diagnostics.receipt_cookie;
     }
     pgwt_sampler_enroll_backend(be, now_ns());
 
@@ -1244,11 +1261,14 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
     }
     if (init_ts != 0)
         be->init_ts = init_ts;
+    if (d->attach_timeline)
+        pgwt_timeline_init(d->attach_timeline, pid, be->init_diag_cookie, init_ts);
 
     /* Ring delivery after a sweep (or the direct-attach race) must not
      * reopen/reseed an already live watchpoint. */
     if (be->wp_fd >= 0) {
         be->init_attached = true;
+        pgwt_init_diag_attached(&d->init_diagnostics, pid, be->init_diag_cookie);
         return 0;
     }
 
@@ -1291,6 +1311,7 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
         return -1;
     }
     be->init_attached = true;
+    pgwt_init_diag_attached(&d->init_diagnostics, pid, be->init_diag_cookie);
 
     uint64_t started_ns = pgwt_debug_block_begin(d);
     int cmdline_rc = pgwt_parse_cmdline(pid, &be->meta);
@@ -1363,8 +1384,19 @@ int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
      * Deleting the entry below makes repeated EXIT cleanup idempotent. */
     uint64_t init_ts;
     bool before_attach;
-    if (pgwt_exit_init_lost(be, pid, d, read_init_state, &init_ts, &before_attach))
+    const char *branch;
+    if (pgwt_exit_init_lost_diagnostic(be, pid, d, read_init_state, &init_ts, &before_attach, &branch)) {
+        if (d->attach_timeline)
+            pgwt_timeline_loss(d->attach_timeline, pid,
+                be ? be->init_diag_cookie : d->init_diagnostics.receipt_cookie);
+        /* Failure-only clock read: upper bound on the just-completed state
+         * lookup, taken before either diagnostic can block on stderr. */
+        uint64_t read_after_ns = pgwt_debug_monotonic_ns();
         record_init_loss(d, pid, init_ts, exit_ts);
+        pgwt_init_diag_print(stderr, &d->init_diagnostics, (uint32_t)pid,
+            be ? be->init_diag_cookie : d->init_diagnostics.receipt_cookie,
+            branch, read_after_ns);
+    }
     else if (before_attach && pgwt_mode_uses_watchpoints(d) &&
              !enrollment_failure_counted(d, pid)) {
         /* Exact refusal evidence already has a failure class. Overflow only
@@ -1406,9 +1438,14 @@ int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
     int seed_fd = bpf_map__fd(d->skel->maps.exact_seed_map);
     uint32_t key = pid;
     started_ns = pgwt_debug_block_begin(d);
-    bpf_map_delete_elem(state_fd, &key);
-    bpf_map_delete_elem(attr_fd, &key);
-    bpf_map_delete_elem(seed_fd, &key);
+    /* Flagged producer retirement is synchronous in on_exit. A delayed
+     * userspace EXIT must not delete state belonging to a reused PID. A2
+     * owns lifetime-bound attachment retirement; no proof is asserted here. */
+    if (!d->exact_perf) {
+        bpf_map_delete_elem(state_fd, &key);
+        bpf_map_delete_elem(attr_fd, &key);
+        bpf_map_delete_elem(seed_fd, &key);
+    }
     pgwt_debug_block_end(d, "backend_state_delete", pid, started_ns);
 
     /* #379: the pid's state_map entry is gone, so pgwt_read_state_map will

@@ -860,9 +860,9 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
         struct pgwt_pgbs_sampled_attr attr;
         int attr_rc;
         if (activity_source) {
-            if (be && be->pgbs_addr == 0)
-                be->pgbs_addr = pgwt_pgbs_resolve_entry(
-                    pid, &d->backend_status_layout);
+            pgwt_pgbs_resolve_cached(be, &d->backend_status_layout,
+                pgwt_debug_monotonic_ns(), true, d->attach_timeline
+                    ? &d->attach_timeline->pgbs_resolve : NULL);
             attr_rc = be && be->pgbs_addr != 0
                 ? pgwt_pgbs_read_sampled_attr_at(
                     pid, be->pgbs_addr, &d->backend_status_layout, &attr)

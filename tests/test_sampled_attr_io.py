@@ -486,7 +486,7 @@ def registry_sources():
     period_end = poll.index("\n", poll.index("uint64_t period_ns =")) + 1
     tick_prelude = poll[period_end:poll.index("    const bool tick_source_enabled")]
     daemon = (ROOT / "src/daemon.c").read_text()
-    timer = function(daemon, "pgwt_handle_timer")
+    timer = function(daemon, "pgwt_tick_duties")
     timer_start = timer.index("    if (pgwt_sampler_refresh_pg13_generation(d)")
     timer_end = timer.index("    /* Stage 3 refreshes capacity", timer_start)
     interval = "static void interval_registry(struct pgwt_daemon *d)\n{\n    (void)d;\n" + timer[timer_start:timer_end] + "}\n"

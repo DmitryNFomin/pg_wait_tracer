@@ -895,11 +895,14 @@ bool pgwt_pgbs_sampled_activity_enabled(const struct PgBackendStatusLayout *layo
 { return pgwt_pgbs_sampled_attr_enabled(layout) && layout->major == 13; }
 bool pgwt_pgbs_sampled_query_id_enabled(const struct PgBackendStatusLayout *layout)
 { return pgwt_pgbs_sampled_attr_enabled(layout) && layout->major >= 14; }
-static int resolve_entry_fd(pid_t pid, int fd, const struct PgBackendStatusLayout *layout, uint64_t *out)
-{ (void)pid; (void)fd; (void)layout; *out = scenario == UNRESOLVED ? 0 : 0x2000;
+uint64_t pgwt_debug_monotonic_ns(void) { return 1; }
+static int resolve_preseed_entry_fd(pid_t pid, int fd, const struct PgBackendStatusLayout *layout, uint64_t *out,
+    struct pgwt_pgbs_resolve_stats *stats)
+{ (void)pid; (void)fd; (void)layout; (void)stats; *out = scenario == UNRESOLVED ? 0 : 0x2000;
   return *out ? PGWT_PGBS_PRESEED_ROW : PGWT_PGBS_PRESEED_FAILED; }
-uint64_t pgwt_pgbs_resolve_entry(pid_t pid, const struct PgBackendStatusLayout *layout)
-{ uint64_t base; resolve_entry_fd(pid, -1, layout, &base); return base; }
+uint64_t pgwt_pgbs_resolve_entry(pid_t pid, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_resolve_stats *stats)
+{ uint64_t base; resolve_preseed_entry_fd(pid, -1, layout, &base, stats); return base; }
 struct pgwt_pgbs_mapping { uint64_t lo, hi, identity, backing; };
 static uint64_t fresh_generation;
 static unsigned maps_reads;
@@ -1564,7 +1567,7 @@ int main(void)
 def preseed_cases(mutants):
     import re
     def extract(source, name):
-        match = re.search(r"^(?:static )?(?:int|void|bool|ssize_t) " + name +
+        match = re.search(r"^(?:static )?(?:int|void|bool|ssize_t|uint64_t) " + name +
                           r"\([^;]*?\)\n\{.*?^\}", source, re.M | re.S)
         assert match, name
         return match[0]
@@ -1574,7 +1577,7 @@ def preseed_cases(mutants):
     functions = "\n\n".join([
         extract(cmdline, "pgwt_backend_no_command_fd"),
         extract((ROOT / "src/sampler.c").read_text(), "pgwt_sampler_seed_state_entry"),
-        *(extract(pgbs, n) for n in ("pread_exact", "read_entry_pointer_fd", "read_field_value", "read_snapshot_fd",
+        *(extract(pgbs, n) for n in ("resolve_clock_ns", "pgwt_pgbs_resolve_cached", "pread_exact", "read_entry_pointer_fd", "read_field_value", "read_snapshot_fd",
             "open_mem", "pgwt_pgbs_state_is_cmd_open", "snapshot_untorn",
             "snapshot_coherent_identity", "snapshot_usable", "pgwt_pgbs_derive_sampled_attr",
             "pgwt_pgbs_derive_sampled_activity", "read_sampled_attr_at_fd",

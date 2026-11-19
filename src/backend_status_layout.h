@@ -82,6 +82,7 @@ struct PgBackendStatusLayout {
     pid_t generation_postmaster;
     bool pg13_computed;
     size_t pg13_scan_next;
+    uint32_t status_array_slots; /* PG13 NumBackendStatSlots; 0 means unknown */
 
     struct pgwt_pgbs_field st_changecount;
     struct pgwt_pgbs_field st_procpid;
@@ -390,8 +391,21 @@ int pgwt_pgbs_read_sampled_attr_at(
     pid_t backend_pid, uint64_t backend_status_addr,
     const struct PgBackendStatusLayout *layout,
     struct pgwt_pgbs_sampled_attr *out);
+/* Shared positive/miss cache on the backend incarnation. Backend allocation
+ * clears all cache fields. Misses retry after 100 ms, exponentially capped at
+ * 3.2 s, so a row published after the first query can still become visible.
+ * Coherent escalation preseed passes force=true to bypass only miss back-off.
+ * Unknown extents retain the mapping/16384-row-distance bound. */
+struct pgwt_backend;
+struct pgwt_pgbs_resolve_stats {
+    uint64_t calls, misses, total_ns, extent_fallbacks;
+};
+uint64_t pgwt_pgbs_resolve_cached(struct pgwt_backend *be,
+    const struct PgBackendStatusLayout *layout, uint64_t now_ns, bool force,
+    struct pgwt_pgbs_resolve_stats *stats);
 uint64_t pgwt_pgbs_resolve_entry(
-    pid_t backend_pid, const struct PgBackendStatusLayout *layout);
+    pid_t backend_pid, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_resolve_stats *stats);
 
 /* Failure-path reader: ROW (0), absent MyBEEntry (2), retired row (3),
  * UNPUBLISHED (4), torn (-2), failed (-1).

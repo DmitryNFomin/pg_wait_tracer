@@ -23,6 +23,7 @@ struct pgwt_backend {
      * SHARED addresses through one pid; local ones need per-pid reads. */
     int      wp_addr_shared;
     uint64_t attach_ts;        /* monotonic ns when attached */
+    uint64_t init_diag_cookie; /* receipt identity only, never attachment proof */
     uint64_t init_ts;          /* captured bootstrap time; 0 for direct attach */
     bool     init_attached;    /* real attach completed, retained across tiers */
     bool     wp_attach_exit_race; /* proven exit already counted; retain until EXIT */

@@ -1117,3 +1117,21 @@ coverage_verdict_mutants.py
 # Stateless evidence-v1 fixture-to-screen pilot and consumer boundary.
 test_pilot_route.py
 test_consumer_boundary.sh
+
+# Refs #871: exhausted-pool identity, high-water marks and round phase diagnostics.
+test_transport_diagnostics
+
+# Portable cost-round compatibility replay, pool/token mutants and timing.
+test_capture_bookkeeping.py
+
+# Refs #871: daemon-issued transient-capacity REARM, accounting and recovery mutants.
+test_capture_recovery.py
+
+# Receipt-only INIT loss evidence, classification fields and wrong-label mutant.
+test_init_loss_diagnostics.py
+
+# Opt-in attachment timing: field/quantile goldens, production hooks and mutants.
+test_attach_timeline.py
+
+# PG13 bounded bulk row lookup, shared miss cache and built mutants.
+test_pgbs_resolver.py

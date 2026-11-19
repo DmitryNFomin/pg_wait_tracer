@@ -61,6 +61,7 @@ struct waiting_entry {
 struct pgwt_merge {
     pgwt_merge_config config;
     pgwt_merge_report report;
+    pgwt_merge_diagnostics diagnostics;
     struct source_state *sources;
     struct staged *queue;
     struct queue_node *queue_nodes;
@@ -87,6 +88,21 @@ struct pgwt_merge {
 };
 
 static void reset_waiting(pgwt_merge *m);
+
+pgwt_merge_diagnostics pgwt_merge_get_diagnostics(const pgwt_merge *m)
+{
+    if (!m) return (pgwt_merge_diagnostics){0};
+    pgwt_merge_diagnostics d = m->diagnostics;
+    d.pools[PGWT_POOL_CORE_STAGING].occupancy = m->count;
+    d.pools[PGWT_POOL_CORE_IDENTITY].occupancy = m->attachment_count;
+    d.pools[PGWT_POOL_CORE_DEPENDENCY].occupancy = m->dependency_count;
+    d.pools[PGWT_POOL_CORE_FRONTIER].occupancy = m->frontier_count;
+    uint64_t payload = 0;
+    for (size_t i = m->first; i != SIZE_MAX; i = m->queue_nodes[i].next)
+        if (m->queue[i].record.payload_size > payload) payload = m->queue[i].record.payload_size;
+    d.pools[PGWT_POOL_CORE_PAYLOAD].occupancy = payload;
+    return d;
+}
 
 /* Keep accounting tied to the size of the copy, including test mutants that
  * replace a touched-slot copy with a retained-table copy. */
@@ -224,10 +240,19 @@ static pgwt_merge_status fault(pgwt_merge *m, pgwt_merge_reason reason,
         m->identity_repair_needed = true;
     m->observed = obs.counters;
     pgwt_merge_output out = {.kind = PGWT_MERGE_OUT_VOID, .d = obs.d,
-        .epoch = m->report.epoch, .counters = obs.counters, .reason = reason};
+        .epoch = m->report.epoch, .counters = obs.counters, .reason = reason,
+        .allocation = reason == PGWT_MERGE_ALLOCATION_FAIL ? m->diagnostics.allocation : (pgwt_allocation_failure){0}};
     if (!m->config.sink(m->config.sink_context, &out, &obs))
         m->report.void_failed = true;
     return m->report.status;
+}
+
+static pgwt_merge_status allocation_fault(pgwt_merge *m, pgwt_pool pool,
+                                           pgwt_merge_observation obs)
+{
+    pgwt_merge_diagnostics d = pgwt_merge_get_diagnostics(m);
+    m->diagnostics.allocation = (pgwt_allocation_failure){pool, d.pools[pool]};
+    return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
 }
 
 /* contract §4: late DATA disproving a certified prefix invalidates the epoch
@@ -253,6 +278,7 @@ static struct generation_state *remember_generation(pgwt_merge *m,
     if (entry) return &m->attachments[entry - 1];
     if (m->attachment_count == m->config.attachment_capacity) return NULL;
     struct generation_state *a = &m->attachments[m->attachment_count++];
+    pgwt_pool_set(&m->diagnostics.pools[PGWT_POOL_CORE_IDENTITY], m->attachment_count);
     size_t pid_bucket = (size_t)mix(r->pid) & (m->index_capacity - 1);
     *a = (struct generation_state){.proof = {.pid = r->pid, .g = r->g},
         .next_pid = m->pid_heads[pid_bucket]};
@@ -601,7 +627,7 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         m->frontiers[m->frontier_count - 1].epoch != m->report.epoch;
     if ((!m->report.has_frontier || W - 1 > m->report.frontier) &&
         new_frontier_epoch && m->frontier_count == m->config.frontier_capacity)
-        return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
+        return allocation_fault(m, PGWT_POOL_CORE_FRONTIER, obs);
     for (size_t i = m->first; i != end; i = m->queue_nodes[i].next) {
         MERGE_WORK(QVISIT, 1);
         struct staged *v = &m->queue[i];
@@ -649,6 +675,7 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         m->report.has_frontier = true;
         m->report.frontier = F;
         if (new_frontier_epoch) ++m->frontier_count;
+        pgwt_pool_set(&m->diagnostics.pools[PGWT_POOL_CORE_FRONTIER], m->frontier_count);
         m->frontiers[m->frontier_count - 1] = (struct frontier_state){
             .epoch = m->report.epoch, .frontier = F};
         if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
@@ -713,7 +740,7 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
             if (!r->identity_known)
                 return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
             struct generation_state *a = remember_generation(m, r);
-            if (!a) return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
+            if (!a) return allocation_fault(m, PGWT_POOL_CORE_IDENTITY, obs);
             if (m->report.status != PGWT_MERGE_OK && r->rank != PGWT_MERGE_TRANS)
                 a->lifecycle_seen = true;
             if (perf) {
@@ -728,19 +755,23 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
             r->payload_size > m->config.payload_capacity) {
             if (in->kind == PGWT_MERGE_DATA && r->rank != PGWT_MERGE_TRANS)
                 attachment(m, r)->lifecycle_seen = true;
-            return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
+            return allocation_fault(m, m->count == m->config.staged_capacity ?
+                PGWT_POOL_CORE_STAGING : PGWT_POOL_CORE_PAYLOAD, obs);
         }
         if (in->kind == PGWT_MERGE_TEXT && r->dependency_id &&
             !dependency_available(m, r->dependency_id)) {
             if (m->dependency_count == m->config.dependency_capacity)
-                return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
+                return allocation_fault(m, PGWT_POOL_CORE_DEPENDENCY, obs);
             m->dependencies[m->dependency_count++] = r->dependency_id;
             remember_dependency(m, m->dependencies[m->dependency_count - 1]);
+            pgwt_pool_set(&m->diagnostics.pools[PGWT_POOL_CORE_DEPENDENCY], m->dependency_count);
         }
         size_t slot = m->free_slot;
         struct staged *v = &m->queue[slot];
         m->free_slot = m->queue_nodes[slot].next;
         ++m->count;
+        pgwt_pool_set(&m->diagnostics.pools[PGWT_POOL_CORE_STAGING], m->count);
+        pgwt_pool_set(&m->diagnostics.pools[PGWT_POOL_CORE_PAYLOAD], r->payload_size);
         MERGE_WORK(QMOVE, 1);
         v->text = in->kind == PGWT_MERGE_TEXT;
         v->record = *r;
@@ -774,6 +805,7 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
     case PGWT_MERGE_FAULT:
         if (!pgwt_merge_reason_name(in->reason))
             return fault(m, PGWT_MERGE_MALFORMED_ENVELOPE, obs);
+        if (in->reason == PGWT_MERGE_ALLOCATION_FAIL) m->diagnostics.allocation = in->allocation;
         return fault(m, in->reason, obs);
     case PGWT_MERGE_WRITER_REJECTED:
         return fault(m, PGWT_MERGE_WRITER_PUSH_FAIL, obs);
@@ -793,7 +825,7 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
         if (in->attachment_count > SIZE_MAX / sizeof(*in->attachments))
             return fault(m, PGWT_MERGE_MALFORMED_ENVELOPE, obs);
         if (in->attachment_count > m->config.attachment_capacity)
-            return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
+            return allocation_fault(m, PGWT_POOL_CORE_IDENTITY, obs);
         if (!in->attachment_proofs_fresh ||
             (m->identity_repair_needed && !in->identity_repaired) ||
             !proofs_valid(in->attachments, in->attachment_count))
@@ -810,7 +842,7 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
             if (!attachment(m, &r)) ++needed;
         }
         if (needed > m->config.attachment_capacity - m->attachment_count)
-            return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
+            return allocation_fault(m, PGWT_POOL_CORE_IDENTITY, obs);
         ++m->report.epoch;
         m->count = 0;
         m->has_last = false;
@@ -841,17 +873,29 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
 
 /* Creation failures obey the same VOID/exit distinction as feed failures,
  * including failures detected before any coordinator memory exists. */
-static pgwt_merge *create_fault(const pgwt_merge_config *c, pgwt_merge_status *status,
-                                pgwt_merge_reason reason)
+static pgwt_merge *create_diagnostic_fault(const pgwt_merge_config *c, pgwt_merge_status *status,
+                                pgwt_merge_reason reason, pgwt_allocation_failure allocation)
 {
     if (status) *status = internal(reason) ? PGWT_MERGE_EXIT_REQUIRED : PGWT_MERGE_SUSPENDED;
     if (c && c->sink) {
         pgwt_merge_observation obs = c->observation;
         pgwt_merge_output out = {.kind = PGWT_MERGE_OUT_VOID, .d = obs.d,
-            .epoch = 1, .counters = obs.counters, .reason = reason};
+            .epoch = 1, .counters = obs.counters, .reason = reason, .allocation = allocation};
         (void)c->sink(c->sink_context, &out, &obs);
     }
     return NULL;
+}
+
+static pgwt_merge *create_fault(const pgwt_merge_config *c, pgwt_merge_status *status,
+                                pgwt_merge_reason reason)
+{
+    return create_diagnostic_fault(c, status, reason, (pgwt_allocation_failure){0});
+}
+static pgwt_merge *create_allocation_fault(const pgwt_merge_config *c,
+                    pgwt_merge_status *status, pgwt_pool pool, size_t capacity)
+{
+    return create_diagnostic_fault(c, status, PGWT_MERGE_ALLOCATION_FAIL,
+        (pgwt_allocation_failure){pool, {.capacity = capacity}});
 }
 
 pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *status)
@@ -871,7 +915,7 @@ pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *sta
         (c->payload_capacity && c->staged_capacity > SIZE_MAX / c->payload_capacity))
         return create_fault(c, status, PGWT_MERGE_MALFORMED_ENVELOPE);
     if (c->attachment_count > c->attachment_capacity)
-        return create_fault(c, status, PGWT_MERGE_ALLOCATION_FAIL);
+        return create_allocation_fault(c, status, PGWT_POOL_CORE_IDENTITY, c->attachment_capacity);
     if (!proofs_valid(c->attachments, c->attachment_count))
         return create_fault(c, status, PGWT_MERGE_UNKNOWN_EVIDENCE);
     if (c->mode == PGWT_MERGE_Q)
@@ -890,13 +934,14 @@ pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *sta
     size_t dependency_capacity = c->dependency_capacity ? c->dependency_capacity : c->staged_capacity;
     while (dependency_index_capacity / 2 < dependency_capacity) {
         if (dependency_index_capacity > SIZE_MAX / 2)
-            return create_fault(c, status, PGWT_MERGE_ALLOCATION_FAIL);
+            return create_allocation_fault(c, status, PGWT_POOL_CORE_DEPENDENCY, dependency_capacity);
         dependency_index_capacity *= 2;
     }
     while (waiting_index_capacity / 2 < c->staged_capacity) waiting_index_capacity *= 2;
-    if (dependency_index_capacity > SIZE_MAX / sizeof(struct dependency_entry) ||
-        waiting_index_capacity > SIZE_MAX / sizeof(struct waiting_entry))
-        return create_fault(c, status, PGWT_MERGE_ALLOCATION_FAIL);
+    if (dependency_index_capacity > SIZE_MAX / sizeof(struct dependency_entry))
+        return create_allocation_fault(c, status, PGWT_POOL_CORE_DEPENDENCY, dependency_capacity);
+    if (waiting_index_capacity > SIZE_MAX / sizeof(struct waiting_entry))
+        return create_allocation_fault(c, status, PGWT_POOL_CORE_STAGING, c->staged_capacity);
     pgwt_merge *m = calloc(1, sizeof(*m));
     if (m) {
         m->config = *c;
@@ -944,9 +989,30 @@ pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *sta
         !m->frontiers || !m->dependencies || !m->dependency_index ||
         !m->waiting_index || !m->waiting_slots ||
         !m->queue[0].bytes) {
+        pgwt_pool pool = PGWT_POOL_CORE_SETUP;
+        size_t capacity = 1;
+        if (m) {
+            if (!m->queue || !m->queue_nodes || !m->prospective || !m->touched ||
+                !m->waiting_index || !m->waiting_slots) {
+                pool = PGWT_POOL_CORE_STAGING; capacity = c->staged_capacity;
+            } else if (!m->attachments || !m->generation_index || !m->pid_heads || !m->planned) {
+                pool = PGWT_POOL_CORE_IDENTITY; capacity = c->attachment_capacity;
+            } else if (!m->frontiers) {
+                pool = PGWT_POOL_CORE_FRONTIER; capacity = m->config.frontier_capacity;
+            } else if (!m->dependencies || !m->dependency_index) {
+                pool = PGWT_POOL_CORE_DEPENDENCY; capacity = m->config.dependency_capacity;
+            } else if (!m->queue[0].bytes) {
+                pool = PGWT_POOL_CORE_PAYLOAD; capacity = c->payload_capacity;
+            }
+        }
         pgwt_merge_destroy(m);
-        return create_fault(c, status, PGWT_MERGE_ALLOCATION_FAIL);
+        return create_allocation_fault(c, status, pool, capacity);
     }
+    m->diagnostics.pools[PGWT_POOL_CORE_STAGING].capacity = c->staged_capacity;
+    m->diagnostics.pools[PGWT_POOL_CORE_PAYLOAD].capacity = c->payload_capacity;
+    m->diagnostics.pools[PGWT_POOL_CORE_IDENTITY].capacity = c->attachment_capacity;
+    m->diagnostics.pools[PGWT_POOL_CORE_FRONTIER].capacity = m->config.frontier_capacity;
+    m->diagnostics.pools[PGWT_POOL_CORE_DEPENDENCY].capacity = m->config.dependency_capacity;
     m->report.status = c->suspended ? PGWT_MERGE_SUSPENDED : PGWT_MERGE_OK;
     m->report.epoch = 1;
     m->report.qualified = true;
@@ -954,6 +1020,7 @@ pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *sta
     m->report.frontier = c->frontier;
     if (c->has_frontier) {
         m->frontier_count = 1;
+        pgwt_pool_set(&m->diagnostics.pools[PGWT_POOL_CORE_FRONTIER], 1);
         m->frontiers[0] = (struct frontier_state){.epoch = 1, .frontier = c->frontier};
     }
     for (size_t s = 0; s < c->source_count; ++s) {

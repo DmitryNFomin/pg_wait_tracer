@@ -114,11 +114,14 @@ run bash tests/test_consumer_boundary.sh --self-test
 step "C11 synthetic merge adapter: wire goldens, contract replay and rule mutants (Refs #871)"
 run env CFLAGS="$core_cflags" bash tests/core_merge_adapter_mutants.sh
 
+step "Transport diagnostics: wrong-pool and phase-time mutants (host C)"
+run python3 -B tests/transport_diagnostics_mutants.py
+
 step "U1b transport wire golden bytes and registered A1/B seams (host C)"
 if transport_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-transport-check.XXXXXX"); then
-    for suite in transport_wire transport_producers percpu_transport; do
+    for suite in transport_wire transport_producers percpu_transport transport_diagnostics; do
         transport_sources=("tests/test_${suite}.c")
-        if [[ $suite == percpu_transport ]]; then
+        if [[ $suite == percpu_transport || $suite == transport_diagnostics ]]; then
             transport_sources+=(src/percpu_transport.c src/merge_capture.c
                                src/core/merge_adapter.c src/core/merge.c)
         fi

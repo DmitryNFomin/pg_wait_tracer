@@ -67,15 +67,18 @@ bool pgwt_stored_init_lost(const struct pgwt_backend *be,
            (!be || !be->init_attached);
 }
 
-bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
+bool pgwt_exit_init_lost_diagnostic(const struct pgwt_backend *be, pid_t pid,
                          void *ctx, pgwt_init_state_reader read_state,
-                         uint64_t *init_ts, bool *before_attach)
+                         uint64_t *init_ts, bool *before_attach, const char **branch)
 {
     *before_attach = false;
+    *branch = "state_read_error";
     *init_ts = be ? be->init_ts : 0;
     struct pgwt_pid_state st = {0};
     int rc = read_state(ctx, pid, &st);
     if (rc == -ENOENT) {
+        *branch = be && be->bootstrap_fd >= 0
+                ? "state_missing_bootstrap" : "state_missing_init_ts";
         bool lost = be && !be->init_attached &&
                     (be->bootstrap_fd >= 0 || be->init_ts != 0);
         *before_attach = !lost && be && !be->init_attached && !be->wp_attach_failed;
@@ -89,6 +92,7 @@ bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
         return false;
     if (st.init_ts)
         *init_ts = st.init_ts;
+    *branch = "state_present";
     /* With the producer quiesced, retained INIT facts also preclude the
      * no-evidence retirement class even if publication was interrupted. */
     bool lost = pgwt_stored_init_lost(be, &st) ||
@@ -96,4 +100,12 @@ bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
     *before_attach = !lost && (!be || (!be->init_attached &&
                                      !be->wp_attach_failed));
     return lost;
+}
+
+bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
+                         void *ctx, pgwt_init_state_reader read_state,
+                         uint64_t *init_ts, bool *before_attach)
+{
+    const char *branch;
+    return pgwt_exit_init_lost_diagnostic(be, pid, ctx, read_state, init_ts, before_attach, &branch);
 }

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "pgwt_diagnostics.h"
 
 /* Pure C11 merge-v1 coordinator. Source indices are numeric CPUs, then E, L.
  * Inputs are consumed synchronously. Payload bytes are copied into fixed slots.
@@ -67,6 +68,7 @@ typedef struct {
     size_t source;                 /* BOUNDARY/LOSS */
     uint64_t w, p, n;               /* boundary cutoff/position or LOST count */
     pgwt_merge_reason reason;       /* FAULT: closed reason list above */
+    pgwt_allocation_failure allocation; /* FAULT diagnostic, ignored by rules */
     const pgwt_merge_attachment *attachments; /* REARM: complete fresh proofs */
     size_t attachment_count;
     bool attachment_proofs_fresh, identity_repaired;
@@ -80,6 +82,7 @@ typedef struct {
     uint64_t F, d, epoch;
     pgwt_merge_counters counters;
     pgwt_merge_reason reason;
+    pgwt_allocation_failure allocation; /* VOID(allocation_fail) only */
 } pgwt_merge_output;
 /* Return true only after successful publication. post starts as the current
  * observation; refresh counters after publication and set failure detection d
@@ -115,6 +118,12 @@ typedef struct {
     bool has_frontier, invalid;
     uint64_t frontier;
 } pgwt_merge_epoch_report;
+
+typedef struct {
+    pgwt_pool_usage pools[PGWT_POOL_COUNT];
+    pgwt_allocation_failure allocation;
+} pgwt_merge_diagnostics;
+pgwt_merge_diagnostics pgwt_merge_get_diagnostics(const pgwt_merge *);
 
 /* Creation failures attempt VOID when a sink is available, then return NULL.
  * status reports suspension for allocation/missing proofs and exit-required for

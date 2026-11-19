@@ -620,6 +620,8 @@ LIVE_TESTS=(
     "test_lifecycle|bash|test_lifecycle.sh"
     "test_sampler_batch_live|python3|test_sampler_batch_live.py"
     "test_init_hint_recovery|python3|test_init_hint_recovery.py"
+    "test_transport_producers_live|python3|test_transport_producers_live.py"
+    "test_transport_daemon_live|python3|test_transport_daemon_live.py"
     "test_counter_vector_live|python3|test_counter_vector_live.py"
     "test_counter_vector_phase_live|python3|test_counter_vector_phase_live.py"
     "test_capture_smoke_tiered|python3|test_capture_smoke.py||--mode tiered"
@@ -736,6 +738,19 @@ if [[ $(id -u) -eq 0 ]] && pgrep -x postgres > /dev/null 2>&1; then
         fi
         if [[ "$name" == "test_preseed_startup_live" && "$PG_VERSION" != "17" ]]; then
             exclude_test "$name" "deterministic unpublished startup hold requires PostgreSQL 17; running PG$PG_VERSION"
+            continue
+        fi
+        # A1 needs a supported layout. Use the existing matrix exclusion,
+        # as for min_pg above; exit 78 is not an unsupported-PG convention.
+        if [[ "$name" == "test_transport_producers_live" &&
+              "$PG_VERSION" =~ ^(14|15|16)$ ]]; then
+            exclude_test "$name" "requires a PG13/17/18 layout, running PG$PG_VERSION"
+            continue
+        fi
+        # B integration (daemon + producers): the same supported layouts.
+        if [[ "$name" == "test_transport_daemon_live" &&
+              "$PG_VERSION" =~ ^(14|15|16)$ ]]; then
+            exclude_test "$name" "requires a PG13/17/18 layout, running PG$PG_VERSION"
             continue
         fi
         if [[ "$name" == "test_capture_smoke_full" ]]; then

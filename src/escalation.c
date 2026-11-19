@@ -226,6 +226,8 @@ static void detach_all(struct pgwt_daemon *d)
                 .init_ts = st.init_ts,
                 .init_stored = st.init_stored,
                 .init_store_failed = st.init_store_failed,
+                .bootstrap_fired = st.bootstrap_fired,
+                .wp_ever_live = st.wp_ever_live || st.wp_live,
             };
             bpf_map_update_elem(state_fd, &key, &seed, BPF_ANY);
         }
