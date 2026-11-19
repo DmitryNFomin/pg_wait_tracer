@@ -309,7 +309,20 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     end = capture.index('static bool daemon_write(', start)
     observe = capture[start:end]
     clock_body = capture[capture.index('static uint64_t daemon_now('):capture.index('static bool daemon_flush(')]
+    # The authorised tick prefix consumes L with a fresh bounded pass. Keep
+    # the older migration comparison for every other default tick statement.
+    start = tick.index('    /* Service queued FORKs before recovery')
+    end = tick.index('\n\n    /* Crash recovery can rebuild PG13', start)
+    lifecycle_prefix = tick[start:end]
+    old_init = """    /* INIT records are wake-up hints: recover their durable facts every tick,
+     * before the general address-based recovery can take a direct attach. */
+    pgwt_sweep_bootstrap_backends(d);"""
+    lifecycle_consume = daemon[daemon.index('int pgwt_consume_lifecycle_ring('):daemon.index('/* Ring buffer callback for lifecycle events */')]
+    debug_start = tick.index('    /* Print at the first non-PG-death point')
+    debug_prefix = tick[debug_start:tick.index('\n\n    /* Service queued FORKs', debug_start)]
     normalized = tick[tick.index('    /* Health check:'):]
+    normalized = normalized.replace(lifecycle_prefix + '\n\n', '').replace(debug_prefix + '\n\n', '')
+    normalized = normalized.replace('    /* Straddle-race recovery:', debug_prefix + '\n\n' + old_init + '\n\n    /* Straddle-race recovery:', 1)
     # Match only for the migration comparison. Mutants below are compiled
     # and must fail behavior; these anchors do not classify a mutant kill.
     drain_start = normalized.index('    if (d->exact_perf) {')
@@ -331,7 +344,7 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
         raise SystemExit('ERROR: default tick body changed beyond the shared drain dispatch')
     if 'rodata->exact_perf_mode' in (repo / 'src/percpu_transport.c').read_text():
         raise SystemExit('ERROR: tautological rodata support check returned')
-    print('default tick: a4a24150 lines 446-684 byte-identical after substituting default drain; order/logs PASS')
+    print('default tick: a4a24150 migration preserved outside authorised lifecycle prefix and shared drain; order/logs PASS')
     transport = (repo / 'src/percpu_transport.c').read_text()
     start = transport.index('static int receive_ring(')
     end = transport.index('static int linux_drain(', start)
@@ -385,7 +398,7 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
         instrumented = observer.replace('static int daemon_observe(', 'static int daemon_observe_under_test(')
         instrumented += 'static int daemon_observe(void *ctx, pgwt_merge_observation *o) { ++observation_reads; return daemon_observe_under_test(ctx, o); }\n'
         harness.write_text('#include "percpu_tick_harness.h"\n' + tick_body + instrumented + clock_body + ring_result +
-                           drain_body + consume_body + event_body + tick_entry + cadence + poll_body +
+                           drain_body + consume_body + lifecycle_consume + event_body + tick_entry + cadence + poll_body +
                            begin_pass + daemon_begin + budget_body + deferral_body + main_body + main_timeout)
         p = subprocess.run(cc + flags + ['-I' + str(repo / 'tests'), '-I' + str(repo / 'src'),
             str(harness), '-o', str(tick_binary)], capture_output=True, text=True, env=env)
@@ -405,6 +418,9 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     o->counters.known = s.valid;
     for (size_t i = 0; i < PGWT_MERGE_COUNTERS; ++i) o->counters.value[i] = s.value[i];''')
     for name, body, observer, drain_body, poll_body in [
+        ('tick_expired_L_unserviced', tick.replace('        pgwt_percpu_transport_begin_tick(d);', '        /* lost tick service budget */'), observe, drain, capture_poll),
+        ('tick_drops_capture_deadline', tick.replace('        pgwt_percpu_transport_begin_tick(d);', '        pgwt_percpu_transport_begin_pass(d, 0);'), observe, drain, capture_poll),
+        ('tick_omits_L_consume', tick.replace(lifecycle_prefix, old_init), observe, drain, capture_poll),
         ('skip_tick_count', tick.replace('d->tick++;', '/* skip tick */'), observe, drain, capture_poll),
         ('per_record_map_reads', tick, full_observe, drain, capture_poll),
         ('ignore_perf_receipts', tick, observe, drain.replace('if (l->d->percpu_transport->positions[i] != before)', 'if (n || before > l->d->percpu_transport->positions[i])'), capture_poll),
@@ -502,7 +518,7 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
                 any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
             raise SystemExit(f'ERROR: no_sleep_{kind}: survived or failed elsewhere\n' + p.stdout + p.stderr)
         print(f'no_sleep_{kind}: KILLED at tick_duties ({assertion})')
-    print(f'transport + tick/publication/drain/cadence/yield mutants: {len(mutations)+13+len(no_sleep_mutations)}/{len(mutations)+13+len(no_sleep_mutations)} killed at intended assertions')
+    print(f'transport + tick/publication/drain/cadence/yield mutants: {len(mutations)+16+len(no_sleep_mutations)}/{len(mutations)+16+len(no_sleep_mutations)} killed at intended assertions')
 
     # Run each raw budget stop through the real transport, adapter and core.
     # The Linux callbacks are copied verbatim; only libbpf iteration is fake.
@@ -517,7 +533,9 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
             'int main(int argc,char **argv)', 'int transport_original_main(int argc,char **argv)')
         # Avoid the fixture parser's unrelated static counters() helper.
         portable = re.sub(r'(?<![.\w])counters\(', 'transport_counters(', body)
-        raw_harness.write_text(base + '\n' + portable + '\n#include "percpu_budget_harness.h"\n' + callbacks + consumer + waiter)
+        # The raw harness supplies a stricter clock: reaching it with the
+        # timeline disabled fails. Suppress only the standalone fixture clock.
+        raw_harness.write_text('#define PGWT_PERCPU_BUDGET_CLOCK 1\n' + base + '\n' + portable + '\n#include "percpu_budget_harness.h"\n' + callbacks + consumer + waiter)
         p = subprocess.run(cc + flags + ['-I' + str(work / 'src'), str(raw_harness),
             'src/merge_capture.c', 'src/core/merge_adapter.c', 'src/core/merge.c', '-o', str(raw_binary)],
             cwd=work, capture_output=True, text=True, env=env)
@@ -601,4 +619,4 @@ except AssertionError as error:
     print('natural_exit_without_lower_bound: KILLED at early_zero_exit')
 else:
     raise SystemExit('ERROR: natural exit without lower bound survived')
-print(f'transport host mutants total: {len(mutations)+len(raw_mutations)+len(no_sleep_mutations)+14}/{len(mutations)+len(raw_mutations)+len(no_sleep_mutations)+14} killed at intended assertions')
+print(f'transport host mutants total: {len(mutations)+len(raw_mutations)+len(no_sleep_mutations)+17}/{len(mutations)+len(raw_mutations)+len(no_sleep_mutations)+17} killed at intended assertions')

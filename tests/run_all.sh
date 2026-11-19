@@ -427,6 +427,9 @@ else
         "$unit_before" "$((passed + failed + known_failing))"
 fi
 
+# Compile each negative control and require its intended assertion.
+run_test "backend_recovery_mutants" python3 "$SCRIPT_DIR/build_backend_recovery.py" --mutants
+
 # Step 2.4: the runner's own guard against a silently absent tier (issue
 # #528). Deterministic, needs neither root nor PG; it builds throwaway
 # run_all.sh fixtures under mktemp and asserts that an unmet tier

@@ -1098,6 +1098,7 @@ test_core_evidence_fuzz.py
 # Lifecycle and query-text ring-drop metrics aggregate every CPU. Refs #871.
 test_ringbuf_metrics
 test_backend_init
+test_backend_recovery
 test_backend_init_order.py
 test_backend_attach_race.py
 test_backend_exit_accounting.py

@@ -64,6 +64,7 @@ else
 fi
 
 step "watchpoint attach exit races (portable backend C harness)"
+run python3 -B tests/build_backend_recovery.py --mutants
 run python3 -B tests/test_backend_attach_race.py --mutants
 run python3 -B tests/test_backend_exit_accounting.py
 run python3 -B tests/test_init_hint_known_class.py

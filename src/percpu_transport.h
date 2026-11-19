@@ -52,8 +52,10 @@ struct pgwt_transport_perf_attributes pgwt_transport_perf_attributes(size_t buff
  * own bounds; there is no unconditional 70 ms/100 ms guarantee: the box
  * measures held age and event-to-release age, and the daemon reports both.
  * The daemon suspends with VOID(allocation_fail) if the 262144-entry queue
- * fills. Each main-loop iteration shares a 50 ms cooperative service budget,
- * with at most 10 ms for raw draining before completion/merge work. Callbacks
+ * fills. Each main-loop iteration starts a 50 ms cooperative service budget;
+ * display tick entry gets one fresh slice for lifecycle service. Both retain
+ * the capture-duration deadline. Raw draining takes at most 10 ms before
+ * completion/merge work. Callbacks
  * consume the yielding record; unread and unadmitted suffixes stay queued.
  * Shutdown drains and completes rounds for up to 256 passes/100 ms, then
  * VOIDs unknown_evidence and counts evidence still queued or unread.
@@ -94,8 +96,10 @@ uint32_t pgwt_percpu_transport_cpu_id(const struct pgwt_daemon *, size_t);
 int pgwt_percpu_transport_open(struct pgwt_daemon *d);
 int pgwt_percpu_transport_epoll_fd(const struct pgwt_daemon *d);
 int pgwt_percpu_transport_poll(struct pgwt_daemon *d);
-/* One deadline shared by every service call in this main-loop iteration. */
+/* A service budget shared by nested calls; tick entry can start a fresh
+ * slice, retaining the capture-duration deadline from the main loop. */
 void pgwt_percpu_transport_begin_pass(struct pgwt_daemon *, uint64_t capture_deadline_ns);
+void pgwt_percpu_transport_begin_tick(struct pgwt_daemon *);
 void pgwt_transport_begin_pass(struct pgwt_percpu_transport *, uint64_t limit_ns);
 bool pgwt_transport_pass_expired(struct pgwt_percpu_transport *);
 /* Full counter checkpoint through the same injectable I/O as the reader.

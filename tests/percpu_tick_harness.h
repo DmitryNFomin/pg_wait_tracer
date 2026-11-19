@@ -16,7 +16,7 @@
 #include <stdarg.h>
 static char calls[1024];
 static size_t used;
-static bool dead, bad_drain;
+static bool dead, bad_drain, lifecycle_priority;
 static uint64_t pending_records = 7;
 static unsigned backlog_warnings;
 static int tick_fprintf(FILE *stream,const char *format,...)
@@ -71,6 +71,8 @@ int pgwt_sampler_refresh_pg13_generation(struct pgwt_daemon *d)
 {(void)d;called("generation");return 0;}
 void pgwt_pgbs_log(const struct PgBackendStatusLayout *layout)
 {(void)layout;called("layout_log");}
+static int duty_consume(struct pgwt_daemon *d, uint32_t dest, bool bounded)
+{(void)d;TICK(dest==PGWT_WIRE_DEST_L && bounded);called("lifecycle");return 0;}
 int pgwt_sweep_bootstrap_backends(struct pgwt_daemon *d){(void)d;called("init");return 0;}
 int pgwt_recover_unattached_backends(struct pgwt_daemon *d){(void)d;called("recovery");return 0;}
 int pgwt_sweep_stale_state(struct pgwt_daemon *d){(void)d;called("stale");return 0;}
@@ -156,7 +158,7 @@ static bool publication_counters(void)
 }
 /* Only the fields accessed by the actual Linux drain body are required.
  * libbpf's successful consume returns ZERO even after delivering samples. */
-struct pgwt_percpu_transport { uint64_t *positions; struct pgwt_transport_budget budget; struct pgwt_transport_stats stats; void *platform; bool *service_backlog; struct pgwt_transport_io io; };
+struct pgwt_percpu_transport { uint64_t *positions; struct pgwt_transport_budget budget; uint64_t capture_deadline_ns; struct pgwt_transport_stats stats; void *platform; bool *service_backlog; struct pgwt_transport_io io; };
 struct perf_buffer { struct pgwt_percpu_transport *transport;size_t source,records; bool hint; };
 struct ring_context {struct pgwt_daemon *d;uint32_t dest;size_t consumed,limit;};
 struct ring_buffer {struct ring_context *ctx;size_t records;};
@@ -178,7 +180,7 @@ int pgwt_transport_perf(struct pgwt_percpu_transport *t,uint32_t cpu,const void 
 int pgwt_transport_lost(struct pgwt_percpu_transport *t,uint32_t cpu,uint64_t n)
 {(void)t;(void)cpu;(void)n;return 0;}
 int pgwt_transport_ring_record(struct pgwt_percpu_transport *t,uint32_t dest,const void *p,size_t n,size_t *consumed,size_t limit)
-{(void)t;(void)dest;(void)p;(void)n;++*consumed;service_now+=record_cost;return limit && *consumed>=limit?-EAGAIN:0;}
+{(void)t;(void)p;(void)n;if(lifecycle_priority && dest==PGWT_WIRE_DEST_L)called("fork");++*consumed;service_now+=record_cost;return limit && *consumed>=limit?-EAGAIN:0;}
 static enum bpf_perf_event_ret receive_perf(void *,int,struct perf_event_header *);
 static enum bpf_perf_event_ret receive_hint(void *,int,struct perf_event_header *);
 static int receive_ring(void *,void *,size_t);
@@ -350,6 +352,39 @@ static bool no_sleep_cases(void)
     return true;
 }
 
+static bool tick_lifecycle_cases(void)
+{
+    for(unsigned exact=0;exact<2;++exact){
+    struct pgwt_daemon *d=calloc(1,sizeof(*d));TICK(d);
+    d->event_accum=calloc(1,sizeof(*d->event_accum));TICK(d->event_accum);
+    d->exact_perf=exact;d->running=true;d->quiet=true;d->mode=PGWT_MODE_FULL;
+    d->interval=1;d->transport.consume=tick_consume;
+    struct pgwt_percpu_transport t={0};d->percpu_transport=&t;
+    struct linux_transport l={.d=d};t.platform=&l;
+    l.ring_ctx[1]=(struct ring_context){.d=d,.dest=PGWT_WIRE_DEST_L};
+    struct ring_buffer life={.ctx=&l.ring_ctx[1],.records=2};l.rings[1]=&life;
+    service_now=100;record_cost=0;
+    uint64_t deadline=service_now+PGWT_TRANSPORT_PASS_NS+10000000;
+    if(exact)pgwt_percpu_transport_begin_pass(d,deadline);
+    else pgwt_budget_begin(&t.budget,service_now,0);
+    service_now+=PGWT_TRANSPORT_PASS_NS;
+    TICK(pgwt_transport_pass_expired(&t));
+    if(!exact){d->rb=(struct ring_buffer *)&life;t.budget.active=false;}
+    lifecycle_priority=true;used=0;calls[0]=0;pending_records=0;
+    pgwt_tick_duties(d);lifecycle_priority=false;pending_records=7;
+    TICK_NAMED("tick_serviced_expired_L",life.records==0);
+    TICK_NAMED("tick_FORK_before_recovery",strstr(calls,"fork fork init generation capacity recovery")!=NULL);
+    TICK(d->running && d->tick==1);
+    if(exact){
+        TICK(t.budget.started==service_now);
+        TICK_NAMED("tick_preserves_capture_deadline",t.budget.until==deadline);
+    }
+    free(d->event_accum);free(d);
+    }
+    puts("tick: default and exact L consume, expired incoming pass, FORKs then INIT sweep then recovery PASS");
+    return true;
+}
+
 static bool tick_cases(void)
 {
     for(unsigned flag=0;flag<2;++flag)for(unsigned view=0;view<6;++view){
@@ -357,7 +392,7 @@ static bool tick_cases(void)
         d->event_accum=calloc(1,sizeof(*d->event_accum));TICK(d->event_accum);
         struct pgwt_event_writer *w=calloc(1,sizeof(*w));TICK(w);
         struct pgwt_summary_writer *sw=calloc(1,sizeof(*sw));TICK(sw);
-        d->exact_perf=flag;d->running=true;d->daemon_mode=true;d->postmaster_pid=10;
+        d->transport.consume=duty_consume;d->exact_perf=flag;d->running=true;d->daemon_mode=true;d->postmaster_pid=10;
         d->mode=PGWT_MODE_FULL;d->view=view;d->interval=2;d->tick=60;d->count=61;
         d->event_writer=w;d->summary_writer=sw;sw->fp=stdout;sw->clock_offset_wall_ns=91;
         d->ring.slots=(void *)1;d->backends.count=1;
@@ -368,8 +403,8 @@ static bool tick_cases(void)
         used=0;calls[0]=0;backlog_warnings=0;
         if(flag)TICK(pgwt_merge_capture_tick(d)==0);else pgwt_tick_duties(d);
         TICK(!strcmp(calls,flag
-            ? "health generation capacity init recovery stale budget transport_drain backlog copy state snapshot view gc_probe exit rotate_raw summary_flush rotate_summary retain_raw retain_summary fail_read "
-            : "health generation capacity init recovery stale budget drain copy state snapshot view gc_probe exit rotate_raw summary_flush rotate_summary retain_raw retain_summary fail_read "));
+            ? "health lifecycle init generation capacity recovery stale budget transport_drain backlog copy state snapshot view gc_probe exit rotate_raw summary_flush rotate_summary retain_raw retain_summary fail_read "
+            : "health init generation capacity recovery stale budget drain copy state snapshot view gc_probe exit rotate_raw summary_flush rotate_summary retain_raw retain_summary fail_read "));
         TICK(d->tick==61 && !d->running && d->counters.events_per_sec==15 && d->counters.samples_per_sec==5);
         TICK(d->accum.tm.db_time_ns==(flag?12U:19U) && d->accum.prev_tm.db_time_ns==4);
         TICK(d->counters.tick_drain_pending_records==(flag?7U:0U) &&
@@ -383,16 +418,16 @@ static bool tick_cases(void)
         d->quiet=true;d->ring.slots=NULL;d->event_writer=NULL;d->summary_writer=NULL;
         used=0;calls[0]=0;
         if(flag)TICK(pgwt_merge_capture_tick(d)==0);else pgwt_tick_duties(d);
-        TICK(!strcmp(calls,flag ? "health generation capacity init budget accum_read transport_drain backlog copy fail_read check "
-                               : "health generation capacity init budget accum_read drain copy fail_read "));
+        TICK(!strcmp(calls,flag ? "health lifecycle init generation capacity budget accum_read transport_drain backlog copy fail_read check "
+                               : "health init generation capacity budget accum_read drain copy fail_read "));
         TICK(d->tick==2 && d->running);
         TICK(backlog_warnings==flag);
         d->lightweight_mode=false;d->mode=PGWT_MODE_FULL;
         setenv("PGWT_TEST_NO_RECOVERY","1",1);setenv("PGWT_TEST_NO_STALE_SWEEP","1",1);
         used=0;calls[0]=0;
         if(flag)TICK(pgwt_merge_capture_tick(d)==0);else pgwt_tick_duties(d);
-        TICK(!strcmp(calls,flag ? "health generation capacity init budget transport_drain backlog copy state fail_read check "
-                               : "health generation capacity init budget drain copy state fail_read "));
+        TICK(!strcmp(calls,flag ? "health lifecycle init generation capacity budget transport_drain backlog copy state fail_read check "
+                               : "health init generation capacity budget drain copy state fail_read "));
         TICK(backlog_warnings==flag);
         unsetenv("PGWT_TEST_NO_RECOVERY");unsetenv("PGWT_TEST_NO_STALE_SWEEP");
         dead=true;used=0;calls[0]=0;int before=d->tick;pgwt_tick_duties(d);dead=false;
@@ -407,7 +442,7 @@ static bool tick_cases(void)
             bad_drain=true;d->running=true;used=0;calls[0]=0;
             TICK(pgwt_merge_capture_tick(d)==0);bad_drain=false;
             TICK(!d->running && d->tick==before && d->accum.tm.db_time_ns==saved);
-            TICK(!strcmp(calls,"health generation capacity init recovery stale budget transport_drain "));
+            TICK(!strcmp(calls,"health lifecycle init generation capacity recovery stale budget transport_drain "));
             pending_records=7;
         }
         free(sw);free(w);free(d->event_accum);free(d);
@@ -418,7 +453,7 @@ int main(void)
 {
     puts("REACHED tick_duties");fflush(stdout);
     unsetenv("PGWT_TEST_NO_RECOVERY");unsetenv("PGWT_TEST_NO_STALE_SWEEP");
-    if(!publication_counters() || !cadence_cases() || !drain_cases() || !no_sleep_cases() || !tick_cases())return 1;
+    if(!publication_counters() || !cadence_cases() || !drain_cases() || !no_sleep_cases() || !tick_lifecycle_cases() || !tick_cases())return 1;
     puts("shared tick: full duty order, 6 views, rates/count, GC, rotations/retention, lightweight/test/death guards PASS");
     return 0;
 }

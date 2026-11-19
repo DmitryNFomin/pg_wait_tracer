@@ -480,6 +480,34 @@ void pgwt_tick_duties(struct pgwt_daemon *d)
         }
     }
 
+    /* Print at the first non-PG-death point in the handler. In particular,
+     * this is before recovery/sweep and every live-map read: a TIMER line with
+     * no later SCAN line means the handler entered and stalled in that prefix;
+     * no TIMER line means dispatch never reached the handler. */
+    bool mode_uses_wp = pgwt_mode_uses_watchpoints(d);
+    if (d->debug_dump_state)
+        fprintf(stderr, "STATEDUMP-TIMER: tick=%d mode_uses_wp=%d "
+                "lightweight=%d\n",
+                d->tick, (int)mode_uses_wp, (int)d->lightweight_mode);
+
+    /* Service queued FORKs before recovery can enroll their PIDs. The loop's
+     * earlier transport poll may have exhausted its pass, in which case the
+     * Linux reader would otherwise refuse even to enter the L ring. Start
+     * one fresh bounded service pass here, retaining the capture deadline,
+     * never inside the recovery scan.
+     * Consume through the ordinary transport path (ring order and the
+     * post-consumption durable INIT sweep), without recursively polling. */
+    if (d->rb || d->exact_perf) {
+        pgwt_percpu_transport_begin_tick(d);
+        if (pgwt_consume_lifecycle_ring(d) < 0) {
+            fprintf(stderr, "FATAL: lifecycle consume before tick recovery failed\n");
+            d->running = false;
+            return;
+        }
+    } else {
+        pgwt_sweep_bootstrap_backends(d);
+    }
+
     /* Crash recovery can rebuild PG13 shared memory under the live postmaster.
      * Retry absent mappings here, never with a client or on the sampling tick. */
     if (pgwt_sampler_refresh_pg13_generation(d) != 0)
@@ -491,20 +519,6 @@ void pgwt_tick_duties(struct pgwt_daemon *d)
     if (!d->anomaly.enabled)
         d->effective_cores = pgwt_effective_cores_refresh(
             &d->cpu_capacity_resolver, d->postmaster_pid);
-
-    /* Print at the first non-PG-death point in the handler. In particular,
-     * this is before recovery/sweep and every live-map read: a TIMER line with
-     * no later SCAN line means the handler entered and stalled in that prefix;
-     * no TIMER line means dispatch never reached the handler. */
-    bool mode_uses_wp = pgwt_mode_uses_watchpoints(d);
-    if (d->debug_dump_state)
-        fprintf(stderr, "STATEDUMP-TIMER: tick=%d mode_uses_wp=%d "
-                "lightweight=%d\n",
-                d->tick, (int)mode_uses_wp, (int)d->lightweight_mode);
-
-    /* INIT records are wake-up hints: recover their durable facts every tick,
-     * before the general address-based recovery can take a direct attach. */
-    pgwt_sweep_bootstrap_backends(d);
 
     /* Straddle-race recovery: re-attach any pre-existing backend the one-shot
      * startup scan missed or left in bootstrap limbo (a transient resolve race,

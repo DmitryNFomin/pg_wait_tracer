@@ -85,7 +85,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_core_merge_contract \
             test_core_merge_adapter \
             test_transport_wire test_transport_producers test_percpu_transport test_transport_diagnostics \
-            test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure \
+            test_ringbuf_metrics test_backend_init test_backend_recovery test_counter_vector test_writer_failure \
             test_coverage_verdict
 
 .PHONY: all clean check
@@ -109,6 +109,11 @@ check: all
 
 test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^
+
+# Host-only recovery/FORK regression; generated sources live in a temp directory.
+test_backend_recovery: test_backend_recovery.c build_backend_recovery.py test_sampled_attr_io.py \
+                       ../src/backend.c ../src/backend_init.c $(wildcard ../src/*.h)
+	CC='$(CC)' CFLAGS='$(CFLAGS)' python3 -B build_backend_recovery.py --output $@
 
 test_backend_init: test_backend_init.c ../src/backend_init.c ../src/backend_init.h ../src/backend.h ../src/pg_wait_tracer.h
 	$(CC) $(CFLAGS) -o $@ test_backend_init.c ../src/backend_init.c

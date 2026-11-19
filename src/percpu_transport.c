@@ -39,6 +39,7 @@ struct pgwt_percpu_transport {
     bool recovery_checked;
     bool *service_backlog;
     struct pgwt_transport_budget budget;
+    uint64_t capture_deadline_ns;
     uint64_t cut[2], cut_passes, cut_limit;
     uint32_t round, el_token;
     ma_snapshot snapshot;
@@ -1547,8 +1548,14 @@ void pgwt_percpu_transport_begin_pass(struct pgwt_daemon *d, uint64_t deadline)
 {
     if (d && d->exact_perf && d->percpu_transport) {
         d->percpu_transport->service_backlog = &d->service_backlog;
+        d->percpu_transport->capture_deadline_ns = deadline;
         pgwt_transport_begin_pass(d->percpu_transport, deadline);
     }
+}
+void pgwt_percpu_transport_begin_tick(struct pgwt_daemon *d)
+{
+    if (d && d->exact_perf && d->percpu_transport)
+        pgwt_percpu_transport_begin_pass(d, d->percpu_transport->capture_deadline_ns);
 }
 int pgwt_percpu_transport_snapshot(struct pgwt_daemon *d, ma_snapshot *s, uint64_t *now)
 {
