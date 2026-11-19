@@ -37,6 +37,7 @@ def main():
         subprocess.run([str(binary), "--case", "golden_646_bytes", "--write-golden", str(tmp / "encoded.bin")],
                        cwd=ROOT, check=True)
         assert (tmp / "encoded.bin").read_bytes() == (tmp / "all.bin").read_bytes()
+        print("codec independent_golden_bytes PASS")
         print("codec oracle enc.py + values.json + ex1-3.bin: 646/646 bytes identical PASS")
 
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Queue regressions must build and fail their exact work/semantic assertion."""
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -13,32 +15,54 @@ import test_core_merge_queue as queue
 import test_core_merge_index as checks
 
 
+# Module-level registries: scripts/core_status_contracts.py binds each printed
+# kill to its definition and the mutated source that was built.
+# (name, instrumented, original text, replacement, intended assertion)
+MUTATIONS = (
+    ("full_queue_pass", True, "    size_t begin = m->first, prior_count = 0, tail = SIZE_MAX;",
+     "    for (size_t scan = m->first; scan != SIZE_MAX; scan = m->queue_nodes[scan].next)\n"
+     "        (void)staged_order(m, &m->queue[scan], &m->queue[m->first]);\n"
+     "    size_t begin = m->first, prior_count = 0, tail = SIZE_MAX;",
+     "input queue comparisons <= log bound"),
+    ("whole_queue_move", True, "    size_t slot = m->first;",
+     "    memmove(m->queue, m->queue + 1, (m->count - 1) * sizeof(*m->queue));\n"
+     "    size_t slot = m->first;", "publication queue moves <= 4/record"),
+    ("revalidate_held_prefix", True,
+     "    if (m->held_cached && m->waiting_count) {",
+     "    if (false && m->held_cached && m->waiting_count) {",
+     "dependency held queue comparisons <= 64"),
+    ("linear_dependency_lookup", True,
+     "    return id && m->dependency_index[dependency_bucket(m, id)].epoch == m->report.epoch;",
+     "    if (!id) return false;\n"
+     "    for (size_t i = 0; i < m->dependency_count; ++i) {\n"
+     "        MERGE_WORK(QCOMPARE, 1);\n"
+     "        if (m->dependencies[i] == id) return true;\n"
+     "    }\n"
+     "    return false;", "distinct dependency queue comparisons <= bound"),
+    ("source_before_pid", False, "    CMP(t);\n    CMP(pid);",
+     "    CMP(t);\n    CMP(source);\n    CMP(pid);", "output"),
+)
+# (name, original text, replacement): the held suffix and payload pairing.
+SUFFIX_MUTATION = ("skipped_suffix", "        begin = m->queue_nodes[m->held_tail].next;",
+                   "        begin = SIZE_MAX;")
+_RECYCLE = "    m->first = m->queue_nodes[slot].next;\n"
+PAYLOAD_MUTATION = ("payload_swap_on_recycle", _RECYCLE, _RECYCLE + """    if (m->first != SIZE_MAX) {
+        unsigned char *bytes = m->queue[slot].bytes;
+        m->queue[slot].bytes = m->queue[m->first].bytes;
+        m->queue[m->first].bytes = bytes;
+    }
+""")
+
+
+def binding(definition, mutated, intended_proof):
+    dh = hashlib.sha256(json.dumps(definition, separators=(",", ":")).encode()).hexdigest()
+    sh = hashlib.sha256(mutated.encode()).hexdigest()
+    return f" definition-sha256={dh} source-sha256={sh} intended-proof={intended_proof}"
+
+
 def main():
     source = (checks.ROOT / "src/core/merge.c").read_text()
-    mutations = (
-        ("full_queue_pass", True, "    size_t begin = m->first, prior_count = 0, tail = SIZE_MAX;",
-         "    for (size_t scan = m->first; scan != SIZE_MAX; scan = m->queue_nodes[scan].next)\n"
-         "        (void)staged_order(m, &m->queue[scan], &m->queue[m->first]);\n"
-         "    size_t begin = m->first, prior_count = 0, tail = SIZE_MAX;",
-         "input queue comparisons <= log bound"),
-        ("whole_queue_move", True, "    size_t slot = m->first;",
-         "    memmove(m->queue, m->queue + 1, (m->count - 1) * sizeof(*m->queue));\n"
-         "    size_t slot = m->first;", "publication queue moves <= 4/record"),
-        ("revalidate_held_prefix", True,
-         "    if (m->held_cached && m->waiting_count) {",
-         "    if (false && m->held_cached && m->waiting_count) {",
-         "dependency held queue comparisons <= 64"),
-        ("linear_dependency_lookup", True,
-         "    return id && m->dependency_index[dependency_bucket(m, id)].epoch == m->report.epoch;",
-         "    if (!id) return false;\n"
-         "    for (size_t i = 0; i < m->dependency_count; ++i) {\n"
-         "        MERGE_WORK(QCOMPARE, 1);\n"
-         "        if (m->dependencies[i] == id) return true;\n"
-         "    }\n"
-         "    return false;", "distinct dependency queue comparisons <= bound"),
-        ("source_before_pid", False, "    CMP(t);\n    CMP(pid);",
-         "    CMP(t);\n    CMP(source);\n    CMP(pid);", "output"),
-    )
+    mutations = MUTATIONS
     with tempfile.TemporaryDirectory(prefix="pgwt-queue-mutants-") as directory:
         work = Path(directory)
         base = checks.build_base(work)
@@ -49,7 +73,8 @@ def main():
             if source.count(before) != 1:
                 raise RuntimeError(f"{name}: anchor must occur exactly once")
             mutant = work / "mutant.c"
-            mutant.write_text(source.replace(before, after, 1))
+            mutated = source.replace(before, after, 1)
+            mutant.write_text(mutated)
             binary = queue.build(work, base, mutant, instrument)
             start = time.monotonic()
             result = subprocess.run([str(binary)] + (["--cost"] if instrument else []),
@@ -63,12 +88,15 @@ def main():
                     log.count("MISMATCH") != 1 or re.search(
                         r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log)):
                 raise RuntimeError(f"{name}: not an intended kill (exit {result.returncode})\n{log}")
-            print(f"{name} KILLED in {elapsed:.3f}s: {intended[0]}", flush=True)
-        before = "        begin = m->queue_nodes[m->held_tail].next;"
+            print(f"{name} KILLED in {elapsed:.3f}s: {intended[0]}" +
+                  binding([name, instrument, before, after, assertion], mutated,
+                          "case:queue/work" if instrument else "diff:queue/a95a214c"), flush=True)
+        _, before, after = SUFFIX_MUTATION
         if source.count(before) != 1:
             raise RuntimeError("skipped_suffix: anchor must occur exactly once")
         mutant = work / "mutant.c"
-        mutant.write_text(source.replace(before, "        begin = SIZE_MAX;", 1))
+        mutated = source.replace(before, after, 1)
+        mutant.write_text(mutated)
         binary = queue.build(work, base, mutant)
         start = time.monotonic()
         result = subprocess.run([str(binary), "--incremental"], cwd=checks.ROOT,
@@ -79,17 +107,13 @@ def main():
                 len(intended) != 1 or log.count("MISMATCH") != 1 or re.search(
                     r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log)):
             raise RuntimeError(f"skipped_suffix: not an intended kill\n{log}")
-        print(f"skipped_suffix KILLED in {time.monotonic() - start:.3f}s: {intended[0]}", flush=True)
-        before = "    m->first = m->queue_nodes[slot].next;\n"
-        after = before + """    if (m->first != SIZE_MAX) {
-        unsigned char *bytes = m->queue[slot].bytes;
-        m->queue[slot].bytes = m->queue[m->first].bytes;
-        m->queue[m->first].bytes = bytes;
-    }
-"""
+        print(f"skipped_suffix KILLED in {time.monotonic() - start:.3f}s: {intended[0]}" +
+              binding(list(SUFFIX_MUTATION), mutated, "diff:queue/a95a214c"), flush=True)
+        _, before, after = PAYLOAD_MUTATION
         if source.count(before) != 1:
             raise RuntimeError("payload_swap_on_recycle: anchor must occur exactly once")
-        mutant.write_text(source.replace(before, after, 1))
+        mutated = source.replace(before, after, 1)
+        mutant.write_text(mutated)
         binary = queue.build(work, base, mutant)
         start = time.monotonic()
         result = subprocess.run([str(binary), "--payload-reuse"], cwd=checks.ROOT,
@@ -101,7 +125,8 @@ def main():
                 len(intended) != 1 or log.count("MISMATCH") != 1 or re.search(
                     r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log)):
             raise RuntimeError(f"payload_swap_on_recycle: not an intended kill\n{log}")
-        print(f"payload_swap_on_recycle KILLED in {time.monotonic() - start:.3f}s: {intended[0]}", flush=True)
+        print(f"payload_swap_on_recycle KILLED in {time.monotonic() - start:.3f}s: {intended[0]}" +
+              binding(list(PAYLOAD_MUTATION), mutated, "case:queue/payload_reuse"), flush=True)
     print("core merge queue mutants: 4/4 work assertions, 1/1 tie-break, "
           "1/1 held suffix, 1/1 payload pairing killed")
 

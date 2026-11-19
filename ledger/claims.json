@@ -26,6 +26,14 @@
       "link": null,
       "contract": "wait_time-v1",
       "contract_sha256": "4f4d9aedca7e5313f3dc78cd2aba763e286ba9e79d1406ff3c6e6899957f1129"
+    },
+    "merge-v1-core": {
+      "kind": "core-status",
+      "contract": "merge-v1"
+    },
+    "evidence-v1-core": {
+      "kind": "core-status",
+      "contract": "evidence-v1"
     }
   },
   "claims": [
@@ -173,6 +181,262 @@
         "independent_answer": [],
         "real_interface": [],
         "broken_versions": [],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "merge-v1:C01",
+      "contract_claim": "merge-v1:C01",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "merge-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "merge-v1:C02",
+      "contract_claim": "merge-v1:C02",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "merge-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "merge-v1:C03",
+      "contract_claim": "merge-v1:C03",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "merge-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "merge-v1:C04",
+      "contract_claim": "merge-v1:C04",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "merge-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "merge-v1:C05",
+      "contract_claim": "merge-v1:C05",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "merge-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "merge-v1:C06",
+      "contract_claim": "merge-v1:C06",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "merge-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "merge-v1:C07",
+      "contract_claim": "merge-v1:C07",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "merge-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "evidence-v1:C01",
+      "contract_claim": "evidence-v1:C01",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "evidence-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "evidence-v1:C02",
+      "contract_claim": "evidence-v1:C02",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "evidence-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "evidence-v1:C03",
+      "contract_claim": "evidence-v1:C03",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "evidence-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "evidence-v1:C04",
+      "contract_claim": "evidence-v1:C04",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "evidence-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "evidence-v1:C05",
+      "contract_claim": "evidence-v1:C05",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "evidence-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "evidence-v1:C06",
+      "contract_claim": "evidence-v1:C06",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "evidence-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "evidence-v1:C07",
+      "contract_claim": "evidence-v1:C07",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "evidence-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "evidence-v1:C08",
+      "contract_claim": "evidence-v1:C08",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "evidence-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "evidence-v1:C09",
+      "contract_claim": "evidence-v1:C09",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "evidence-v1-core"
+        ],
         "binary_identified": [],
         "load_platform": [],
         "old_code_deleted": [],
