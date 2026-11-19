@@ -12,7 +12,7 @@
 # not evidence any given rate, including the shipped default, actually held
 # up. Every rate in RATES must now be within tolerance for exit 0; one
 # out-of-tolerance rate fails the run (79 only for the bounded #675 signature;
-# otherwise 1, including a rate that could not be measured). The first rate
+# 80 for an invalid workload, otherwise 1, including an unmeasured rate). The first rate
 # that PASSES is still printed as the recommended default -- that framing is
 # unchanged -- but it
 # no longer decides the exit code.
@@ -77,6 +77,10 @@ TOLERANCE_OVERRIDDEN=0
 # comma-separated list of signed (exact - sampled) eligible-event deviations.
 # Exit 79 is reserved here for #675's bounded tolerance-only signature; it is
 # distinct from run_all's 78 phase refusal and shell 126/127 and 128+ signals.
+# Exit 80 means an INVALID workload (rules b' / c below). run_all.sh's
+# expected-exit mismatch branch counts 80 as a real failure on the #675 tier;
+# its ordinary nonzero branch does so everywhere else. It is neither 78 nor
+# the separate exit-93 recovery signature.
 # #675 / #760 record 9.8-12.4 pp on EL8 4.18; the two #760 review runs measured
 # 9.8-12.4 and 10.1-11.1 pp. 15.0 pp is a regression tripwire for an OPEN
 # defect, NOT an accuracy claim or a wider tolerance. Delete it and exit 79
@@ -89,6 +93,8 @@ import sys
 try:
     other_failure, tolerance, *arms = sys.argv[1:]
     tolerance = float(tolerance)
+    if "WORKLOAD_INVALID" in arms:
+        sys.exit(80)
     if other_failure != "0" or not arms or not math.isfinite(tolerance) or tolerance <= 0:
         sys.exit(1)
     outside = False
@@ -129,12 +135,15 @@ try:
                       output, re.M | re.S)
     require(table)
     deltas = []
+    number = r"([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)"
     for line in table[1].splitlines():
-        row = re.fullmatch(r"\S+\s+([0-9]+\.[0-9]+)%\s+([0-9]+\.[0-9]+)%\s+([0-9]+\.[0-9]+)", line)
+        row = re.fullmatch(r"\S+\s+" + number + r"%\s+" + number +
+                           r"%\s+([0-9]+\.[0-9]{1,2})", line)
         require(row)
-        exact, sampled, delta = map(float, row.groups())
+        exact, sampled, printed_delta = map(float, row.groups())
+        delta = abs(exact - sampled)
         require(0 <= exact <= 100 and 0 <= sampled <= 100)
-        require(abs(abs(exact - sampled) - delta) <= 0.11)  # printed to 0.1 pp
+        require(abs(delta - printed_delta) <= 0.011)  # delta printed to 0.01 pp
         if exact >= 2.0:  # cross_validate's default --min-share
             deltas.append(delta if exact >= sampled else -delta)
     require(deltas)
@@ -142,18 +151,69 @@ try:
     require(len(overlaps) == 1)
     top, overlap, denominator = map(int, overlaps[0])
     require(1 <= top <= 5 and denominator == top and min(top, 4) <= overlap <= top)
-    maxima = re.findall(r"^Max share disagreement \(events >= 2% exact share\): ([0-9]+\.[0-9]+) pp \(.+\)$", output, re.M)
-    require(len(maxima) == 1 and abs(float(maxima[0]) - max(map(abs, deltas))) <= 0.11)
+    maxima = re.findall(r"^Max share disagreement \(events >= 2% exact share\): ([0-9]+\.[0-9]{1,2}) pp \(.+\)$", output, re.M)
+    require(len(maxima) == 1 and abs(float(maxima[0]) - max(map(abs, deltas))) <= 0.011)
     verdicts = re.findall(r"^RESULT: (PASS|FAIL)$", output, re.M)
     require(len(verdicts) == 1)
-    # Around the rounded tolerance boundary, refuse rather than guess why the
-    # comparator failed. Its exit code must agree with its printed verdict too.
+    # Shares are printed at round-trip precision: recomputing their difference
+    # reproduces the comparator, even when a true 8.801 prints as 8.80 pp.
+    # Two decimals alone would merely shrink the old rounding gap. Legacy
+    # one-decimal fixtures remain readable; current decisions use the shares.
     passed = max(map(abs, deltas)) <= float(tolerance)
     require(verdicts[0] == ("PASS" if passed else "FAIL"))
     require(rc == ("0" if passed else "1"))
     print(",".join(str(delta) for delta in deltas))
 except ValueError:
     print("INVALID")
+PYEOF
+}
+
+# Pure per-run validity check. Progress timestamps are Unix epoch seconds
+# (--progress-timestamp); only complete 5 s intervals inside escalation count.
+# The median belongs to this run's escalated intervals, not to another run.
+tiered_workload_validity() {
+    python3 - "$@" <<'PYEOF'
+import math
+from pathlib import Path
+import re
+import statistics
+import sys
+
+output, progress_path, start, end = sys.argv[1:]
+try:
+    start, end = float(start), float(end)
+    if not (math.isfinite(start) and math.isfinite(end) and start < end):
+        raise ValueError("unreadable escalation window")
+    intervals = []
+    for line in Path(progress_path).read_text().splitlines():
+        if not line.startswith("progress:"):
+            continue
+        match = re.match(r"progress: ([0-9]+(?:\.[0-9]+)?)(?: s)?, "
+                         r"([0-9]+(?:\.[0-9]+)?) tps,", line)
+        if not match:
+            raise ValueError("unreadable progress interval: " + line)
+        timestamp, tps = map(float, match.groups())
+        if not (math.isfinite(timestamp) and math.isfinite(tps)):
+            raise ValueError("non-finite progress interval: " + line)
+        if start <= timestamp - 5 and timestamp <= end:
+            intervals.append((timestamp, tps))
+    if not intervals:
+        raise ValueError("no complete 5 s progress intervals inside escalation")
+    median = statistics.median(tps for _, tps in intervals)
+    stalled = [(timestamp, tps) for timestamp, tps in intervals if tps < 0.5 * median]
+    if stalled:
+        print("b': median=%.1f tps; below 50%%=%s; intervals=%s" %
+              (median, stalled, intervals))
+        sys.exit(0)
+    cpu = re.findall(r"^CPU\s+([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)%\s", output, re.M)
+    if len(cpu) != 1 or not 0 <= float(cpu[0]) <= 100:
+        print("c: exact CPU share unreadable; CPU rows=" + repr(cpu))
+    elif float(cpu[0]) < 30:
+        print("c: exact CPU share=%s%% < 30%%" % cpu[0])
+    else:
+        print("VALID")
+except (OSError, ValueError) as exc:
+    print("b': " + str(exc))
 PYEOF
 }
 
@@ -241,6 +301,7 @@ declare -A rate_result
 declare -A rate_delta
 declare -A rate_event
 declare -A rate_assertions
+declare -A rate_invalid
 non_tolerance_failure=0
 
 for RATE in $RATES; do
@@ -258,14 +319,19 @@ for RATE in $RATES; do
     for _ in $(seq 1 30); do [[ -S "$SOCK" ]] && break; sleep 0.3; done
     if [[ ! -S "$SOCK" ]]; then echo "  daemon failed to start"; non_tolerance_failure=1; tail "$LOG"; kill "$TPID" 2>/dev/null; rm -rf "$TRACE_DIR" "$LOG"; continue; fi
 
+    # Keep stdout and timestamped progress until the validity decision is logged.
+    PGB_LOG="$TRACE_DIR/pgbench.log"
     # Start workload
     pgbench -U postgres -d postgres -c "$CLIENTS" -j 2 -T $((ESC_SECONDS + 8)) \
-        >/dev/null 2>&1 &
+        -P 5 --progress-timestamp >"$PGB_LOG" 2>&1 &
     PGB=$!
     sleep 3   # warm up the sampler before escalating
 
     # Escalate for the window
+    ESC_REQUEST=$(python3 -c 'import time; print(time.time())')
     RESP=$(ctl "$SOCK" "{\"cmd\":\"escalate\",\"duration_s\":${ESC_SECONDS},\"reason\":\"cross-validate\"}") || non_tolerance_failure=1
+    ESC_START=$(python3 -c 'import time; print(time.time())')
+    ESC_END=$(python3 -c 'import sys; print(float(sys.argv[1]) + int(sys.argv[2]))' "$ESC_REQUEST" "$ESC_SECONDS")
     echo "  escalate: $RESP"
 
     sleep $((ESC_SECONDS + 3))   # let the window run + expire
@@ -281,7 +347,17 @@ for RATE in $RATES; do
     # Compare
     XVAL_RC=0
     OUT=$("$XVAL" "$TRACE_DIR" --tolerance "$TOLERANCE") || XVAL_RC=$?
-    print_rate_result "$RATE" "$OUT"
+    echo "  pgbench output (progress uses Unix epoch timestamps):"
+    cat "$PGB_LOG"
+    VALIDITY=$(tiered_workload_validity "$OUT" "$PGB_LOG" "$ESC_START" "$ESC_END") || VALIDITY="b': validity checker failed"
+    if [[ "$VALIDITY" != VALID ]]; then
+        rate_assertions[$RATE]=WORKLOAD_INVALID
+        rate_invalid[$RATE]="$VALIDITY"
+        echo "  RATE ${RATE}Hz: INVALID — $VALIDITY"
+        echo "  assertions[$RATE]=WORKLOAD_INVALID xval_rc=$XVAL_RC"
+        rm -rf "$TRACE_DIR" "$LOG"
+        continue
+    fi
     DELTA_INFO=$(extract_max_delta "$OUT")
     rate_delta[$RATE]="${DELTA_INFO%%|*}"
     rate_event[$RATE]="${DELTA_INFO#*|}"
@@ -315,6 +391,7 @@ for RATE in $RATES; do
     SAMP=$(extract_samples_in_window "$OUT")
     if ! SAMP_MIN=$(derive_xval_sample_floor); then
         non_tolerance_failure=1
+        echo "  assertions[$RATE]=INVALID xval_rc=$XVAL_RC"
         echo "  RATE ${RATE}Hz: REFUSED — the capture-thickness floor could not be derived;" \
              "thickness cannot be judged, so this counts as a failure, not a skip"
         rm -rf "$TRACE_DIR" "$LOG"
@@ -322,6 +399,7 @@ for RATE in $RATES; do
     fi
     if ! refuse_unless_samples_sufficient "$SAMP" "$SAMP_MIN" >/dev/null; then
         non_tolerance_failure=1
+        echo "  assertions[$RATE]=INVALID xval_rc=$XVAL_RC"
         echo "  RATE ${RATE}Hz: REFUSED — capture too thin / sample count unreadable" \
              "(N=${SAMP}, need >=${SAMP_MIN}); counts as a failure, not a skip"
         rm -rf "$TRACE_DIR" "$LOG"
@@ -330,13 +408,18 @@ for RATE in $RATES; do
     echo "  samples in window: $SAMP (>= $SAMP_MIN required for the derived bound)"
     rate_assertions[$RATE]=$(tiered_arm_assertions "$OUT" "$XVAL_RC" "$TOLERANCE") || rate_assertions[$RATE]=INVALID
 
-    if [[ "$OUT" == *"RESULT: PASS"* ]]; then
+    echo "  assertions[$RATE]=${rate_assertions[$RATE]} xval_rc=$XVAL_RC"
+    if [[ "${rate_assertions[$RATE]}" == INVALID ]]; then
+        non_tolerance_failure=1
+        echo "  RATE ${RATE}Hz: INVALID — comparator assertions: assertions=INVALID xval_rc=$XVAL_RC"
+    elif [[ "$OUT" == *"RESULT: PASS"* ]]; then
         rate_result[$RATE]="PASS"
         [[ -z "$best_rate" ]] && best_rate="$RATE"
     else
         rate_result[$RATE]="FAIL"
     fi
 
+    [[ "${rate_assertions[$RATE]}" == INVALID ]] || print_rate_result "$RATE" "$OUT"
     rm -rf "$TRACE_DIR" "$LOG"
 done
 
@@ -348,8 +431,12 @@ echo "===== Cross-validation summary ====="
 ARM_ASSERTIONS=()
 DEVIATIONS=()
 for RATE in $RATES; do
-    print_rate_summary "$RATE" "${rate_result[$RATE]:-}" "${rate_delta[$RATE]:-?}" \
-        "${rate_event[$RATE]:-n/a}" "$TOLERANCE"
+    if [[ "${rate_assertions[$RATE]:-}" == WORKLOAD_INVALID ]]; then
+        echo "  RATE ${RATE}Hz: INVALID — ${rate_invalid[$RATE]}"
+    else
+        print_rate_summary "$RATE" "${rate_result[$RATE]:-}" "${rate_delta[$RATE]:-?}" \
+            "${rate_event[$RATE]:-n/a}" "$TOLERANCE"
+    fi
     ARM_ASSERTIONS+=("${rate_assertions[$RATE]:-INVALID}")
     DEVIATIONS+=("${RATE}=${rate_delta[$RATE]:-?}")
 done
@@ -366,6 +453,10 @@ if [[ "$RESULT_RC" -eq 0 ]]; then
     exit 0
 else
     echo "FAIL: not every requested rate is within +/-${TOLERANCE}pp tolerance — see per-rate lines above for which rate(s) and by how much."
+    if [[ "$RESULT_RC" -eq 80 ]]; then
+        echo "INVALID workload: see per-rate validity rules above (exit 80)."
+        exit 80
+    fi
     if [[ "$RESULT_RC" -eq 79 ]]; then
         echo "#675 signature only: sampled under-reads exact, all deviations <=15.0 pp (exit 79)."
         exit 79
