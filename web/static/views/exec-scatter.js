@@ -4,7 +4,10 @@ import {
     buildExecScatterOption, meaningfulScatterYRange, scatterExecutionIntent,
 } from '../lib/builders/exec-scatter.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
-import { mountUnavailablePanel } from '../lib/panels.js';
+import {
+    mountUnavailablePanel, buildCoverageBadge, paneFidelityBadgeHtml,
+    buildCoverageNotice, coverageEmptyStateHtml,
+} from '../lib/panels.js';
 import { attachBoxSelection } from '../lib/selection.js';
 
 function yText(a, b) {
@@ -37,6 +40,7 @@ export function createExecScatterView() {
             '<div class="scatter-shell">' +
             ' <div class="waterfall-banner">Plain drag zooms time; a 2D box also constrains latency. ' +
             'Double-click zooms out.</div>' +
+            ' <div id="scatter-coverage"></div>' +
             ' <div id="scatter-chart"></div>' +
             ' <div id="scatter-notes" class="chart-notes"></div>' +
             ' <div id="scatter-readout" class="chart-readout"></div>' +
@@ -56,7 +60,10 @@ export function createExecScatterView() {
 
         build(data) {
             if (isUnavailable(data)) return { unavailable: data };
-            return buildExecScatterOption(data);
+            // U3: record-level — points stay, the coverage label rides along.
+            return Object.assign(buildExecScatterOption(data),
+                { coverageBadge: buildCoverageBadge(data),
+                  coverageNotice: buildCoverageNotice(data) });
         },
 
         mount(el, model, ctx) {
@@ -69,12 +76,19 @@ export function createExecScatterView() {
             }
             if (!model.hasData) {
                 disposeChart();
-                el.innerHTML = '<div class="scatter-shell"><div class="chart-notes">' +
-                    model.notes.join(' · ') + '</div>' +
-                    '<div class="loading">No completed, positive-duration executions for selected range</div></div>';
+                // U3: under an incomplete verdict the notice replaces the
+                // "No completed … executions" placeholder (and the badge).
+                el.innerHTML = '<div class="scatter-shell">' +
+                    (model.coverageNotice ? '' : paneFidelityBadgeHtml(model.coverageBadge)) +
+                    '<div class="chart-notes">' + model.notes.join(' · ') + '</div>' +
+                    coverageEmptyStateHtml(model.coverageNotice,
+                        '<div class="loading">No completed, positive-duration executions for selected range</div>') +
+                    '</div>';
                 return;
             }
             ensureShell(el);
+            document.getElementById('scatter-coverage').innerHTML =
+                paneFidelityBadgeHtml(model.coverageBadge);
             document.getElementById('scatter-notes').textContent = model.notes.join(' · ');
             document.getElementById('scatter-readout').textContent = yReadout;
             const host = document.getElementById('scatter-chart');

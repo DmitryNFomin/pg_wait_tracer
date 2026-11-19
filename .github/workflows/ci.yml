@@ -3,6 +3,7 @@
 # Core jobs:
 #   build-and-unit  — full build (BPF tracer + pgwt-server), C unit tests,
 #                     Python synthetic-data correctness tests
+#   box-tier-ubuntu — full box-check build, require-live suite and live UI smoke
 #   sampled-overhead — paired sampled/no-tracer catastrophic-regression gate
 #   web-ui          — Playwright suite against tests/mock_server.py; any
 #                     browser console error fails the test that caused it
@@ -439,6 +440,82 @@ jobs:
         env:
           PGWT_BRIDGE_TEST_REQUIRE: "1"
         run: cd web && go test -race ./...
+
+  box-tier-ubuntu:
+    name: box-tier-ubuntu
+    # Always run the full tier, including tooling/docs PRs. Fork code never
+    # reaches a gate box: the hosted refusal reports failure rather than skip.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || fromJSON('["self-hosted","gate-box"]') }}
+    env:
+      PGWT_CI_CELL: ${{ github.run_id }}-${{ github.run_attempt }}-box-tier-ubuntu
+    # Measured box-check runs take 45-80 min; allow 210 min: up to 120 min of
+    # lock queueing (bounded below) plus the tier itself, with margin.
+    timeout-minutes: 210
+    # Inherit workflow-level cancellation of superseded PR runs. No job-level
+    # concurrency group: pending jobs from unrelated PRs must not cancel one
+    # another (see sampled-overhead's concurrency history below).
+    steps:
+      - name: Refuse fork PR (gate checks need a maintainer to re-host)
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          echo "gate checks run only from a branch in this repository; a maintainer must push this PR's head to agent/<slug> and re-run" >&2
+          exit 1
+
+      - name: Reclaim workspace ownership (previous job may have left root-owned files)
+        run: sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
+      - name: Ensure gate-box lock file is writable
+        run: |
+          [ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock'
+
+      - uses: actions/checkout@v4
+
+      - name: Build and run full box tier (single lock hold)
+        id: tier
+        env:
+          OS: ubuntu
+          PGWT_EXPECT_PHASE_PROBES: "1"
+        shell: bash
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
+          [ -f /etc/pgwt-gate-box ] || { echo "FATAL: run tests/provision-runner.sh ubuntu on this gate box" >&2; exit 1; }
+          # Same verified clean build as box-check's rsynced checkout. Generate
+          # the manifest before build, from the exact revision checked out.
+          git ls-tree -rz HEAD > .pgwt-box-source-manifest
+          # Do not upload a previous run's summary if this build/live smoke fails
+          # before producing one. The checkout can contain tracked old evidence.
+          sudo rm -rf tests/results/ui_live
+          echo 'started=true' >> "$GITHUB_OUTPUT"
+          set -o pipefail
+          bash scripts/box-tier.sh "$(git rev-parse 'HEAD^{tree}')" "$(git rev-parse HEAD)" 2>&1 | tee "$RUNNER_TEMP/$PGWT_CI_CELL-run-all.log"
+
+      - name: Reap this cell's processes after cancellation
+        if: ${{ always() && steps.tier.outcome != 'skipped' && runner.environment == 'self-hosted' }}
+        run: sudo python3 .github/scripts/cleanup_gate_cell.py "$PGWT_CI_CELL"
+
+      - name: Summarize full box tier
+        if: ${{ always() && steps.tier.outcome != 'skipped' && runner.environment == 'self-hosted' }}
+        run: |
+          {
+            echo '### Ubuntu full box tier'
+            echo '```text'
+            if [ -f "$RUNNER_TEMP/$PGWT_CI_CELL-run-all.log" ]; then
+              grep -E 'Executed:|Live UI smoke:|KNOWN_FAILING|KNOWN.FAILING|Known-failing:|UNEXPECTED PASS' "$RUNNER_TEMP/$PGWT_CI_CELL-run-all.log" || true
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full box tier evidence
+        if: ${{ always() && steps.tier.outputs.started == 'true' && runner.environment == 'self-hosted' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: box-tier-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/${{ env.PGWT_CI_CELL }}-run-all.log
+            tests/results/ui_live/summary.json
 
   sampled-overhead:
     # Stage 5: timing on a shared runner is deliberately coarse.  The paired

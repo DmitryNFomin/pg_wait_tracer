@@ -135,6 +135,11 @@ case "$name" in
         case "$remote_command" in
             'mkdir -p pgwt-provision') exit "${MKDIR_RC:-0}" ;;
             *'mktemp -d '*) printf 'pgwt-check/fixture-head.run1234567\n' ;;
+            # The build fixture completes successfully before its first poll.
+            # Keep launch stdout separate from the four-field poll protocol.
+            *'nohup setsid bash -c '*) printf '999999\n' ;;
+            *"&& python3 - '"*) printf '0 0 999999 dead\n' ;;
+            'if '*'; then sudo rm -rf -- '*) exit 0 ;;
             'rm -f '*) exit "${CLEANUP_RC:-0}" ;;
             'sudo bash pgwt-provision/'*-tests-provision-runner.sh\ *)
                 if [[ -n "${PROVISION_REAL:-}" ]]; then
@@ -229,7 +234,7 @@ assert_provisioned() {
             $NF == target ":" path { stage = NR }
         $1 == "ssh" && $(NF-1) == target &&
             $NF == command { provision = NR }
-        $1 == "ssh" && $NF ~ /tests\/run_all[.]sh --require-live/ { build = NR }
+        $1 == "ssh" && $NF ~ /scripts\/box-tier[.]sh/ { build = NR }
         END { exit !(stage && provision && build && stage < provision && provision < build) }
     ' "$tmpdir/calls" || { echo "FAIL: persistent $os must stage to its target before provisioning and build" >&2; return 1; }
     assert_cleanup "$os" || return $?
@@ -284,7 +289,7 @@ for provision_rc in 1 7 75; do
     [[ $rc -eq 1 ]] || fail "provision failure rc=$provision_rc must be fatal (got $rc)"
     provision_command "$tmpdir/calls" >/dev/null || exit $?
     assert_cleanup ubuntu || exit $?
-    if /usr/bin/grep -q 'tests/run_all.sh --require-live' "$tmpdir/calls"; then
+    if /usr/bin/grep -q 'scripts/box-tier.sh' "$tmpdir/calls"; then
         fail "build ran after provision failure rc=$provision_rc"
     fi
     if [[ $provision_rc -eq 75 ]]; then
@@ -352,7 +357,7 @@ for child_rc in 3 75; do
         fail "child rc=$child_rc was misreported as unsupported OS"
     fi
     echo "PASS: child rc=$child_rc is not reported as unsupported OS"
-    if /usr/bin/grep -Fq 'tests/run_all.sh --require-live' "$tmpdir/calls"; then
+    if /usr/bin/grep -Fq 'scripts/box-tier.sh' "$tmpdir/calls"; then
         fail "build ran after real provisioner child rc=$child_rc"
     fi
     if [[ $child_rc -eq 75 ]]; then
@@ -644,7 +649,7 @@ for stage in mkdir rsync; do
     fi
     rc=$?
     [[ $rc -eq 1 ]] || fail "$stage failure must be fatal (got $rc)"
-    if /usr/bin/grep -Eq 'sudo bash pgwt-provision/[^[:space:]]*-tests-provision-runner[.]sh |tests/run_all[.]sh --require-live' "$tmpdir/calls"; then
+    if /usr/bin/grep -Eq 'sudo bash pgwt-provision/[^[:space:]]*-tests-provision-runner[.]sh |scripts/box-tier[.]sh' "$tmpdir/calls"; then
         fail "provision/build ran after $stage failure"
     fi
     echo "PASS: $stage failure stops before provision/build"

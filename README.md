@@ -333,6 +333,20 @@ direct connection.
 - `sampled_attr_pg13_scan_fallbacks_total`: PG13 candidate-scan attempts when
   the computed route is unavailable; each use is counted
 - `wp_attach_failures_total`, `ringbuf_drops_total`, `backends_tracked`
+- `exact_preseed_unpublished_total`: successful PG14–17 no-command proofs
+  from an untorn PID-zero own status slot in the validated shared mapping and
+  struct stride, with unchanged pinned process identity and a shared wait address
+- `exact_preseed_wait_addr_refreshed_total`: successful UNPUBLISHED proof seeds
+  whose missing or non-shared cached wait address was resolved once during
+  preseed, validated as shared under the process identity pin, then saved for
+  watchpoint attachment (PG14–17 only)
+- `exact_preseed_reread_total`: one-shot coherent attribution rereads after the
+  fallback sees an own-pid, context-bearing row, command closed or already open
+  (PG14+); failed rereads still deny escalation.
+- `exact_preseed_torn_exhausted_total`: escalation rollbacks because a
+  backend's status row stayed torn (change counter odd or changing) through the
+  preseed's paced re-reads (at most 8 pauses of 0.5 ms per escalation attempt).
+  These counters also appear in `status`.
 - `trace_events_written_total`, `trace_bytes_written_total`
 - `tier`, `escalation_active`, `escalation_seconds_remaining`,
   `escalation_budget_remaining_s`, `escalation_windows_total`,

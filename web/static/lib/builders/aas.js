@@ -31,6 +31,7 @@ import {
 } from '../format.js';
 import {
     buildFidelityShading, buildEscalationAnnotation, fidelityOf, fidelityLabel,
+    coverageOf, aasScaleMax,
 } from './fidelity.js';
 
 /* Name of the dedicated silent annotation series that carries EVERY mark
@@ -147,7 +148,7 @@ export function buildAasOption(data, opts) {
         seriesIds = AAS_CLASS_ORDER.map(() => null);   // class drills go by name
     }
 
-    const maxAas = (data && data.max_aas) || 0;
+    const maxAas = aasScaleMax(data);
     const policyMax = policyYMax(maxAas, numCpus);
     const yMax = opts.appliedYMax != null ? opts.appliedYMax : policyMax;
 
@@ -384,6 +385,7 @@ export function buildAasOption(data, opts) {
         // Fidelity surface (B5): drives the sampled/exact legend chip + tooltip.
         fidelity: fidelityOf(data),
         fidelityLabel: fidelityLabel(fidelityOf(data)),
+        coverage: coverageOf(data),
         shading,
         escalation: escAnno,
         // U2a camera geometry (ns): the pinned axis extent and the visible
@@ -393,6 +395,32 @@ export function buildAasOption(data, opts) {
         axisRange: { from: axisFromNs, to: axisToNs },
         window: { from: win.from, to: win.to },
     };
+}
+
+/* Status-line peak text shared by both renderers (views/active.js). A
+ * window whose coverage verdict is incomplete shows the coverage label in
+ * place of its whole-window peak: never a number, never zero; a live_edge
+ * peak says where its data ends. */
+export function aasPeakText(model) {
+    const cov = model && model.coverage;
+    if (cov && cov.withheld) return cov.label;
+    // A3 item 1: a live_edge peak covers [from, covered_to) only.
+    const upTo = cov && cov.upTo ? ' (' + cov.upTo + ')' : '';
+    return 'peak ' + ((model && model.maxAas) || 0).toFixed(1) + ' AAS' + upTo;
+}
+
+/* Empty-window text shared by both renderers (views/active.js): the chart
+ * card and the status line. An empty window under an incomplete verdict is
+ * time the capture never covered, so it reads as the coverage label, never
+ * "No data". */
+export const AAS_EMPTY_TEXT = 'No data in selected range';
+export function aasEmptyText(model) {
+    const cov = model && model.coverage;
+    return cov && cov.withheld ? cov.label : AAS_EMPTY_TEXT;
+}
+export function aasEmptyStatusText(model) {
+    const cov = model && model.coverage;
+    return cov && cov.withheld ? cov.label : 'no data';
 }
 
 /* Label of the 'offcpu' WAIT_CLASSES entry — used to spot it among tooltip

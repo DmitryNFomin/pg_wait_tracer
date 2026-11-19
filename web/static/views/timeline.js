@@ -48,6 +48,9 @@
 import { buildTimelineOption } from '../lib/builders/timeline.js';
 import { attachSelection } from '../lib/selection.js';
 import { esc } from '../lib/format.js';
+import {
+    buildCoverageBadge, paneFidelityBadgeHtml, buildCoverageNotice, coverageEmptyStateHtml,
+} from '../lib/panels.js';
 
 /* The chart host's own horizontal padding, from the shell markup below. The
  * CANVAS is that much narrower than the host box: zrender sizes itself as
@@ -115,7 +118,9 @@ export function createTimelineView() {
 
         build(data, ctx) {
             if (data && data.prompt) return { prompt: true };
-            return buildTimelineOption(data, {
+            // U3: record-level — the records stay, the coverage label rides
+            // along (buildCoverageBadge reads the server's verdict).
+            return Object.assign(buildTimelineOption(data, {
                 from: ctx.timeRange.from, to: ctx.timeRange.to,
                 // #106: the builder buckets dense spans per PIXEL COLUMN, so it
                 // needs the host's px width. Measuring it is the only thing this
@@ -123,7 +128,8 @@ export function createTimelineView() {
                 // already laid out on every refresh after the first; the builder
                 // falls back to TIMELINE_DEFAULT_WIDTH when it is not.
                 width: hostWidth(),
-            });
+            }), { coverageBadge: buildCoverageBadge(data),
+                coverageNotice: buildCoverageNotice(data) });
         },
 
         mount(el, model, ctx) {
@@ -138,8 +144,11 @@ export function createTimelineView() {
             }
             if (!model.hasData) {
                 disposeChart();
-                el.innerHTML = '<div style="padding:40px;text-align:center;color:#888">' +
-                    'No events for selected session/range</div>';
+                // U3: under an incomplete verdict the notice replaces "No events".
+                el.innerHTML = coverageEmptyStateHtml(model.coverageNotice,
+                    paneFidelityBadgeHtml(model.coverageBadge) +
+                    '<div style="padding:40px;text-align:center;color:#888">' +
+                    'No events for selected session/range</div>');
                 return;
             }
 
@@ -150,11 +159,12 @@ export function createTimelineView() {
             // one chart read as two problems. The builder folds them into ONE
             // sentence with one number format and one zoom instruction; this
             // slot just paints it, in the same yellow chrome as before.
-            document.getElementById('timeline-banner').innerHTML = model.bannerNote
+            document.getElementById('timeline-banner').innerHTML =
+                paneFidelityBadgeHtml(model.coverageBadge) + (model.bannerNote
                 ? '<div style="padding:8px 20px;font-size:12px;color:#ffd700;' +
                   'background:#3d3200;border-bottom:1px solid #555">' +
                   esc(model.bannerNote) + '</div>'
-                : '';
+                : '');
 
             const host = document.getElementById('timeline-chart');
             const h = model.chartHeight + 'px';

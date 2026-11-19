@@ -427,3 +427,93 @@ SELECT * FROM pgwt_query_events(
 | `src/retention.c/h` | NEW — file retention manager (delete old files) |
 | `ext/pg_wait_tracer_ext.c` | NEW (future) — PG extension SQL functions |
 | `lib/pgwt_reader.c/h` | NEW (future) — shared library for file reading (CLI + extension) |
+
+Auxiliary processes retain their closed seed on an incoherent read without
+classification or proof counters. Escalation preseeds a client backend with
+query ID 0, command closed and quality NONE
+only after a failed coherent read and positive proof from a pinned process
+identity: gone/Z/X, PF_EXITING with zero virtual size, a successfully read NULL
+MyBEEntry on PG14+, or a coherent own-pid startup row with database and user 0
+and no command open.
+
+On PG14–17, an UNPUBLISHED row also proves no command: the backend's non-NULL
+MyBEEntry points inside the runtime-validated shared status mapping on the
+validated struct stride, and a complete untorn row has `st_procpid == 0`.
+The retained `/proc` identity must have the same start time before and after,
+and the backend's wait address must be resolved and shared. Another pid,
+PG13/PG18, torn or failed reads, off-stride pointers and unknown identity
+never qualify. `exact_preseed_unpublished_total` counts successful proof seeds
+in both `metrics` and `status`. This seeds command/query attribution only;
+`preseed_state_map` still seeds the actual in-flight startup wait independently.
+If the cached wait address is missing or not shared, preseed calls the existing
+resolver once, without waiting for sampling. The fresh address must be nonzero
+and shared before the final pinned identity check. Only after that check and
+the exact seed write succeed is the address saved in the backend cache with
+shared classification and the sampler's idempotent state-map seed. This lets
+the following watchpoint attachment include the backend. The counter
+`exact_preseed_wait_addr_refreshed_total` counts these successful refreshes in
+both `metrics` and `status`; failed/private/unreadable pointers remain denials.
+PG13 and PG18 never enter this refresh path.
+If the fallback instead finds an own-pid row with database/user context, the
+coherent reader is retried exactly once (PG14+), whether the command is closed
+or already open (the backend published and began its first statement after the
+failed coherent read). That reread seeds an open command exactly as for an
+established backend; it is never a no-command proof.
+`exact_preseed_reread_total` counts these attempts, including failed attempts;
+failure still rolls the generation back. Neither path changes wait seeding order.
+
+A torn status row (the change counter odd, or changing, through the reader's
+32 back-to-back attempts) is reported to the preseed as TORN, not as a read
+failure. The usual cause is a backend inside its one startup status write
+(PG17 `pgstat_bestart`, PG18 `pgstat_bestart_initial`) while descheduled or
+faulting in pages. On the preseed failure path only, the row is re-read after
+0.5 ms pauses, at most 8 pauses (4 ms) per escalation attempt, shared by all
+torn backends in that attempt; each re-read first confirms the retained
+`/proc/<pid>/stat` handle still has the same start time. A row that becomes
+untorn is classified by the unchanged proofs above; one still torn when the
+budget is spent rolls the escalation back and is counted in
+`exact_preseed_torn_exhausted_total` (`metrics` and `status`). The sampler and
+other status readers keep their back-to-back retries and never pause. The bound
+is a choice: a scheduler tick at HZ=250 is 4 ms, and the pause can only lengthen
+an escalation that would otherwise roll back. `PGWT_TEST_PRESEED_TORN_PID_FILE`
+(TEST ONLY, default off) makes the selected pid's row read as torn on every
+attempt; red control D in `tests/test_preseed_startup_live.py` uses it.
+
+When the one-shot wait-address refresh yields no shared address, the daemon
+logs at most one line per second, `WARN: preseed wait-address refresh not
+shared:`, with the pid, the pointer the resolver returned, the errno of that
+read, the `pgwt_addr_is_shared` result (`none` when the pointer is 0) and
+whether the value lies in the validated shared mapping range. The line only
+observes the denial; it does not change it.
+
+`tests/test_preseed_startup_live.py` holds a PG17 startup backend on the
+`pg_database` lock. Its TEST ONLY environment hooks are default off:
+`PGWT_TEST_SKIP_SAMPLER_WAIT_ADDR` prevents sampler resolution of zero-address
+backends (logging each skipped PID), while
+`PGWT_TEST_SKIP_PRESEED_WAIT_ADDR_REFRESH` disables the one-shot refresh for
+the matching rollback control. Both activate only when set. The test checks
+refresh counters, query-less startup wait duration and first-statement
+attribution, retaining failed-attribution and skipped-wait-seed controls.
+
+PG13 clients also qualify when a coherent, complete row
+previously accepted by the sampler for that pid incarnation now names zero or
+another pid. The acceptance record contains the row address, pid, process start
+time and shared-memory generation; candidate addresses and computed hints do
+not qualify. The pinned stat start time must match before and after the proof
+read, and a fresh mapping check must confirm the same generation with recovery
+READY. A retirement observed first by the sampler survives address invalidation
+under those same checks; reset, generation change or recovery outside READY
+clears the record. `exact_preseed_retired_zero_total` and
+`exact_preseed_retired_other_pid_total` separate the two outcomes (a rising
+other-pid count can reveal a wrong-address problem). These proofs also cover a
+FATAL during a command without a close edge. Proof classes and the generation's
+backend count are reported beside `exact_preseed_entries`; other failures remain counted
+rollbacks, including PG13 startup without proof. For a proof-seeded backend, a command
+open at the boundary that closes before the seed read has that slice attributed
+to no query, bounded by seed-loop latency; `exact_preseed_no_command_total`
+counts backend proof-seeding attempts, including attempts in escalations that
+later roll back, not an estimate of the lost duration. The lifetime proof-class
+counters include those attempts too. Coverage for
+backends without an exact wait stream during a window is tracked in #934. Late
+attach refuses an incoherent seed instead of overwriting a coherent seed from
+the same generation, and reports the refusal and failed attach seed counts.

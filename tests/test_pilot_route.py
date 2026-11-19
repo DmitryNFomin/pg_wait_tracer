@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -571,8 +572,11 @@ def mutants(build, tmp, data, expected):
     # Browser-side lossy parsing is independently killed by both the input and
     # output UINT64_MAX identity assertions from the committed node test.
     root = tmp / 'node-mutant'
-    for relative in ('web/static/lib/builders/pilot-evidence.js', 'web/static/lib/format.js',
-                     'tests/web_unit/pilot-evidence.test.mjs', 'tests/fixtures/pilot-responses.json'):
+    # The whole module tree, not a list of files: the builder's import graph
+    # grows (panels.js, fidelity.js, control.js) and a missing module would
+    # fail the run before the mutant line is reached.
+    shutil.copytree(ROOT / 'web/static/lib', root / 'web/static/lib')
+    for relative in ('tests/web_unit/pilot-evidence.test.mjs', 'tests/fixtures/pilot-responses.json'):
         dest = root / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text((ROOT / relative).read_text())

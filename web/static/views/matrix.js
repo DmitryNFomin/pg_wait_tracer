@@ -5,7 +5,10 @@ import {
     matrixChartFitHeight, MATRIX_CHART_NATURAL_PX, MATRIX_CHART_MIN_PX,
 } from '../lib/builders/matrix.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
-import { mountUnavailablePanel } from '../lib/panels.js';
+import {
+    mountUnavailablePanel, buildCoverageNotice, coverageNoticeHtml,
+    buildCoverageBadge, paneFidelityBadgeHtml,
+} from '../lib/panels.js';
 
 export function createMatrixView() {
     let chart = null, ctxRef = null, prevLabels = null, labelsRef = null;
@@ -26,6 +29,7 @@ export function createMatrixView() {
             '<div class="matrix-shell">' +
             ' <div class="view-title">Transition matrix <span>cell color is log-scaled count; ' +
             'label color is event identity</span></div>' +
+            ' <div id="matrix-coverage"></div>' +
             ' <div id="matrix-cpu-note" class="panel-caption"></div>' +
             ' <div id="matrix-chart"></div>' +
             ' <div id="matrix-notes" class="chart-notes"></div>' +
@@ -62,6 +66,9 @@ export function createMatrixView() {
             });
         },
         build(data) {
+            // U3: an incomplete coverage verdict withholds the whole view.
+            const notice = buildCoverageNotice(data);
+            if (notice) return { coverageNotice: notice };
             if (isUnavailable(data)) return { unavailable: data };
             // Row/column order is held across ticks (STABILITY, #104): pass
             // last tick's label order back in so unchanged events don't
@@ -69,11 +76,18 @@ export function createMatrixView() {
             // from rank order again.
             const model = buildMatrixOption(data, { limit: 20, prevLabels });
             if (model.hasData) prevLabels = model.labels;
+            // U3: complete / live_edge — the cells stay, their marks ride along.
+            model.coverageBadge = buildCoverageBadge(data);
             return model;
         },
         mount(el, model, ctx) {
             ctxRef = ctx; labelsRef = model.labels;
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
+            if (model.coverageNotice) {
+                disposeChart();
+                el.innerHTML = coverageNoticeHtml(model.coverageNotice);
+                return;
+            }
             if (model.unavailable) {
                 disposeChart();
                 mountUnavailablePanel(el, model.unavailable, ctx);
@@ -81,10 +95,13 @@ export function createMatrixView() {
             }
             if (!model.hasData) {
                 disposeChart();
-                el.innerHTML = '<div class="loading">No transitions found</div>';
+                el.innerHTML = paneFidelityBadgeHtml(model.coverageBadge) +
+                    '<div class="loading">No transitions found</div>';
                 return;
             }
             ensureShell(el);
+            document.getElementById('matrix-coverage').innerHTML =
+                paneFidelityBadgeHtml(model.coverageBadge);
             document.getElementById('matrix-cpu-note').textContent = model.cpuNote || '';
             document.getElementById('matrix-notes').textContent = model.notes.join(' · ');
             const host = document.getElementById('matrix-chart');
