@@ -214,6 +214,9 @@ run python3 scripts/lead/selftest-pr-state.py
 step "box build provenance offline self-test (#861)"
 run bash tests/test_box_check_build_provenance.sh
 
+step "detached box-check transport recovery offline self-test"
+run bash tests/test_box_check_detached.sh
+
 step "lead hooks and box evidence offline self-test (#861)"
 run bash scripts/lead/selftest.sh
 

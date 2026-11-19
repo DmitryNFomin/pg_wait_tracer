@@ -22,13 +22,25 @@ def guard(root):
         'shared keepalive definition missing or changed'
     calls = 0
     for name, text in texts.items():
-        # Join shell continuations before tokenizing; comments and quoted
-        # remote command strings are not local SSH invocations.
+        # Join continuations and accumulate quoted multiline arguments before
+        # tokenizing. Python -c programs and remote commands can span lines;
+        # neither their contents nor comments are local SSH invocations.
         logical = text.replace('\\\n', '')
+        try:
+            logical_tokens = shlex.split(logical, comments=True)
+        except ValueError as error:
+            raise AssertionError(f'{name}: unterminated shell quotation: {error}') from error
+        pending = ''
         for number, line in enumerate(logical.splitlines(), 1):
-            lexer = shlex.shlex(line, posix=True, punctuation_chars='();|&<>')
+            pending += line
+            lexer = shlex.shlex(pending, posix=True, punctuation_chars='();|&<>')
             lexer.whitespace_split = True
-            tokens = list(lexer)
+            try:
+                tokens = list(lexer)
+            except ValueError:
+                pending += '\n'
+                continue
+            pending = ''
             for token in tokens:
                 if token.startswith('rsync_e='):
                     assert token.startswith('rsync_e=ssh ${ssh_keepalive[*]}'), \
@@ -51,8 +63,9 @@ def guard(root):
                     assert (transport.startswith('ssh ${ssh_keepalive[*]}') or
                             transport in ('$rsync_e', '${rsync_e}') and
                             'rsync_e=ssh ${ssh_keepalive[*]}' in
-                            shlex.split(logical, comments=True)), \
+                            logical_tokens), \
                         f'{name}:{number}: rsync transport lacks shared keepalive'
+        assert not pending, f'{name}: unterminated shell quotation'
     assert calls > 0, 'no transport invocations inspected'
     return calls
 
@@ -103,4 +116,26 @@ with tempfile.TemporaryDirectory(prefix='pgwt-ssh-static-') as temp:
                 sys.exit(f'FAIL: unprotected {call} in {name} survived')
         path.write_text(saved)
     print('PASS: negative controls rejected new unprotected SSH/rsync in both scripts')
+    path = mutant / 'scripts/box-check.sh'
+    # A multiline quoted program must remain opaque, while the following
+    # local call must still be checked by the same guard.
+    multiline = "\npython3 -c 'print(\"ssh fixture true\")\nprint(\"rsync -e ssh\")'\n"
+    path.write_text(original + multiline)
+    guard(mutant)
+    for call in ('ssh fixture true', 'rsync -az -e ssh ./ fixture:/tmp/'):
+        path.write_text(original + multiline + call + '\n')
+        try:
+            guard(mutant)
+        except AssertionError as error:
+            assert 'lacks shared keepalive' in str(error), str(error)
+        else:
+            sys.exit(f'FAIL: unprotected {call} after multiline quote survived')
+    path.write_text(original + "\npython3 -c 'unfinished\n")
+    try:
+        guard(mutant)
+    except AssertionError as error:
+        assert 'unterminated shell quotation' in str(error), str(error)
+    else:
+        sys.exit('FAIL: unterminated quotation survived')
+    print('PASS: multiline quoted arguments preserve transport checks and reject unterminated quotes')
 PY
