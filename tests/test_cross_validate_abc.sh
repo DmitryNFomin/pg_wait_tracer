@@ -246,8 +246,28 @@ EOF
 rc=0
 "$XVAL" "$TMP/equal" --raw-ns --show-idle --tolerance 100 > "$TMP/plain.out" 2>&1 || rc=$?
 chk 'flag-off exit' "$rc" 0
-diff -u "$TMP/before.out" "$TMP/plain.out"
-chk 'flag-off bytes match previous binary' yes yes
+# Compare the frozen pre-change output after normalizing only the authorised
+# share/delta precision change. Keep the independent numbers above untouched.
+python3 - "$TMP/plain.out" > "$TMP/plain-display-compat.out" <<'PYCOMPAT'
+from pathlib import Path
+import re
+import sys
+
+in_table = False
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if line.startswith("wait_event "):
+        in_table = True
+    elif in_table and not line:
+        in_table = False
+    elif in_table and not line.startswith("--"):
+        event, exact, sampled, delta = line.split()
+        line = f"{event:<28} {float(exact[:-1]):11.1f}% {float(sampled[:-1]):11.1f}% {float(delta):9.1f}"
+    elif line.startswith("Max share disagreement"):
+        line = re.sub(r": ([0-9.]+) pp", lambda m: f": {float(m[1]):.1f} pp", line)
+    print(line)
+PYCOMPAT
+diff -u "$TMP/before.out" "$TMP/plain-display-compat.out"
+chk 'flag-off matches previous binary except authorised output precision' yes yes
 chk 'flag-off has no ABC lines' "$(awk '/ABC/{n++} END{print n+0}' "$TMP/plain.out")" 0
 run "$TMP/equal" "$TMP/opt-in.out" 0 --raw-ns --show-idle
 sed '/^=== ABC ===/,$d' "$TMP/opt-in.out" > "$TMP/stripped.out"

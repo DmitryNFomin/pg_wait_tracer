@@ -715,7 +715,8 @@ int main(int argc, char **argv)
         double ex = 100.0 * list[i].exact_ns / total_exact_ns;
         double sm = 100.0 * list[i].sampled_ns / total_sampled_ns;
         double d = ex - sm; if (d < 0) d = -d;
-        printf("%-28s %11.1f%% %11.1f%% %9.1f\n",
+        /* Round-trip shares let consumers reproduce the unrounded decision. */
+        printf("%-28s %11.17g%% %11.17g%% %9.2f\n",
                pgwt_event_name(list[i].event_id), ex, sm, d);
         /* only hold significant events to the tolerance */
         if (ex >= min_share && d > max_delta) {
@@ -747,7 +748,7 @@ int main(int argc, char **argv)
     printf("\nSamples in window: %d\n", n_samples);
     printf("Top-%d event overlap: %d/%d\n", top, overlap, top);
     printf("Max share disagreement (events >= %.0f%% exact share): "
-           "%.1f pp (%s)\n", min_share, max_delta,
+           "%.2f pp (%s)\n", min_share, max_delta,
            max_delta_ev[0] ? max_delta_ev : "n/a");
     printf("Tolerance: +/- %.1f pp\n", tolerance);
 

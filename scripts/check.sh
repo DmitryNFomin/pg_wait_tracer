@@ -489,6 +489,9 @@ run bash tests/test_classify_changed_files.sh
 step "cross-validate rate-sweep gate unit tests (issue #309)"
 run bash tests/test_cross_validate_rate_gate.sh
 
+step "cross-validate workload validity and rounding controls (Refs #968, Refs #675)"
+run python3 -B tests/test_cross_validate_validity.py
+
 step "cross-validate tolerance derivation + bypass suite (issues #294/#306/#321)"
 run bash tests/test_xval_tolerance_derivation.sh
 
