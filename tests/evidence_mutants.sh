@@ -6,6 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 exec python3 -B - "$@" <<'PY'
 import importlib.util
+import hashlib
+import json
 import contextlib
 import io
 from pathlib import Path
@@ -428,10 +430,14 @@ def main():
         binary = base / "contract-test"
         diff.build(base, binary)
         status, output, valid = contract(binary)
+        print("EVIDENCE BASELINE BEGIN", flush=True)
+        print(output, end="", flush=True)
+        print("EVIDENCE BASELINE END", flush=True)
         if status != 0 or not valid:
-            raise RuntimeError("baseline contract failed:\n" + output)
+            raise RuntimeError("baseline contract failed; see per-id output above")
         corpus = diff.prepare_corpus(work)
-        if diff.differential(binary, work, corpus=corpus):
+        if diff.differential(binary, work, corpus=corpus,
+                             status_ids={m[3] for m in mutants + differential_mutants + guard_mutants}):
             raise RuntimeError("baseline differential failed")
         failed = False
         all_mutants = guard_mutants if sweep else mutants + differential_mutants + guard_mutants
@@ -447,9 +453,13 @@ def main():
                 raise RuntimeError(f"{name} needs exactly one mutation site")
             line = text[:text.index(old)].count("\n") + 1
             source.write_text(text.replace(old, new, 1))
+            dh = hashlib.sha256(json.dumps([name, old, new, case, field], separators=(",", ":")).encode()).hexdigest()
+            intended_proof = ("diff:" if name in differential_names else "case:") + case
             executable = directory / "contract-test"
             try:
                 diff.build(directory, executable)
+                sh = hashlib.sha256(source.read_bytes()).hexdigest()
+                binding = f" definition-sha256={dh} source-sha256={sh} intended-proof={intended_proof}"
                 if sweep or name in equivalent_deletions:
                     cs, co, cv = contract(executable)
                     ds, do, dv = full_differential(executable, directory, corpus)
@@ -459,7 +469,7 @@ def main():
                         equivalent = cs == 0 and ds == 0
                         print(f"{name} | {line} | contract={cs} differential={ds} | "
                               f"{'SURVIVED (cannot change an answer)' if equivalent else 'EQUIVALENCE DISPROVED'}: "
-                              f"{equivalent_deletions[name]}", flush=True)
+                              f"{equivalent_deletions[name]}{binding}", flush=True)
                         if not equivalent: failed = True
                         continue
                     if name in contract_guards:
@@ -491,7 +501,7 @@ def main():
                 continue
             if status == 1 and valid and intended:
                 extra = "; both result objects unchanged" if name == "E8_shift_coverage" else ""
-                print(f"{name} KILLED ({case}, {intended[1]}, build OK{extra})", flush=True)
+                print(f"{name} KILLED ({case}, {intended[1]}, build OK{extra}){binding}", flush=True)
             else:
                 print(f"{name} SURVIVED/ERROR (exit {status}; intended comparison not proven)\n{output}", flush=True)
                 failed = True

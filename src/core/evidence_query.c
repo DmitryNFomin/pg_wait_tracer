@@ -6,10 +6,13 @@
 static bool equal(pgwt_core_event a, pgwt_core_event b)
 { return a.length == b.length && (!a.length || !memcmp(a.data,b.data,a.length)); }
 
-static bool legacy(pgwt_evidence_buffer b)
+static bool trace_container(pgwt_evidence_buffer b)
 {
-    return b.size >= 6 && !memcmp(b.data,"PGWT",4) && b.data[5] == 0 &&
-        b.data[4] >= 2 && b.data[4] <= 4;
+    if (b.size < 6 || memcmp(b.data,"PGWT",4) || b.data[5] != 0) return false;
+    switch (b.data[4]) {
+    case 2: case 3: case 4: case 6: return true;
+    default: return false;
+    }
 }
 
 int pgwt_evidence_query(const pgwt_evidence_buffer *buffers, size_t n,
@@ -30,7 +33,7 @@ int pgwt_evidence_query(const pgwt_evidence_buffer *buffers, size_t n,
     size_t count = 0;
     for (size_t i=0;i<n;++i) {
         if (buffers[i].size && !buffers[i].data) return -1;
-        if (!legacy(buffers[i])) v5[count++] = (pgwt_codec_buffer){buffers[i].data,buffers[i].size};
+        if (!trace_container(buffers[i])) v5[count++] = (pgwt_codec_buffer){buffers[i].data,buffers[i].size};
     }
     if (target->invalid) {
         pgwt_core_prepared prepared;
@@ -46,19 +49,30 @@ int pgwt_evidence_query(const pgwt_evidence_buffer *buffers, size_t n,
         if (reason) *reason = "evidence decode failed";
         return -1;
     }
-    storage->codec_failed = decoded.failed;
-    if (decoded.stop_count > PGWT_PILOT_MAX_FILES) {
-        if (reason) *reason = "pilot storage stop limit exceeded";
-        pgwt_codec_decoded_free(&decoded);
-        return -1;
+    /* Invalid headers are unassigned diagnostics, not normalized codec stops.
+     * Surface them here without changing the codec's reconciliation rules. */
+    for (size_t pass=0;pass<2;++pass) {
+        size_t stop_count = pass ? decoded.diagnostic_count : decoded.stop_count;
+        for (size_t i=0;i<stop_count;++i) {
+            const pgwt_codec_stop *s = pass ? &decoded.diagnostics[i] : &decoded.stops[i];
+            if (pass && s->group != SIZE_MAX) continue;
+            if (storage->codec_stop_count == PGWT_PILOT_MAX_FILES) {
+                if (reason) *reason = "pilot storage stop limit exceeded";
+                pgwt_codec_decoded_free(&decoded);
+                return -1;
+            }
+            /* Codec indices name sorted, deduplicated deliveries. Map back to
+             * the caller's files, including trace containers filtered above. */
+            const pgwt_codec_buffer *b = &decoded.deliveries[s->input_file].bytes;
+            size_t file=0;
+            while (file<n && (buffers[file].data!=b->data || buffers[file].size!=b->size)) ++file;
+            storage->codec_stops[storage->codec_stop_count++] = (pgwt_query_stop){.file=file,
+                .block_offset=s->block_offset,.record_offset=s->record_offset,
+                .has_record_offset=s->has_record_offset,.reason=pgwt_codec_code_name(s->code)};
+        }
     }
-    storage->codec_stop_count = decoded.stop_count;
-    for (size_t i=0;i<decoded.stop_count;++i) {
-        const pgwt_codec_stop *s = &decoded.stops[i];
-        storage->codec_stops[i] = (pgwt_query_stop){.file=s->input_file,
-            .block_offset=s->block_offset,.record_offset=s->record_offset,
-            .has_record_offset=s->has_record_offset,.reason=pgwt_codec_code_name(s->code)};
-    }
+    /* Capture ambiguity and replay stops have their own storage fields. */
+    storage->codec_failed = storage->codec_stop_count != 0;
     for (size_t i=0;i<decoded.capture_count;++i) {
         const pgwt_codec_capture *c = &decoded.captures[i];
         if (!equal(c->capture,target->capture)) continue;
