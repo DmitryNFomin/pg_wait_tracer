@@ -553,6 +553,81 @@ static void test_counter_gaps(void)
     rm_rf(dir2);
 }
 
+/* Exercise the SAME collection sequence as the daemon, with an actual
+ * daemon-side loss during drain. A post-drain counter read would consume it
+ * at tick k and close its only gap BEFORE the loss. */
+struct drain_loss {
+    struct pgwt_counter_vector cv;
+    uint64_t now, lost_at;
+    bool inject;
+};
+static struct pgwt_counter_vector loss_counters(void *ctx)
+{
+    return ((struct drain_loss *)ctx)->cv;
+}
+static uint64_t loss_clock(void *ctx)
+{
+    return ((struct drain_loss *)ctx)->now;
+}
+static void loss_drain_publish(void *ctx, struct pgwt_cov_tick_in *in)
+{
+    struct drain_loss *d = ctx;
+    if (d->inject) {
+        d->lost_at = d->now + MS;
+        d->cv.components[PGWT_C_WRITER_PUSH_FAIL].value++;
+        d->inject = false;
+    }
+    d->now += 2 * MS;
+    in->drain_complete = in->publish_ok = true;
+}
+static void test_loss_during_drain(void)
+{
+    char dir[] = "/tmp/pgwt_cov_drain_loss_XXXXXX";
+    if (make_dir(dir) != 0) { failures++; return; }
+    struct pgwt_event_writer w;
+    CHECK(pgwt_writer_init(&w, dir, 17, 24, NULL) == 0, "init");
+    pgwt_writer_coverage_configure(&w, BASE, 0, 0);
+    struct drain_loss d = { .cv = cv_with(0) };
+    struct pgwt_cov_tracker t;
+    pgwt_cov_tracker_init(&t, BASE, true, &d.cv);
+    const struct pgwt_cov_tick_ops ops = {
+        loss_counters, loss_clock, loss_drain_publish,
+    };
+    for (int k = 1; k <= 6; k++) {
+        d.now = BASE + k * SEC;
+        d.inject = k == 3;
+        struct pgwt_cov_tick_in in = {0};
+        struct pgwt_counter_vector cv;
+        pgwt_cov_collect_tick(&in, &cv, &d, &ops);
+        CHECK(pgwt_cov_tracker_tick(&t, &w, &in) == 0, "tick %d", k);
+    }
+    pgwt_writer_close(&w);
+    pgwt_writer_destroy(&w);
+    char path[600];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    struct covlist all;
+    CHECK(read_cov(path, &all) == 0, "read");
+    uint64_t start = 0, end = 0, id = 0;
+    int pairs = 0;
+    for (int i = 0; i < all.n; i++) {
+        struct pgwt_coverage_record *r = &all.rec[i];
+        if (r->kind == PGWT_COVK_GAP_OPEN && r->reason == PGWT_COVR_DROP) {
+            start = r->a;
+            id = r->c;
+        }
+        if (r->kind == PGWT_COVK_GAP_CLOSE && r->c == id) {
+            end = r->a;
+            pairs++;
+        }
+    }
+    CHECK(d.lost_at == BASE + 3 * SEC + MS, "stimulus during tick 3 drain");
+    CHECK(pairs == 1 && start <= d.lost_at && d.lost_at < end,
+          "writer_push_fail during drain is covered by a drop gap");
+    CHECK(end == BASE + 4 * SEC, "next tick detects loss and bounds its gap");
+    CHECK(t.w_ns > d.lost_at, "W later passes the loss, which remains gapped");
+    rm_rf(dir);
+}
+
 /* ── floors (C1) ──────────────────────────────────────────────────────── */
 
 static void test_floors(void)
@@ -952,6 +1027,7 @@ int main(void)
     test_boot_per_file();
     test_w_lags_one_tick_and_heartbeat();
     test_counter_gaps();
+    test_loss_during_drain();
     test_floors();
     test_seal_only_on_clean_close();
     test_v4_paths_skip_type3();

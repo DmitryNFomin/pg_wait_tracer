@@ -7,7 +7,7 @@ bump, any data path that met an unknown block either counted it as damage
 block was a TRANSITIONS block, e.g. src/server.c cov_scan_file adding an
 exact span at the block's write time).
 
-This test ENUMERATES the sites. A function in src/ that reads a block's type
+This test ENUMERATES the sites. A function in src/ or a trace tool in tests/ that reads a block's type
 or decodes / candidacy-tests / header-reads a trace block is a dispatch site.
 Each one must either name PGWT_BLOCK_COVERAGE itself, or be listed in
 COVERAGE_SAFE below with the reason it can never see a type-3 block. A NEW
@@ -22,6 +22,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
+TOOLS = os.path.join(ROOT, "tests")
 
 # Tokens that make a function a block-type dispatch site.
 DISPATCH = re.compile(
@@ -37,6 +38,12 @@ SKIP_FILES = {"coverage.c", "coverage.h", "coverage_record.h"}
 # function -> why it can never see a COVERAGE block. Keep each reason a
 # checkable fact about the code, not a hope.
 COVERAGE_SAFE = {
+    ("tests/cross_validate.c", "main"):
+        "ranges accept only TRANSITIONS/SAMPLES; decode <= 0 skips COVERAGE",
+    ("tests/dump_markers.c", "main"):
+        "decode <= 0 skips COVERAGE before examining records",
+    ("tests/wait_cpu_canary.c", "main"):
+        "decode <= 0 skips COVERAGE before examining records",
     ("event_writer.c", "write_typed_block"):
         "writes only the TRANSITIONS/SAMPLES blocks its callers pass",
     ("event_writer.c", "recover_current_trace"):
@@ -152,10 +159,16 @@ def main():
     sites = []
     failures = []
     seen_safe = set()
-    for fname in sorted(os.listdir(SRC)):
+    # Unit fixtures intentionally construct malformed blocks; guard production
+    # consumers plus all top-level C tools (including future tools), rather
+    # than requiring those fixtures to skip what they are testing.
+    files = [(fname, os.path.join(SRC, fname)) for fname in os.listdir(SRC)]
+    files += [("tests/" + fname, os.path.join(TOOLS, fname))
+              for fname in os.listdir(TOOLS) if not fname.startswith("test_")]
+    for fname, path in sorted(files):
         if not fname.endswith((".c", ".h")) or fname in SKIP_FILES:
             continue
-        text = open(os.path.join(SRC, fname), encoding="utf-8").read()
+        text = open(path, encoding="utf-8").read()
         for func, body in functions(text):
             code = strip_comments(body)
             if not DISPATCH.search(code):
@@ -186,7 +199,8 @@ def main():
             ("event_reader.c", "pgwt_reader_block_candidate"),
             ("event_reader.c", "pgwt_reader_file_span"),
             ("block_agg.c", "pgwt_block_agg_window_from_reader"),
-            ("replay_accum.c", "pgwt_replay_file")]
+            ("replay_accum.c", "pgwt_replay_file"),
+            ("tests/wait_cpu_scan.c", "main")]
     for key in must:
         if key not in sites:
             failures.append("expected dispatch site %s:%s not found: the "

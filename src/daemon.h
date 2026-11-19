@@ -482,8 +482,10 @@ struct pgwt_daemon {
      * calloc'd, and fd 0 is not "no timer". */
     struct pgwt_cov_tracker coverage;
     bool     coverage_started;
+    bool     coverage_clean_shutdown; /* set only after a successful run */
     bool     coverage_timer_armed;
     int      coverage_timer_fd;
+    struct pgwt_counter_vector final_drain_counters;
     uint64_t final_drain_from_ns;   /* mono, before the run loop's final drain */
 
     /* PGWT_DEBUG_DUMP_STATE main-loop liveness probe. These fields are read

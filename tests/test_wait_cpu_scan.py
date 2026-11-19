@@ -35,6 +35,8 @@ import subprocess
 import sys
 import tempfile
 
+from test_data_coverage_skip import splice
+
 HERE = os.path.dirname(os.path.abspath(__file__))          # tests/
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 EVIDENCE = os.path.join(HERE, "results", "issue25-perclass-raw-scan")
@@ -121,6 +123,20 @@ def main():
               any(c["name"] == "Timeout:PgSleep" and c["max_cpu_ns"] == 30000
                   for c in data["classes"]) if data else False,
               "per-class max cpu_ns missing")
+
+        # Coverage records are metadata: they have num_events=1 but decode
+        # to no wait records. A v6 capture must retain the same census.
+        def class_totals(result):
+            keys = ("name", "count", "measured", "sum_duration_ns", "sum_cpu_ns", "max_cpu_ns")
+            return [tuple(row[key] for key in keys) for row in result["classes"]]
+
+        plain_classes = class_totals(data)
+        added = splice(os.path.join(d, "current.trace"), 5000 * 1000000000)
+        rc, covered = scan(d, expect_transitions=n)
+        check("v6_coverage_blocks_are_not_short_data_blocks",
+              added > 0 and rc == 0 and covered["verdict"] == "CLEAN"
+              and class_totals(covered) == plain_classes,
+              f"rc={rc} refusals={covered and covered['refusals']}")
 
         # --- true positive: a stale wait label books most of a 2 ms sleep's
         # wall time as CPU -- 1.2 ms of 2 ms = 60%, so BOTH halves of the §3

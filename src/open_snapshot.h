@@ -434,8 +434,8 @@ void pgwt_collect_open_intervals(struct pgwt_daemon *d,
 /* ── #947 coverage watermark, master path (trace v6, spec r2 §1) ─────────
  *
  * Every 1 s coverage tick the daemon (1) reads the state map and folds the
- * two FLOORS, (2) takes publish_from, drains the event ring (bounded) and
- * publishes the writer, (3) reads the capture counter vector, and hands the
+ * two FLOORS, (2) reads the capture counter vector BEFORE publish_from,
+ * (3) drains the event ring (bounded) and publishes the writer, and hands the
  * results to the tracker, which decides what to write. The tracker and the
  * floor fold are PURE (no BPF, no daemon): tests/test_coverage_writer.c
  * drives them against the real writer on any host.
@@ -488,6 +488,18 @@ struct pgwt_cov_tick_in {
     const struct pgwt_counter_vector *cv;   /* NULL = unreadable */
 };
 
+/* The ordering seam used by the daemon and the host regression: a counter
+ * increment during drain/publish belongs to the NEXT tick's gap, whose end
+ * is later than that increment. Floors are filled before this call. */
+struct pgwt_cov_tick_ops {
+    struct pgwt_counter_vector (*counters)(void *ctx);
+    uint64_t (*clock)(void *ctx);
+    void (*drain_publish)(void *ctx, struct pgwt_cov_tick_in *in);
+};
+void pgwt_cov_collect_tick(struct pgwt_cov_tick_in *in,
+                           struct pgwt_counter_vector *cv, void *ctx,
+                           const struct pgwt_cov_tick_ops *ops);
+
 struct pgwt_cov_tracker {
     bool     watermarks;         /* false (lightweight, exact_perf): SEAL only */
     uint64_t boot_start_ns;
@@ -525,7 +537,8 @@ int  pgwt_cov_tracker_seal(struct pgwt_cov_tracker *t,
                            const struct pgwt_cov_tick_in *in);
 
 /* Daemon side (src/open_snapshot.c, Linux build only). */
-void pgwt_coverage_start(struct pgwt_daemon *d);
+void pgwt_coverage_start(struct pgwt_daemon *d,
+                          const struct pgwt_counter_vector *base);
 void pgwt_coverage_tick(struct pgwt_daemon *d);
 void pgwt_coverage_shutdown(struct pgwt_daemon *d);
 

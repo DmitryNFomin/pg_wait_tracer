@@ -1121,3 +1121,6 @@ test_block_type_sites.py
 # Stateless evidence-v1 fixture-to-screen pilot and consumer boundary.
 test_pilot_route.py
 test_consumer_boundary.sh
+
+# Coverage live-gate logic: BPF-free host controls for the box test.
+test_coverage_live_helpers.py

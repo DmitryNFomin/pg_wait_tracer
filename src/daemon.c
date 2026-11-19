@@ -1753,6 +1753,8 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     ev.data.fd = d->signal_fd;
     epoll_ctl(d->epoll_fd, EPOLL_CTL_ADD, d->signal_fd, &ev);
 
+    /* Baseline first: no loss after boot_start may be silently absorbed. */
+    struct pgwt_counter_vector coverage_base = pgwt_daemon_counter_vector(d);
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     d->start_ts = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
@@ -1764,8 +1766,9 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
      * second on the master path (not lightweight, not exact_perf). */
     d->coverage_timer_armed = false;
     d->coverage_started = false;
+    d->coverage_clean_shutdown = false;
     if (d->event_writer) {
-        pgwt_coverage_start(d);
+        pgwt_coverage_start(d, &coverage_base);
         if (d->coverage.watermarks) {
             int cfd = timerfd_create(CLOCK_MONOTONIC,
                                      TFD_CLOEXEC | TFD_NONBLOCK);
@@ -1951,6 +1954,7 @@ static void dispatch_ready_fd(struct pgwt_daemon *d, int fd,
 int pgwt_daemon_run(struct pgwt_daemon *d)
 {
     struct epoll_event events[8];
+    int result = 0;
     int rb_fd = d->exact_perf ? pgwt_percpu_transport_epoll_fd(d)
                               : ring_buffer__epoll_fd(d->rb);
     int event_rb_fd = d->event_rb ? ring_buffer__epoll_fd(d->event_rb) : -1;
@@ -2003,6 +2007,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
                 continue;
             }
             perror("epoll_wait");
+            result = -1;
             break;
         }
 
@@ -2031,7 +2036,8 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         }
     }
 
-    /* #947: the shutdown SEAL vouches for what this final drain reaches. */
+    /* Counter baseline BEFORE the final-drain boundary, as on every tick. */
+    d->final_drain_counters = pgwt_daemon_counter_vector(d);
     {
         struct timespec fts;
         clock_gettime(CLOCK_MONOTONIC, &fts);
@@ -2050,7 +2056,8 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
 
     if (d->exit_reason != PGWT_EXIT_PG_DEAD)
         fprintf(stderr, "\npg_wait_tracer: shutting down\n");
-    return 0;
+    d->coverage_clean_shutdown = result == 0;
+    return result;
 }
 
 /* PGWT_DEBUG_DUMP_STATE (DEBUG ONLY): dump the final BPF state_map to stderr
@@ -2246,7 +2253,8 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
     if (d->event_writer) {
         /* #947: SEAL on this, the clean-shutdown path, only. A SIGKILL or a
          * crash never reaches it, and the missing SEAL is what says so. */
-        pgwt_coverage_shutdown(d);
+        if (d->coverage_clean_shutdown)
+            pgwt_coverage_shutdown(d);
         pgwt_writer_close(d->event_writer);
         pgwt_writer_destroy(d->event_writer);
         free(d->event_writer);

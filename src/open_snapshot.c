@@ -323,6 +323,17 @@ pgwt_cov_cv_compare(const struct pgwt_counter_vector *base,
     return PGWT_COV_CV_UNCHANGED;
 }
 
+void pgwt_cov_collect_tick(struct pgwt_cov_tick_in *in,
+                           struct pgwt_counter_vector *cv, void *ctx,
+                           const struct pgwt_cov_tick_ops *ops)
+{
+    *cv = ops->counters(ctx);
+    in->cv = cv;
+    in->publish_from_ns = ops->clock(ctx);
+    ops->drain_publish(ctx, in);
+    in->observation_ns = ops->clock(ctx);
+}
+
 void pgwt_cov_tracker_init(struct pgwt_cov_tracker *t, uint64_t boot_start_ns,
                            bool watermarks,
                            const struct pgwt_counter_vector *base)
@@ -553,7 +564,8 @@ static uint64_t cov_postmaster_start_wall_ns(pid_t pid)
          + (uint64_t)start_ticks * (1000000000ULL / (uint64_t)hz);
 }
 
-void pgwt_coverage_start(struct pgwt_daemon *d)
+void pgwt_coverage_start(struct pgwt_daemon *d,
+                          const struct pgwt_counter_vector *base)
 {
     if (!d->event_writer)
         return;
@@ -578,8 +590,7 @@ void pgwt_coverage_start(struct pgwt_daemon *d)
         pgwt_writer_coverage_configure(w, d->start_ts,
             cov_postmaster_start_wall_ns(d->postmaster_pid), mode);
     }
-    struct pgwt_counter_vector base = pgwt_daemon_counter_vector(d);
-    pgwt_cov_tracker_init(&d->coverage, d->start_ts, watermarks, &base);
+    pgwt_cov_tracker_init(&d->coverage, d->start_ts, watermarks, base);
     d->coverage_started = true;
 }
 
@@ -603,18 +614,48 @@ static bool cov_test_force_yield(void)
     return v == 1;
 }
 
-/* Inputs common to a tick and to the shutdown seal. `drain` false: the
- * caller already drained to completion (the shutdown path). */
+static struct pgwt_counter_vector cov_read_counters(void *ctx)
+{
+    return pgwt_daemon_counter_vector(ctx);
+}
+
+static uint64_t cov_clock(void *ctx)
+{
+    (void)ctx;
+    return now_ns();
+}
+
+static void cov_drain_publish(void *ctx, struct pgwt_cov_tick_in *in)
+{
+    struct pgwt_daemon *d = ctx;
+    in->drain_complete = true;
+    uint64_t drain_cpu0 = cov_thread_cpu_ns();
+    if (d->event_rb) {
+        d->event_drain_callbacks_current = 0;
+        d->event_drain_callback_limit = PGWT_OPEN_SNAPSHOT_DRAIN_BUDGET;
+        int rc = pgwt_consume_event_ring(d, true);
+        bool yielded = d->event_drain_callbacks_current
+                       >= PGWT_OPEN_SNAPSHOT_DRAIN_BUDGET && rc < 0;
+        d->event_drain_callback_limit = 0;
+        in->drain_complete = !yielded;
+    }
+    d->coverage.drain_cpu_ns += cov_thread_cpu_ns() - drain_cpu0;
+    if (cov_test_force_yield())
+        in->drain_complete = false;
+    /* A publish with nothing appended since the last one writes nothing:
+     * the writer's buffers are empty and both flushes return at once. */
+    in->publish_ok = pgwt_writer_publish(d->event_writer) == 0;
+}
+
 static void cov_gather(struct pgwt_daemon *d, struct pgwt_cov_tick_in *in,
-                       struct pgwt_counter_vector *cv, bool drain,
-                       uint64_t publish_from)
+                       struct pgwt_counter_vector *cv)
 {
     memset(in, 0, sizeof(*in));
     in->floors_known = false;
     bool wp = pgwt_mode_uses_watchpoints(d);
     int state_fd = (wp && d->skel)
                  ? bpf_map__fd(d->skel->maps.state_map) : -1;
-    if (wp && drain) {
+    if (wp) {
         /* Floors FIRST, then the drain (open_snapshot order): a wait open at
          * the snapshot started at or after its floor. */
         struct pgwt_cov_floors f;
@@ -637,27 +678,12 @@ static void cov_gather(struct pgwt_daemon *d, struct pgwt_cov_tick_in *in,
         in->floor_db_ns = f.floor_db_ns;
         in->floor_idle_ns = f.floor_idle_ns;
     }
-    in->publish_from_ns = drain ? now_ns() : publish_from;
-    in->drain_complete = true;
-    uint64_t drain_cpu0 = cov_thread_cpu_ns();
-    if (drain && d->event_rb) {
-        d->event_drain_callbacks_current = 0;
-        d->event_drain_callback_limit = PGWT_OPEN_SNAPSHOT_DRAIN_BUDGET;
-        int rc = pgwt_consume_event_ring(d, true);
-        bool yielded = d->event_drain_callbacks_current
-                       >= PGWT_OPEN_SNAPSHOT_DRAIN_BUDGET && rc < 0;
-        d->event_drain_callback_limit = 0;
-        in->drain_complete = !yielded;
-    }
-    d->coverage.drain_cpu_ns += cov_thread_cpu_ns() - drain_cpu0;
-    if (cov_test_force_yield())
-        in->drain_complete = false;
-    /* A publish with nothing appended since the last one writes nothing:
-     * the writer's buffers are empty and both flushes return at once. */
-    in->publish_ok = pgwt_writer_publish(d->event_writer) == 0;
-    *cv = pgwt_daemon_counter_vector(d);
-    in->cv = cv;
-    in->observation_ns = now_ns();
+    const struct pgwt_cov_tick_ops ops = {
+        .counters = cov_read_counters,
+        .clock = cov_clock,
+        .drain_publish = cov_drain_publish,
+    };
+    pgwt_cov_collect_tick(in, cv, d, &ops);
 }
 
 void pgwt_coverage_tick(struct pgwt_daemon *d)
@@ -672,7 +698,7 @@ void pgwt_coverage_tick(struct pgwt_daemon *d)
     uint64_t cpu0 = cov_thread_cpu_ns();
     struct pgwt_cov_tick_in in;
     struct pgwt_counter_vector cv;
-    cov_gather(d, &in, &cv, true, 0);
+    cov_gather(d, &in, &cv);
     pgwt_cov_tracker_tick(&d->coverage, d->event_writer, &in);
     d->coverage.tick_cpu_ns += cov_thread_cpu_ns() - cpu0;
 }
@@ -682,11 +708,18 @@ void pgwt_coverage_shutdown(struct pgwt_daemon *d)
     if (!d->coverage_started || !d->event_writer)
         return;
     d->coverage_started = false;
-    struct pgwt_cov_tick_in in;
-    struct pgwt_counter_vector cv;
+    struct pgwt_cov_tick_in in = {0};
     /* The run loop's final drain was unbounded and is complete; the
      * open-interval flush has already pushed its closing records. */
-    cov_gather(d, &in, &cv, false, d->final_drain_from_ns);
+    /* Frozen BEFORE final_drain_from, just as in a periodic tick. Taking a
+     * fresh baseline here would absorb losses during the final drain/flush
+     * into a gap ending before those losses. The conservative pending W
+     * leaves that tail uncovered. */
+    in.cv = &d->final_drain_counters;
+    in.publish_from_ns = d->final_drain_from_ns;
+    in.drain_complete = true;
+    in.publish_ok = pgwt_writer_publish(d->event_writer) == 0;
+    in.observation_ns = now_ns();
     if (pgwt_cov_tracker_seal(&d->coverage, d->event_writer, &in) != 0)
         fprintf(stderr, "WARN: coverage: the SEAL record was not written "
                 "durably — this run will read as stopped uncleanly\n");
