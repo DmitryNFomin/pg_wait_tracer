@@ -154,6 +154,7 @@ Any subsequent attachment interruption or destructive reseed is a counted covera
 REARM is accepted only while the epoch is suspended. Reject REARM in an active epoch without output or any state change, preserving staged DATA/TEXT, sequence state, boundaries and the counter baseline. (DECISION 28, added 2026-11-11 after the P1 review.)
 A rejected REARM returns a distinct `rearm_rejected` status to the caller and is never silent; its counter observation `C` is still processed as `CHECK(d,C)`. (DECISION 28a, lead, 2026-11-11, from Fable's challenge.)
 Recovery requires explicit REARM, a readable baseline, fresh qualified boundaries and fresh attachment proofs, including sequence initialization where applicable.
+DECISION 29 (owner-authorised saturation round, 2026-11-17): after a transient-capacity VOID, the daemon may issue the explicit REARM; nothing else in this contract changes.
 Lifecycle loss additionally requires repaired identity evidence. FRONTIER alone cannot revive attachments.
 The prototype exposes this reset; full consumer recovery remains deferred.
 An accepted REARM resets release cutoffs to 0 but preserves each source’s maximum accepted boundary for arrival validation, including while fresh qualified boundaries are pending. Retain earlier epochs’ published frontiers for invalidation. Late DATA violating a retained boundary faults the current epoch and additionally invalidates every earlier epoch whose published frontier it disproves. (DECISION 27, added 2026-11-11 after the P1 review.)
