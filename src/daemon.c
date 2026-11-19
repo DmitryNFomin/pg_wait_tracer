@@ -1758,6 +1758,37 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     d->start_ts = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
     d->running = true;
 
+    /* #947: the boot starts HERE, once the backend scan and the startup
+     * recovery passes have attached what they can, so a BOOT never vouches
+     * for a stretch the capture was not yet watching. One WATERMARK per
+     * second on the master path (not lightweight, not exact_perf). */
+    d->coverage_timer_armed = false;
+    d->coverage_started = false;
+    if (d->event_writer) {
+        pgwt_coverage_start(d);
+        if (d->coverage.watermarks) {
+            int cfd = timerfd_create(CLOCK_MONOTONIC,
+                                     TFD_CLOEXEC | TFD_NONBLOCK);
+            struct itimerspec cits = {
+                .it_interval = { .tv_sec = 1 },
+                .it_value    = { .tv_sec = 1 },
+            };
+            struct epoll_event cev = { .events = EPOLLIN, .data.fd = cfd };
+            if (cfd >= 0 && timerfd_settime(cfd, 0, &cits, NULL) == 0 &&
+                epoll_ctl(d->epoll_fd, EPOLL_CTL_ADD, cfd, &cev) == 0) {
+                d->coverage_timer_fd = cfd;
+                d->coverage_timer_armed = true;
+            } else {
+                fprintf(stderr, "WARN: coverage: no 1 s timer (%s); this "
+                        "run writes no coverage watermarks\n",
+                        strerror(errno));
+                if (cfd >= 0)
+                    close(cfd);
+                d->coverage.watermarks = false;
+            }
+        }
+    }
+
     /* Control socket at {trace_dir}/pgwt.sock (D4).
      * Failure is non-fatal (tracing must not depend on the control plane) —
      * EXCEPT a live-daemon conflict (ESC-10, rc == -2): another daemon already
@@ -1881,6 +1912,10 @@ static void dispatch_ready_fd(struct pgwt_daemon *d, int fd,
         started_ns = pgwt_debug_block_begin(d);
         pgwt_handle_timer(d);
         pgwt_debug_block_end(d, "timer_handler", 0, started_ns);
+    } else if (d->coverage_timer_armed && fd == d->coverage_timer_fd) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_coverage_tick(d);
+        pgwt_debug_block_end(d, "coverage_tick", 0, started_ns);
     } else if (d->sample_timer_fd >= 0
                && fd == d->sample_timer_fd) {
         started_ns = pgwt_debug_block_begin(d);
@@ -1996,6 +2031,13 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         }
     }
 
+    /* #947: the shutdown SEAL vouches for what this final drain reaches. */
+    {
+        struct timespec fts;
+        clock_gettime(CLOCK_MONOTONIC, &fts);
+        d->final_drain_from_ns = (uint64_t)fts.tv_sec * 1000000000ULL
+                               + (uint64_t)fts.tv_nsec;
+    }
     /* Drain remaining events before cleanup */
     if (d->event_rb || d->exact_perf) {
         consume_event_ring(d, "event_ring_final_drain", false);
@@ -2202,6 +2244,9 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
         d->summary_writer = NULL;
     }
     if (d->event_writer) {
+        /* #947: SEAL on this, the clean-shutdown path, only. A SIGKILL or a
+         * crash never reaches it, and the missing SEAL is what says so. */
+        pgwt_coverage_shutdown(d);
         pgwt_writer_close(d->event_writer);
         pgwt_writer_destroy(d->event_writer);
         free(d->event_writer);
@@ -2241,5 +2286,9 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
     if (d->epoll_fd >= 0) { close(d->epoll_fd); d->epoll_fd = -1; }
     if (d->timer_fd >= 0) { close(d->timer_fd); d->timer_fd = -1; }
     if (d->sample_timer_fd >= 0) { close(d->sample_timer_fd); d->sample_timer_fd = -1; }
+    if (d->coverage_timer_armed) {
+        close(d->coverage_timer_fd);
+        d->coverage_timer_armed = false;
+    }
     if (d->signal_fd >= 0) { close(d->signal_fd); d->signal_fd = -1; }
 }

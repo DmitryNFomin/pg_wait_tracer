@@ -443,7 +443,7 @@ fi
 # literal is pinned against what actually ran by the tier_size_check() in the
 # `fi` branch, so it cannot drift below the real membership and quietly shrink
 # the number a skip reports.
-SYNTHETIC_TIER_SIZE=27
+SYNTHETIC_TIER_SIZE=28
 if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]; then
     synthetic_before=$((passed + failed + known_failing))
     run_test "test_data_time_model" python3 "$SCRIPT_DIR/test_data_time_model.py"
@@ -460,6 +460,9 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     run_test "test_data_lock_chains" python3 "$SCRIPT_DIR/test_data_lock_chains.py"
     run_test "test_data_fidelity" python3 "$SCRIPT_DIR/test_data_fidelity.py"
     run_test "test_data_esc_coverage" python3 "$SCRIPT_DIR/test_data_esc_coverage.py"
+    # #947 U1: the server answers a v6 trace identically with and without its
+    # COVERAGE blocks (16 commands x 5 windows, archive + current.trace).
+    run_test "test_data_coverage_skip" python3 "$SCRIPT_DIR/test_data_coverage_skip.py"
     run_test "test_data_summary_honesty" python3 "$SCRIPT_DIR/test_data_summary_honesty.py"
     # THE SUMMARY-vs-RAW PARITY GATE. Nothing had ever compared the two
     # answers pgwt-server gives for the SAME window (raw events below 120 s,
@@ -617,6 +620,10 @@ EOF
 # a bash array without eval; shell quoting/expansion inside it is unsupported.
 LIVE_TESTS=(
     "test_evidence_capture_live|python3|test_evidence_capture_live.py"
+    # #947 U1: trace v6 COVERAGE records from a real daemon -- SIGKILL leaves
+    # an unsealed boot with its last W <= 2 s before the kill, a restart opens
+    # with BOOT, SIGTERM writes SEAL; prints floor lag and cost for the lead.
+    "test_coverage_live|python3|test_coverage_live.py"
     "test_lifecycle|bash|test_lifecycle.sh"
     "test_sampler_batch_live|python3|test_sampler_batch_live.py"
     "test_init_hint_recovery|python3|test_init_hint_recovery.py"

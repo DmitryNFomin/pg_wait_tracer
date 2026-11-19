@@ -21,6 +21,7 @@
 #include "pgss_resolver.h"
 #include "merge_capture.h"
 #include "percpu_transport.h"
+#include "open_snapshot.h"   /* struct pgwt_cov_tracker (#947) */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -473,6 +474,17 @@ struct pgwt_daemon {
     struct pgwt_accumulator accum;
     volatile bool running;
     uint64_t start_ts;
+
+    /* #947 coverage label (trace v6): a 1 s timer of its own, because the
+     * display/maintenance tick runs at --interval (default 5 s) and a live
+     * boot must write a WATERMARK every second (spec r2 C4). The fd is valid
+     * only while coverage_timer_armed: daemons built by host tests are
+     * calloc'd, and fd 0 is not "no timer". */
+    struct pgwt_cov_tracker coverage;
+    bool     coverage_started;
+    bool     coverage_timer_armed;
+    int      coverage_timer_fd;
+    uint64_t final_drain_from_ns;   /* mono, before the run loop's final drain */
 
     /* PGWT_DEBUG_DUMP_STATE main-loop liveness probe. These fields are read
      * and updated only when the debug env is set; production takes no clocks

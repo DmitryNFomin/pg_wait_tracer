@@ -267,3 +267,441 @@ void pgwt_collect_open_intervals(struct pgwt_daemon *d,
 }
 
 #endif /* !PGWT_SERVER */
+
+/* ── #947 coverage watermark: the pure half ─────────────────────────────
+ *
+ * Built on every host (no BPF, no daemon), so the rules that decide what a
+ * WATERMARK says are unit-tested against the real writer on a Mac:
+ * tests/test_coverage_writer.c. The daemon half below only gathers inputs. */
+#include "event_writer.h"
+#include "coverage_record.h"
+#include "idle_rule.h"
+
+void pgwt_cov_floors_begin(struct pgwt_cov_floors *f, uint64_t snap_ns)
+{
+    f->snap_ns = snap_ns;
+    f->floor_db_ns = snap_ns;
+    f->floor_idle_ns = snap_ns;
+}
+
+void pgwt_cov_floors_add(struct pgwt_cov_floors *f, bool readable,
+                         uint64_t last_ts_ns, uint32_t last_event,
+                         bool cmd_open, uint64_t unreadable_bound_ns)
+{
+    if (!readable) {
+        /* Fail closed: nothing is known about this backend's open wait
+         * except that it cannot have started before the bound. */
+        if (unreadable_bound_ns < f->floor_db_ns)
+            f->floor_db_ns = unreadable_bound_ns;
+        if (unreadable_bound_ns < f->floor_idle_ns)
+            f->floor_idle_ns = unreadable_bound_ns;
+        return;
+    }
+    /* A transition at or after the snapshot opened nothing before it. */
+    uint64_t start = last_ts_ns < f->snap_ns ? last_ts_ns : f->snap_ns;
+    if (start < f->floor_idle_ns)
+        f->floor_idle_ns = start;
+    bool idle = pgwt_is_idle_event(last_event) && !cmd_open;
+    if (!idle && start < f->floor_db_ns)
+        f->floor_db_ns = start;
+}
+
+enum pgwt_cov_cv_state
+pgwt_cov_cv_compare(const struct pgwt_counter_vector *base,
+                    const struct pgwt_counter_vector *cur)
+{
+    if (!cur || !cur->valid)
+        return PGWT_COV_CV_UNKNOWN;
+    for (int i = 0; i < PGWT_COUNTER_COMPONENTS; i++)
+        if (!cur->components[i].valid)
+            return PGWT_COV_CV_UNKNOWN;
+    if (!base)
+        return PGWT_COV_CV_CHANGED;
+    for (int i = 0; i < PGWT_COUNTER_COMPONENTS; i++)
+        if (cur->components[i].value != base->components[i].value)
+            return PGWT_COV_CV_CHANGED;
+    return PGWT_COV_CV_UNCHANGED;
+}
+
+void pgwt_cov_tracker_init(struct pgwt_cov_tracker *t, uint64_t boot_start_ns,
+                           bool watermarks,
+                           const struct pgwt_counter_vector *base)
+{
+    memset(t, 0, sizeof(*t));
+    t->watermarks = watermarks;
+    t->boot_start_ns = boot_start_ns;
+    t->w_ns = t->fd_ns = t->fi_ns = boot_start_ns;
+    if (base && pgwt_cov_cv_compare(NULL, base) != PGWT_COV_CV_UNKNOWN) {
+        t->base = *base;
+        t->base_known = true;
+    }
+}
+
+static int cov_gap(struct pgwt_cov_tracker *t, struct pgwt_event_writer *w,
+                   uint64_t obs, bool open, uint64_t at, uint8_t reason)
+{
+    if (open) {
+        t->gap_id++;
+        t->gaps++;
+    }
+    int rc = pgwt_writer_coverage_gap(w, obs, open, t->gap_id, at, reason);
+    if (rc != 0)
+        t->write_failures++;
+    return rc;
+}
+
+/* The counter-vector half of a tick. Returns true when this tick may be a
+ * good one. A loss is a gap from the LAST WRITTEN W: nothing at or after it
+ * has been vouched for yet, and the reader derives the taint from that
+ * watermark's floor (C6). */
+static bool cov_counters(struct pgwt_cov_tracker *t,
+                         struct pgwt_event_writer *w,
+                         const struct pgwt_cov_tick_in *in, int *rc)
+{
+    enum pgwt_cov_cv_state cs =
+        pgwt_cov_cv_compare(t->base_known ? &t->base : NULL, in->cv);
+    if (cs == PGWT_COV_CV_UNKNOWN) {
+        /* Unknown for as long as it lasts: ONE open gap, closed when the
+         * counters can be read again. */
+        t->base_known = false;
+        if (!t->gap_open) {
+            if (cov_gap(t, w, in->observation_ns, true, t->w_ns,
+                        PGWT_COVR_COUNTERS_UNKNOWN) != 0)
+                *rc = -1;
+            else
+                t->gap_open = true;
+        }
+        return false;
+    }
+    if (!t->base_known) {
+        /* Known again (or for the first time): whatever happened while it
+         * was not is a loss we cannot rule out. */
+        if (!t->gap_open &&
+            cov_gap(t, w, in->observation_ns, true, t->w_ns,
+                    PGWT_COVR_COUNTERS_UNKNOWN) != 0) {
+            *rc = -1;
+            return false;
+        }
+        if (cov_gap(t, w, in->observation_ns, false, in->publish_from_ns,
+                    0) != 0)
+            *rc = -1;
+        t->gap_open = false;
+        t->base = *in->cv;
+        t->base_known = true;
+        return false;
+    }
+    if (cs == PGWT_COV_CV_CHANGED) {
+        if (cov_gap(t, w, in->observation_ns, true, t->w_ns,
+                    PGWT_COVR_DROP) != 0 ||
+            cov_gap(t, w, in->observation_ns, false, in->publish_from_ns,
+                    0) != 0)
+            *rc = -1;
+        t->base = *in->cv;
+        return false;
+    }
+    return true;
+}
+
+static int cov_write_wm(struct pgwt_cov_tracker *t,
+                        struct pgwt_event_writer *w, uint64_t obs)
+{
+    int rc = pgwt_writer_coverage_watermark(w, obs, t->w_ns, t->fd_ns,
+                                            t->fi_ns);
+    if (rc != 0)
+        t->write_failures++;
+    return rc;
+}
+
+/* Promote the pending triple to "written". */
+static void cov_take_pending(struct pgwt_cov_tracker *t)
+{
+    /* W never goes backwards; floors stay at or below it. */
+    if (t->p_ns > t->w_ns)
+        t->w_ns = t->p_ns;
+    t->fd_ns = t->pfd_ns > t->w_ns ? t->w_ns : t->pfd_ns;
+    t->fi_ns = t->pfi_ns > t->fd_ns ? t->fd_ns : t->pfi_ns;
+    t->has_pending = false;
+}
+
+static void cov_set_pending(struct pgwt_cov_tracker *t,
+                            const struct pgwt_cov_tick_in *in)
+{
+    uint64_t p = in->publish_from_ns;
+    uint64_t fd = in->floors_known ? in->floor_db_ns : p;
+    uint64_t fi = in->floors_known ? in->floor_idle_ns : p;
+    /* Clamp into [boot_start, P]: a floor before the boot began means the
+     * same to the verdict as the boot's start, and keeps the measured lag
+     * readable. */
+    if (fd > p) fd = p;
+    if (fi > fd) fi = fd;
+    if (fd < t->boot_start_ns) fd = t->boot_start_ns;
+    if (fi < t->boot_start_ns) fi = t->boot_start_ns;
+    t->p_ns = p;
+    t->pfd_ns = fd;
+    t->pfi_ns = fi;
+    t->has_pending = true;
+}
+
+int pgwt_cov_tracker_tick(struct pgwt_cov_tracker *t,
+                          struct pgwt_event_writer *w,
+                          const struct pgwt_cov_tick_in *in)
+{
+    if (!t->watermarks || !w)
+        return 0;
+    int rc = 0;
+    t->ticks++;
+    bool good = cov_counters(t, w, in, &rc) &&
+                in->drain_complete && in->publish_ok;
+    if (good) {
+        t->good_ticks++;
+        if (t->has_pending)
+            cov_take_pending(t);
+        else
+            t->heartbeats++;
+        cov_set_pending(t, in);
+    } else {
+        t->heartbeats++;
+    }
+    if (cov_write_wm(t, w, in->observation_ns) != 0)
+        rc = -1;
+    return rc;
+}
+
+int pgwt_cov_tracker_seal(struct pgwt_cov_tracker *t,
+                          struct pgwt_event_writer *w,
+                          const struct pgwt_cov_tick_in *in)
+{
+    if (!w)
+        return -1;
+    int rc = 0;
+    /* A session that never wrote a block has no boot on disk to seal, and
+     * one without coverage enabled has no boot at all. */
+    if (!w->cov_enabled ||
+        (!w->fp && w->cov_next_file_no == 0 && !t->watermarks))
+        return 0;
+    if (t->watermarks) {
+        t->ticks++;
+        bool good = cov_counters(t, w, in, &rc) &&
+                    in->drain_complete && in->publish_ok;
+        if (good && t->has_pending) {
+            t->good_ticks++;
+            cov_take_pending(t);
+        } else {
+            t->heartbeats++;
+        }
+        if (cov_write_wm(t, w, in->observation_ns) != 0)
+            rc = -1;
+    }
+    if (pgwt_writer_coverage_seal(w, in->observation_ns, t->w_ns) != 0) {
+        t->write_failures++;
+        rc = -1;
+    }
+    return rc;
+}
+
+#ifndef PGWT_SERVER
+#include "capture_counters.h"
+/* ── #947 coverage watermark: the daemon half ─────────────────────────── */
+
+/* PostgreSQL's postmaster start, wall ns: /proc/<pid>/stat starttime (clock
+ * ticks since kernel boot) + /proc/stat btime. Stored only so a reader can
+ * tell a PostgreSQL restart from a daemon restart; 0 = unknown. */
+static uint64_t cov_postmaster_start_wall_ns(pid_t pid)
+{
+    if (pid <= 0)
+        return 0;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char buf[1024];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    char *p = strrchr(buf, ')');       /* comm may contain spaces */
+    if (!p)
+        return 0;
+    p++;
+    unsigned long long start_ticks = 0;
+    /* After ")": field 3 (state) ... field 22 (starttime). */
+    int field = 2;
+    char *tok = strtok(p, " ");
+    while (tok) {
+        field++;
+        if (field == 22) {
+            start_ticks = strtoull(tok, NULL, 10);
+            break;
+        }
+        tok = strtok(NULL, " ");
+    }
+    if (field != 22)
+        return 0;
+    unsigned long long btime = 0;
+    f = fopen("/proc/stat", "r");
+    if (!f)
+        return 0;
+    char line[256];
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "btime %llu", &btime) == 1)
+            break;
+    fclose(f);
+    long hz = sysconf(_SC_CLK_TCK);
+    if (btime == 0 || hz <= 0)
+        return 0;
+    return (uint64_t)btime * 1000000000ULL
+         + (uint64_t)start_ticks * (1000000000ULL / (uint64_t)hz);
+}
+
+void pgwt_coverage_start(struct pgwt_daemon *d)
+{
+    if (!d->event_writer)
+        return;
+    struct pgwt_event_writer *w = d->event_writer;
+    uint64_t mode = (uint64_t)d->mode & 0xFFu;
+    if (d->lightweight_mode)
+        mode |= PGWT_COVERAGE_MODE_LIGHTWEIGHT;
+    if (d->exact_perf)
+        mode |= PGWT_COVERAGE_MODE_EXACT_PERF;
+    /* Watermarks on the master path only. Lightweight has no records to
+     * vouch for (not_captured, fail closed); the exact per-CPU transport
+     * gets its own W from the merge frontier in the transport PR. */
+    bool watermarks = !d->lightweight_mode && !d->exact_perf;
+    if (w->fp) {
+        /* A file opened before capture start already carries a BOOT whose
+         * boot_start predates it. Vouch for nothing in this boot rather than
+         * for a stretch the capture was not yet watching. */
+        fprintf(stderr, "WARN: coverage: the trace file opened before "
+                "capture start; this run writes no coverage watermarks\n");
+        watermarks = false;
+    } else {
+        pgwt_writer_coverage_configure(w, d->start_ts,
+            cov_postmaster_start_wall_ns(d->postmaster_pid), mode);
+    }
+    struct pgwt_counter_vector base = pgwt_daemon_counter_vector(d);
+    pgwt_cov_tracker_init(&d->coverage, d->start_ts, watermarks, &base);
+    d->coverage_started = true;
+}
+
+static uint64_t cov_thread_cpu_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* TEST ONLY: PGWT_TEST_COVERAGE_YIELD=1 makes every coverage drain report a
+ * yield, so the box test can watch the heartbeat path on a real daemon. */
+static bool cov_test_force_yield(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PGWT_TEST_COVERAGE_YIELD");
+        v = (e && e[0] == '1') ? 1 : 0;
+    }
+    return v == 1;
+}
+
+/* Inputs common to a tick and to the shutdown seal. `drain` false: the
+ * caller already drained to completion (the shutdown path). */
+static void cov_gather(struct pgwt_daemon *d, struct pgwt_cov_tick_in *in,
+                       struct pgwt_counter_vector *cv, bool drain,
+                       uint64_t publish_from)
+{
+    memset(in, 0, sizeof(*in));
+    in->floors_known = false;
+    bool wp = pgwt_mode_uses_watchpoints(d);
+    int state_fd = (wp && d->skel)
+                 ? bpf_map__fd(d->skel->maps.state_map) : -1;
+    if (wp && drain) {
+        /* Floors FIRST, then the drain (open_snapshot order): a wait open at
+         * the snapshot started at or after its floor. */
+        struct pgwt_cov_floors f;
+        pgwt_cov_floors_begin(&f, now_ns());
+        for (int i = 0; i < d->backends.count; i++) {
+            struct pgwt_backend *be = &d->backends.entries[i];
+            if (!be->is_alive || be->pid <= 0 || be->wp_fd < 0)
+                continue;
+            uint32_t key = (uint32_t)be->pid;
+            struct pgwt_pid_state st;
+            bool readable = state_fd >= 0 &&
+                bpf_map_lookup_elem(state_fd, &key, &st) == 0 &&
+                st.wp_live;
+            pgwt_cov_floors_add(&f, readable, readable ? st.last_ts : 0,
+                                readable ? st.last_event : 0,
+                                readable && st.cmd_open != 0,
+                                be->attach_ts);
+        }
+        in->floors_known = true;
+        in->floor_db_ns = f.floor_db_ns;
+        in->floor_idle_ns = f.floor_idle_ns;
+    }
+    in->publish_from_ns = drain ? now_ns() : publish_from;
+    in->drain_complete = true;
+    uint64_t drain_cpu0 = cov_thread_cpu_ns();
+    if (drain && d->event_rb) {
+        d->event_drain_callbacks_current = 0;
+        d->event_drain_callback_limit = PGWT_OPEN_SNAPSHOT_DRAIN_BUDGET;
+        int rc = pgwt_consume_event_ring(d, true);
+        bool yielded = d->event_drain_callbacks_current
+                       >= PGWT_OPEN_SNAPSHOT_DRAIN_BUDGET && rc < 0;
+        d->event_drain_callback_limit = 0;
+        in->drain_complete = !yielded;
+    }
+    d->coverage.drain_cpu_ns += cov_thread_cpu_ns() - drain_cpu0;
+    if (cov_test_force_yield())
+        in->drain_complete = false;
+    /* A publish with nothing appended since the last one writes nothing:
+     * the writer's buffers are empty and both flushes return at once. */
+    in->publish_ok = pgwt_writer_publish(d->event_writer) == 0;
+    *cv = pgwt_daemon_counter_vector(d);
+    in->cv = cv;
+    in->observation_ns = now_ns();
+}
+
+void pgwt_coverage_tick(struct pgwt_daemon *d)
+{
+    uint64_t expirations;
+    if (d->coverage_timer_armed &&
+        read(d->coverage_timer_fd, &expirations, sizeof(expirations)) < 0 &&
+        errno != EAGAIN)
+        return;
+    if (!d->coverage_started || !d->event_writer || !d->coverage.watermarks)
+        return;
+    uint64_t cpu0 = cov_thread_cpu_ns();
+    struct pgwt_cov_tick_in in;
+    struct pgwt_counter_vector cv;
+    cov_gather(d, &in, &cv, true, 0);
+    pgwt_cov_tracker_tick(&d->coverage, d->event_writer, &in);
+    d->coverage.tick_cpu_ns += cov_thread_cpu_ns() - cpu0;
+}
+
+void pgwt_coverage_shutdown(struct pgwt_daemon *d)
+{
+    if (!d->coverage_started || !d->event_writer)
+        return;
+    d->coverage_started = false;
+    struct pgwt_cov_tick_in in;
+    struct pgwt_counter_vector cv;
+    /* The run loop's final drain was unbounded and is complete; the
+     * open-interval flush has already pushed its closing records. */
+    cov_gather(d, &in, &cv, false, d->final_drain_from_ns);
+    if (pgwt_cov_tracker_seal(&d->coverage, d->event_writer, &in) != 0)
+        fprintf(stderr, "WARN: coverage: the SEAL record was not written "
+                "durably — this run will read as stopped uncleanly\n");
+    const struct pgwt_cov_tracker *t = &d->coverage;
+    /* One line per run: what the box test reads for the cost budget. */
+    fprintf(stderr, "INFO: coverage: ticks=%llu good=%llu heartbeats=%llu "
+            "gaps=%llu write_failures=%llu records=%llu bytes=%llu "
+            "tick_cpu_ns=%llu drain_cpu_ns=%llu W_final=%llu\n",
+            (unsigned long long)t->ticks, (unsigned long long)t->good_ticks,
+            (unsigned long long)t->heartbeats, (unsigned long long)t->gaps,
+            (unsigned long long)t->write_failures,
+            (unsigned long long)d->event_writer->cov_records_written,
+            (unsigned long long)d->event_writer->cov_bytes_written,
+            (unsigned long long)t->tick_cpu_ns,
+            (unsigned long long)t->drain_cpu_ns,
+            (unsigned long long)t->w_ns);
+}
+#endif /* !PGWT_SERVER */

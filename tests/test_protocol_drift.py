@@ -97,9 +97,10 @@ def trace_header_size(path):
     with open(path, "rb") as f:
         prefix = f.read(6)
     version = int.from_bytes(prefix[4:6], "little")
-    if len(prefix) != 6 or version not in (2, 3, 4):
+    # v6 (#947) keeps the v4 header; v5 is the evidence codec's, never here.
+    if len(prefix) != 6 or version not in (2, 3, 4, 6):
         raise AssertionError("invalid trace version in corruption fixture")
-    return 36 if version == 4 else 28
+    return 36 if version >= 4 else 28
 
 
 SCENARIO = {

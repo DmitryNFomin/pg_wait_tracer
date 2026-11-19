@@ -1113,6 +1113,10 @@ core_merge_queue_mutants.py
 # Refs #947, #871: coverage label U2a, pure verdict vs the frozen answer table.
 test_coverage_verdict
 coverage_verdict_mutants.py
+# Refs #947: coverage label U1, trace v6 COVERAGE records (codec, writer,
+# master-path tracker, v4-era read paths) and the block-type dispatch guard.
+test_coverage_writer
+test_block_type_sites.py
 
 # Stateless evidence-v1 fixture-to-screen pilot and consumer boundary.
 test_pilot_route.py

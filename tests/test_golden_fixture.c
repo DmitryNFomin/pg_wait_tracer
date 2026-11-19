@@ -215,12 +215,43 @@ static void test_golden_rev4(const char *argv0)
     pgwt_reader_close(&r);
 }
 
+/* rev6 (#947): the rev4 input through the v6 writer. v6 data blocks are the
+ * v4 bytes, so the decoded stream must checksum to rev4's frozen value; what
+ * is pinned here is that a v6 header reads, and that this writer session
+ * (no coverage enabled) wrote no COVERAGE block. The COVERAGE payload bytes
+ * are pinned in tests/test_coverage_writer.c (golden_bytes). */
+static void test_golden_rev6(const char *argv0)
+{
+    char dir[800];
+    golden_dir(argv0, "rev6", dir, sizeof(dir));
+    printf("--- golden rev6 decode + checksum (%s) ---\n", dir);
+    int blocks = 0, events = 0;
+    uint64_t h = decode_checksum(dir, 6, 1, &blocks, &events);
+    CHECK(blocks == 2 && events == 14, "v6 frozen blocks/events");
+    CHECK(h == 0xf40542171e1e0d59ULL,
+          "v6 checksum 0x%016llx == rev4's (v6 data blocks are v4 bytes)",
+          (unsigned long long)h);
+    char path[900];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    struct pgwt_event_reader r;
+    CHECK(pgwt_reader_open(&r, path) == 0, "v6 frozen open");
+    CHECK(r.nominal_sample_period_ns == 100000000, "v6 durable nominal period");
+    for (int b = 0; b < r.num_blocks; b++) {
+        struct pgwt_block_info bi;
+        CHECK(pgwt_reader_block_info(&r, b, &bi) == 0 &&
+              bi.block_type != PGWT_BLOCK_COVERAGE,
+              "v6 frozen block %d is a data block", b);
+    }
+    pgwt_reader_close(&r);
+}
+
 int main(int argc, char **argv)
 {
     printf("=== test_golden_fixture ===\n");
     test_golden_rev2(argc > 0 ? argv[0] : "");
     test_golden_rev3(argc > 0 ? argv[0] : "");
     test_golden_rev4(argc > 0 ? argv[0] : "");
+    test_golden_rev6(argc > 0 ? argv[0] : "");
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

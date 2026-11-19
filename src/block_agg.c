@@ -834,6 +834,12 @@ int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
             break;
         }
 
+        /* #947: a COVERAGE block (trace v6) holds no record. It is neither
+         * aggregated nor a reason to refuse the fast path, which is what the
+         * non-TRANSITIONS branch below would make of it. */
+        if (bi.block_type == PGWT_BLOCK_COVERAGE)
+            continue;
+
         int overlaps = pgwt_block_agg_file_can_contribute(
             bi.first_timestamp_ns, bi.last_timestamp_ns,
             from_mono_ns, to_mono_ns);

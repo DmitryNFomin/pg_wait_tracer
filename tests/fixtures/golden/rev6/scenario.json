@@ -1,0 +1,32 @@
+{
+  "backends": [
+    {"pid": 1000, "type": "client", "user": "postgres", "db": "app"},
+    {"pid": 1001, "type": "client", "user": "postgres", "db": "app"},
+    {"pid": 1002, "type": "autovacuum worker", "user": "", "db": ""}
+  ],
+  "queries": [
+    {"id": 100, "text": "SELECT * FROM accounts WHERE id = $1"},
+    {"id": 200, "text": "UPDATE accounts SET balance = balance - 1 WHERE id = $1"}
+  ],
+  "sample_period_ns": 100000000,
+  "interleave": 1,
+  "cpu_measured": 1,
+  "events": [
+    {"pid": 1000, "ts": 10000000000000, "dur": 0,       "old": 4294967282, "new": 0, "qid": 100, "cpu": 0},
+    {"pid": 1000, "ts": 10000001000000, "dur": 0,       "old": 4294967280, "new": 0, "qid": 100, "cpu": 0},
+    {"pid": 1000, "ts": 10000005000000, "dur": 5000000, "old": 167772181,  "new": 0, "qid": 100, "cpu": 0},
+    {"pid": 1000, "ts": 10000010000000, "dur": 4000000, "old": 0,          "new": 167772181, "qid": 100, "cpu": 3000000},
+    {"pid": 1000, "ts": 10000014000000, "dur": 0,       "old": 4294967281, "new": 0, "qid": 100, "cpu": 0},
+    {"pid": 1001, "ts": 10000006000000, "dur": 7000000, "old": 50331656,   "new": 0, "qid": 200, "cpu": 0},
+    {"pid": 1001, "ts": 10000013000000, "dur": 2000000, "old": 0,          "new": 83886104, "qid": 200, "cpu": 2000000},
+    {"pid": 1002, "ts": 10000008000000, "dur": 3000000, "old": 167772184,  "new": 0, "qid": 0, "cpu": 0}
+  ],
+  "samples": [
+    {"pid": 1000, "ts": 10000100000000, "event": 167772181, "qid": 100},
+    {"pid": 1001, "ts": 10000100000000, "event": 50331656,  "qid": 200},
+    {"pid": 1000, "ts": 10000200000000, "event": 0,         "qid": 100},
+    {"pid": 1001, "ts": 10000200000000, "event": 50331656,  "qid": 200},
+    {"pid": 1002, "ts": 10000200000000, "event": 167772184, "qid": 0},
+    {"pid": 1000, "ts": 10000300000000, "event": 167772181, "qid": 100}
+  ]
+}

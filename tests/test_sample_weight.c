@@ -277,7 +277,8 @@ static void test_stream(void)
     snprintf(path, sizeof(path), "%s/current.trace", dir);
     struct pgwt_event_reader r;
     CHECK(pgwt_reader_open(&r, path) == 0, "stream_reader_open");
-    CHECK(r.header.version == 4, "stream_file_v4");
+    CHECK(r.header.version == PGWT_TRACE_VERSION && r.header.version >= 4,
+          "stream_file_current_v4_layout");
     CHECK(r.nominal_sample_period_ns == P, "stream_durable_nominal_cadence");
     struct pgwt_trace_event *decoded = calloc(12000, sizeof(*decoded));
     int total = 0, wrong = 0, time_cut = 0, capacity_cut = 0;

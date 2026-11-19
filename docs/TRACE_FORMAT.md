@@ -1,4 +1,10 @@
-# pg_wait_tracer on-disk trace format (v4)
+# pg_wait_tracer on-disk trace format (v6)
+
+**v6 (#947):** the v4 layout below, byte for byte, plus block type 3
+COVERAGE (see "COVERAGE (type 3, v6)"). A v6 reader reads v2, v3, v4 and v6
+and refuses v5, the evidence-v1 codec's number. Older builds refuse v6 files
+(they read up to v4), which is the intended downgrade behaviour (coverage spec
+r2 Q2).
 
 Status: authoritative spec for trace format version 4 (what a current build
 writes) and the sidecar files in a trace directory. v2/v3 files remain
@@ -187,6 +193,30 @@ spanning at least one second at the end of a push, publication, rotation and
 close. A production push is one tick; bulk callers can supply multiple ticks
 with a common weight. The per-block maximum includes the first weight and
 all subsequent effective tick weights.
+
+**COVERAGE (type 3, v6)** — one coverage fact per block, never a wait
+record. Not compressed: `compressed_size = uncompressed_size` = 48 bytes (80
+for BOOT), `num_events = 1`, `first_ts = last_ts =` observation (mono at
+write), `sample_period_ns = 0`, v4 extension 0. Payload (little-endian):
+`u32 magic "PGWC"`, `u16 schema = 1`, `u8 kind`, `u8 reason`,
+`u64 a, b, c, d`, BOOT only `u8 boot_nonce[16]`, `u8 kernel_boot_id[16]`, then
+`u32 crc32c(all prior bytes)` (Castagnoli) and `u32 0`.
+
+| kind | a | b | c | d |
+|---|---|---|---|---|
+| 1 BOOT | boot_start | file_no | postmaster start (wall, 0 = unknown) | mode |
+| 2 WATERMARK | W | floor_db (<= W) | floor_idle (<= floor_db) | 0 |
+| 3 GAP_OPEN | start | 0 | gap_id | detection |
+| 4 GAP_CLOSE | end | 0 | gap_id | 0 |
+| 5 SEAL | W_final | 0 | 0 | 0 |
+
+A writer session that enables coverage (the daemon always does) writes BOOT
+as the first block of every file and file_no runs on across rotation. The
+daemon writes a WATERMARK every second (W = the previous good tick's publish
+point, repeated as a heartbeat when it cannot advance), GAP records when the
+capture counter vector moves or cannot be read, and SEAL only on a clean
+shutdown. Every data path skips type 3 (`tests/test_block_type_sites.py`
+enumerates the sites); recovery keeps it. Codec: `src/coverage_record.h`.
 
 ### Markers
 
