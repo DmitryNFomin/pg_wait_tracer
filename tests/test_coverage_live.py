@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import statistics
 import struct
 import subprocess
@@ -94,7 +95,7 @@ def data_timestamps(payload, usize, count):
         yield previous
 
 
-def coverage_records(path, scan=None):
+def coverage_records(path, scan=None, data_window=None):
     """[(observation, kind, reason, a, b, c, d, nonce)] in file order, the
     header flags and the number of data blocks. Walks blocks from the header
     until the bytes run out (a live file has no footer; an archive's footer
@@ -124,11 +125,12 @@ def coverage_records(path, scan=None):
             if scan is not None and kind == 2:
                 scan["W"] = max(scan["W"], a)
         else:
+            assert btype in (0, 1), ("unknown data block", btype)
             data += 1
             if scan is not None:
-                assert btype in (1, 2), ("unknown data block", btype)
                 for timestamp in data_timestamps(blob[off + BLOCK_HDR.size:end], usize, nev):
-                    scan["data"] += 1
+                    if data_window is None or data_window[0] <= timestamp <= data_window[1]:
+                        scan["data"] += 1
                     if timestamp <= scan["W"]:
                         scan["late"] += 1
         off = end
@@ -144,7 +146,9 @@ def report_leg(recs, files, log, label, start_ns=0, end_ns=None):
     """
     scan = {"W": -1, "late": 0, "data": 0}
     for _, path, _, _ in files:
-        coverage_records(path, scan)
+        coverage_records(path, scan, (start_ns, end_ns) if end_ns is not None else None)
+    if end_ns is not None:
+        assert scan["data"] > 0, (label, "load leg must decode data_records > 0", scan)
     wms = watermarks(recs)
     previous = recs[0][3]
     heartbeats = promotions = 0
@@ -164,6 +168,7 @@ def report_leg(recs, files, log, label, start_ns=0, end_ns=None):
           f"fence_consumer_lag_bytes last={lag[-1]} max={max(lag)}; "
           f"late_after_W={scan['late']} data_records={scan['data']}", flush=True)
     assert scan["late"] == 0, (label, "data timestamp <= preceding WATERMARK", scan)
+    assert_tick_spacing(recs, start_ns, end_ns, label)
     return scan
 
 
@@ -287,8 +292,10 @@ def drop_counter_tick(d, directory):
 def quiet_leg(d, directory, label, after=None, log=None):
     time.sleep(5)
     assert d.poll() is None, (label, "daemon died during quiet control")
+    end_ns = time.monotonic_ns()
     recs, files = boot_files(directory)
     wms = watermarks(recs)
+    assert_tick_spacing(recs, after or 0, end_ns, label)
     if log is not None:
         report_leg(recs, files, Path(log).read_text(), label + " QUIET leg", start_ns=after or 0)
     assert len(wms) >= 3 and wms[-1][1] > recs[0][3], \
@@ -297,6 +304,22 @@ def quiet_leg(d, directory, label, after=None, log=None):
         assert wms[-1][1] > after, (label, "W must resume past load end", wms[-1], after)
     report_lags([w for w in wms if w[0] >= (after or recs[0][3])], label + " QUIET leg")
     return recs
+
+
+def assert_tick_spacing(recs, start_ns, end_ns, label):
+    obs = [o for o, *_ in watermarks(recs) if start_ns <= o and
+           (end_ns is None or o <= end_ns)]
+    assert obs, (label, "watermarks in leg")
+    spacing = [b - a for a, b in zip(obs, obs[1:])]
+    # Include the end boundary: a stalled timer must not pass merely because
+    # its last observation was close to W. Use the same bound on every boot.
+    if end_ns is not None:
+        spacing.append(end_ns - obs[-1])
+    if spacing:
+        print(f"coverage live MEASURED {label}: {len(obs)} watermarks; "
+              f"spacing max={max(spacing) / SEC:.3f}s "
+              f"median={statistics.median(spacing) / SEC:.3f}s", flush=True)
+        assert max(spacing) < FRESHNESS_NS, (label, "one WATERMARK every tick through leg end", spacing)
 
 
 def assert_load_coverage(recs, start_ns, end_ns, delta, label):
@@ -428,7 +451,9 @@ def self_test():
 
     for records, after in [(quiet[:1] + [rec(t, "WATERMARK", 0) for t in range(1, 6)], None),
                            (stalled, 16 * SEC)]:
-        with patch.object(time, "sleep"), patch.dict(globals(), {"boot_files": lambda _: (records, [])}):
+        with patch.object(time, "sleep"), \
+             patch.object(time, "monotonic_ns", return_value=records[-1][0] + SEC // 4), \
+             patch.dict(globals(), {"boot_files": lambda _: (records, [])}):
             try:
                 quiet_leg(Alive(), None, "self stuck quiet", after)
             except AssertionError:
@@ -471,71 +496,132 @@ def self_test():
             assert "CRC" in str(exc)
         else:
             raise AssertionError("corrupt COVERAGE accepted")
-    def data_block(timestamps, kind=1):
-        # Independent LZ4 literals-only block and unsigned delta-varints;
-        # only the shared timestamp column is needed by this scanner.
-        raw, previous = bytearray(), 0
-        for timestamp in timestamps:
-            delta = (timestamp - previous) & ((1 << 64) - 1)
-            previous = timestamp
-            while delta >= 128:
-                raw.append((delta & 127) | 128)
-                delta >>= 7
-            raw.append(delta)
-        size = len(raw)
-        payload = bytearray([min(15, size) << 4])
-        if size >= 15:
-            extra = size - 15
-            while extra >= 255:
-                payload.append(255)
-                extra -= 255
-            payload.append(extra)
-        payload += raw
-        return BLOCK_HDR.pack(timestamps[0], timestamps[-1], len(timestamps),
-                              len(payload), size, kind, 0, 0, 0) + payload
+    # Data files are produced by the actual writer; the scanner's decoder
+    # stays independent. Never guess block types or manufacture LZ4 columns.
+    writer_source = r'''
+#include "event_writer.h"
+#include <assert.h>
+#include <string.h>
+#define SEC 1000000000ULL
+static struct pgwt_event_writer w;
+static void data(int samples, const unsigned *times, int count)
+{
+    struct pgwt_trace_event events[8] = {0};
+    for (int i = 0; i < count; i++) {
+        events[i].timestamp_ns = times[i] * SEC;
+        events[i].pid = 42; events[i].old_event = 1; events[i].new_event = 2;
+        if (!samples) assert(pgwt_writer_push_event(&w, &events[i]) == 0);
+    }
+    if (samples) assert(pgwt_writer_push_samples(&w, events, count, SEC) == 0);
+    assert(pgwt_writer_publish(&w) == 0);
+}
+static void wm(unsigned obs, unsigned mark)
+{ assert(pgwt_writer_coverage_watermark(&w, obs * SEC, mark * SEC, 0, 0) == 0); }
+int main(int argc, char **argv)
+{
+    assert(argc == 3);
+    assert(pgwt_writer_init(&w, argv[1], 18, 24, NULL) == 0);
+    pgwt_writer_coverage_configure(&w, 0, 0, 0);
+    data(0, (unsigned[]){1, 2}, 2);
+    wm(6, 5);
+    if (!strcmp(argv[2], "late")) {
+        data(0, (unsigned[]){6, 5, 4, 7}, 4);
+        wm(7, 5);
+        data(0, (unsigned[]){5}, 1);
+        w.force_rotate = true;
+        assert(pgwt_writer_check_rotation(&w) == 0);
+        data(0, (unsigned[]){5}, 1);
+        wm(10, 8);
+        data(1, (unsigned[]){9, 8, 6}, 3);
+    } else {
+        data(1, (unsigned[]){6, 7}, 2);
+        wm(8, 7);
+        data(0, (unsigned[]){8}, 1);
+    }
+    assert(pgwt_writer_close(&w) == 0);
+    return 0;
+}
+'''
 
     def tick_log(records):
         return "\n".join(f"COVERAGE-TICK: obs={obs} W={w} fence=800 consumer=792 "
                          "promotions=1 heartbeats=1" for obs, w, _, _ in watermarks(records))
 
     with tempfile.TemporaryDirectory(prefix="pgwt-coverage-order-") as tmp:
-        directory = Path(tmp)
-        nonce = bytes(range(16))
-        header = FILE_HDR.pack(0x54574750, 6, 0, 18, 0, 0, 0)
-        first = [rec(0, "BOOT", b=0, nonce=nonce), rec(6, "WATERMARK", 5),
-                 rec(7, "WATERMARK", 5)]
-        second = [rec(8, "BOOT", b=1, nonce=nonce), rec(10, "WATERMARK", 8)]
-        (directory / "z.trace.lz4").write_bytes(
-            header + block(first[0]) + data_block([1 * SEC, 2 * SEC]) + block(first[1])
-            + data_block([6 * SEC, 5 * SEC, 4 * SEC, 7 * SEC]) + block(first[2])
-            + data_block([5 * SEC]))
-        (directory / "a.trace.lz4").write_bytes(
-            header + block(second[0]) + data_block([5 * SEC]) + block(second[1])
-            + data_block([9 * SEC, 8 * SEC, 6 * SEC], kind=2))
-        records, files = boot_files(directory, nonce)
-        state = {"W": -1, "late": 0, "data": 0}
-        for _, path, _, _ in files:
-            coverage_records(path, state)
-        assert state == {"W": 8 * SEC, "late": 6, "data": 11}, state
-        # Exact W equality, both data types, unsorted timestamps, repeated
-        # watermarks and a rotation BOOT must all be counted in file order.
-        with contextlib.redirect_stdout(io.StringIO()) as printed:
-            try:
-                report_leg(records, files, tick_log(records), "self late")
-            except AssertionError as exc:
-                assert "data timestamp <= preceding WATERMARK" in str(exc), exc
+        tmp = Path(tmp)
+        source, binary = tmp / "writer.c", tmp / "writer"
+        source.write_text(writer_source)
+        lz4 = ["-llz4"]
+        if sys.platform == "darwin":
+            prefix = subprocess.check_output(["brew", "--prefix", "lz4"], text=True).strip()
+            lz4 = ["-I" + prefix + "/include", "-L" + prefix + "/lib", *lz4]
+        subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-std=gnu11",
+                        "-Wall", "-Wextra", "-Werror", "-DPGWT_SERVER",
+                        *shlex.split(os.environ.get("CFLAGS", "")),
+                        "-I" + str(ROOT / "src"), str(source),
+                        str(ROOT / "src/event_writer.c"), *lz4, "-o", str(binary)], check=True)
+        for scenario, expected in [("late", {"W": 8 * SEC, "late": 6, "data": 11}),
+                                   ("clean", {"W": 7 * SEC, "late": 0, "data": 5})]:
+            directory = tmp / scenario
+            subprocess.run([str(binary), str(directory), scenario], check=True)
+            # Deliberately invert lexical order across rotation.
+            if scenario == "late":
+                archive, = directory.glob("*.trace.lz4")
+                archive.rename(directory / "z.trace.lz4")
+            (directory / "current.trace").rename(directory / "a.trace.lz4")
+            records, files = boot_files(directory)
+            state = {"W": -1, "late": 0, "data": 0}
+            for _, path, _, _ in files:
+                coverage_records(path, state)
+            assert state == expected, state
+            if scenario == "late":
+                with contextlib.redirect_stdout(io.StringIO()) as printed:
+                    try:
+                        report_leg(records, files, tick_log(records), "self late")
+                    except AssertionError as exc:
+                        assert "data timestamp <= preceding WATERMARK" in str(exc), exc
+                    else:
+                        raise AssertionError("late-after-W scan accepted six late records")
+                assert "late_after_W=6" in printed.getvalue()
             else:
-                raise AssertionError("late-after-W scan accepted six late records")
-        assert "late_after_W=6" in printed.getvalue()
-        (directory / "a.trace.lz4").unlink()
-        clean_records = [first[0], first[1], rec(8, "WATERMARK", 7)]
-        (directory / "z.trace.lz4").write_bytes(
-            header + block(first[0]) + data_block([1 * SEC, 2 * SEC])
-            + block(first[1]) + data_block([6 * SEC, 7 * SEC], kind=2)
-            + block(clean_records[-1]) + data_block([8 * SEC]))
-        records, files = boot_files(directory, nonce)
-        state = report_leg(records, files, tick_log(records), "self in-order")
-        assert state == {"W": 7 * SEC, "late": 0, "data": 5}, state
+                assert report_leg(records, files, tick_log(records), "self in-order") == expected
+                # Unknown data types are rejected even without a scan state.
+                path = files[0][1]
+                original = path.read_bytes()
+                off = FILE_HDR.size
+                blob = bytearray(original)
+                while BLOCK_HDR.unpack_from(blob, off)[5] == 3:
+                    off += BLOCK_HDR.size + BLOCK_HDR.unpack_from(blob, off)[3]
+                for kind in (2, 4, 65535):
+                    struct.pack_into("<H", blob, off + 28, kind)
+                    path.write_bytes(blob)
+                    try:
+                        coverage_records(path)
+                    except AssertionError as exc:
+                        assert "unknown data block" in str(exc), exc
+                    else:
+                        raise AssertionError("unknown data type accepted")
+                path.write_bytes(original)
+        # Decoded records outside this leg cannot satisfy its data gate.
+        try:
+            report_leg(records, files, tick_log(records), "self empty load", 9 * SEC, 10 * SEC)
+        except AssertionError as exc:
+            assert "data_records > 0" in str(exc), exc
+        else:
+            raise AssertionError("load leg accepted zero decoded data in its window")
+        # Drive the same report entry point used by every live leg. Boot 2
+        # must reject missing ticks and a stopped timer near the end even
+        # though its last observation is still close to W.
+        assert report_leg(clean, files, tick_log(clean), "self healthy boot2",
+                          5 * SEC, int(16.25 * SEC))["data"] == 3
+        for recs in [clean[:-4], [r for r in clean if r[0] not in (10 * SEC, 11 * SEC)]]:
+            try:
+                report_leg(recs, files, tick_log(recs), "self stalled boot2",
+                           5 * SEC, int(16.25 * SEC))
+            except AssertionError as exc:
+                assert "one WATERMARK every tick through leg end" in str(exc), exc
+            else:
+                raise AssertionError("boot2 accepted stalled ticks")
     print("file-order scan: PASS (exact-W boundary, transitions, samples, heartbeat, rotation, inversion)")
 
     print("test_coverage_live --self-test: PASS (witness branches, per-tick pairs, chain, recovery, stats, rotation, CRC)")
@@ -590,11 +676,6 @@ def main():
             assert_load_coverage(recs1, load_start, kill_ns, delta1, "boot1 SIGKILL")
             assert len([w for w in watermarks(recs1) if w[0] >= load_start]) >= 12, \
                 "about one WATERMARK per second during boot 1 load"
-            obs = [o for o, *_ in watermarks(recs1)]
-            spacing = [(b - a) / SEC for a, b in zip(obs, obs[1:])]
-            print(f"coverage live MEASURED boot1: {len(obs)} watermarks; "
-                  f"spacing max={max(spacing):.3f}s median={statistics.median(spacing):.3f}s", flush=True)
-            assert max(spacing) < 2.5, ("one WATERMARK every tick", spacing)
             nonce1 = recs1[0][7]
             load.wait(timeout=40)
             assert load.returncode == 0, load.stderr.read()

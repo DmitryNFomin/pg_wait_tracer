@@ -4,7 +4,7 @@
 Only positions, ring I/O, writer calls and clocks are fakes. The daemon's
 position/publication bodies are extracted unchanged; open_snapshot.c's pure
 tracker is compiled whole. --mutants requires compilation and the intended
-assertion, not a build failure. --source-root can demonstrate T1 on the base.
+assertion, not a build failure. --source-root and --case demonstrate regressions on a base.
 """
 import argparse
 import os
@@ -37,7 +37,7 @@ static struct pgwt_event_writer writer;
 static struct pgwt_counter_vector counters;
 static uint64_t wall, callback_cost, written_w, gap_start, gap_end, sealed_w;
 static unsigned consumes, callbacks, publishes, watermarks, gaps;
-static bool publish_ok, watermark_ok, reject_callback, fail_push;
+static bool publish_ok, watermark_ok, reject_callback, fail_push, ring_missing;
 static int failures;
 #define CHECK(ok, message) do { if (!(ok)) { \
     fprintf(stderr, "FAIL %s: %s\n", __func__, message); failures++; } } while (0)
@@ -45,7 +45,7 @@ static int failures;
 uint64_t pgwt_debug_monotonic_ns(void) { return wall; }
 static uint64_t now_ns(void) { return wall; }
 struct ring *ring_buffer__ring(struct ring_buffer *rb, unsigned int idx)
-{ assert(rb == d.event_rb && idx == 0); return &positions; }
+{ assert(rb == d.event_rb && idx == 0); return ring_missing ? NULL : &positions; }
 unsigned long ring__producer_pos(const struct ring *r) { return r->producer; }
 unsigned long ring__consumer_pos(const struct ring *r) { return r->consumer; }
 int ring_buffer__consume(struct ring_buffer *rb)
@@ -123,7 +123,7 @@ static void reset(void)
     memset(&counters, 0, sizeof(counters)); memset(&positions, 0, sizeof(positions));
     wall = SEC; callback_cost = 1; publish_ok = watermark_ok = true;
     consumes = callbacks = publishes = watermarks = gaps = 0; reject_callback = fail_push = false;
-    gap_start = gap_end = sealed_w = 0; written_w = SEC;
+    gap_start = gap_end = sealed_w = 0; written_w = SEC; ring_missing = false;
     counters.valid = true;
     for (int i = 0; i < PGWT_COUNTER_COMPONENTS; i++)
         counters.components[i].valid = true;
@@ -240,10 +240,43 @@ static void T4_loss_and_failure(void)
           "T4 shutdown rereads final callback failures before promoting");
     CHECK(gaps == 1 && gap_start == SEC && gap_end == 4 * SEC,
           "T4 final callback gap uses counters before the shutdown P");
-    /* Missing ring positions are fail closed too. */
+    /* A ring expected by the mode must remain fail closed. */
+    reset(); ring_missing = true;
+    CHECK(tick(1) == 0 && !d.coverage.has_pending && written_w == SEC,
+          "T4 failed ring lookup means no completion certificate");
     reset(); d.event_rb = NULL;
     CHECK(tick(1) == 0 && !d.coverage.has_pending && written_w == SEC,
           "T4 no ring means no completion certificate");
+}
+static void T7_sampled_progress(void)
+{
+    reset(); d.mode = PGWT_MODE_SAMPLED; d.event_rb = NULL;
+    struct pgwt_cov_tick_in in = collect();
+    CHECK(in.positions_known && in.producer_pos == 0 && in.consumer_pos == 0,
+          "T7 sampled empty fence is known and crossed");
+    CHECK(tick(1) == 0 && d.coverage.has_pending, "T7 sampled takes pending P");
+    CHECK(tick(2) == 0 && written_w == 2 * SEC,
+          "T7 sampled W advances beyond boot_start");
+    CHECK(tick(3) == 0 && written_w == 3 * SEC, "T7 sampled keeps advancing");
+    wall = 5 * SEC; in = collect();
+    CHECK(pgwt_cov_tracker_seal(&d.coverage, &writer, &in) == 0 && sealed_w == 4 * SEC,
+          "T7 sampled shutdown promotes pending P");
+    CHECK(consumes == 0, "T7 sampled has no event ring to consume");
+    reset(); d.mode = PGWT_MODE_SAMPLED; d.event_rb = NULL; d.exact_perf = true;
+    CHECK(tick(1) == 0 && !d.coverage.has_pending && written_w == SEC,
+          "T7 exact-perf does not use sampled empty-ring certificate");
+}
+static void T8_first_watermark_failure(void)
+{
+    reset(); watermark_ok = false;
+    CHECK(tick(1) == -1 && written_w == SEC, "T8 first watermark write fails");
+    CHECK(!d.coverage.has_pending && d.coverage.p_ns == 0,
+          "T8 first failed watermark rolls back has_pending");
+    watermark_ok = true;
+    CHECK(tick(2) == 0 && written_w == SEC && d.coverage.p_ns == 3 * SEC,
+          "T8 retry takes its own pending point");
+    CHECK(tick(3) == 0 && written_w == 3 * SEC && d.coverage.fd_ns == 3 * SEC - 10,
+          "T8 retry promotes its own point and floors");
 }
 static void T5_no_consume(void)
 {
@@ -286,6 +319,8 @@ int main(int argc, char **argv)
     RUN("T4", T4_loss_and_failure);
     RUN("T5", T5_no_consume);
     RUN("T6", T6_slow_callbacks);
+    RUN("T7", T7_sampled_progress);
+    RUN("T8", T8_first_watermark_failure);
 #endif
     return failures ? 1 : 0;
 }
@@ -329,6 +364,7 @@ def build_run(root, tmp, name, snapshot, daemon, case="all", baseline=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mutants", action="store_true")
+    ap.add_argument("--case", default="all", choices=["all", *[f"T{i}" for i in range(1, 9)]])
     ap.add_argument("--source-root", type=Path, default=ROOT)
     args = ap.parse_args()
     root = args.source_root.resolve()
@@ -338,12 +374,16 @@ def main():
     with tempfile.TemporaryDirectory(prefix="pgwt-coverage-fence-") as tmp:
         tmp = Path(tmp)
         result = build_run(root, tmp, "base", snapshot, daemon,
-                           "T1" if baseline else "all", baseline)
+                           "T1" if baseline else args.case, baseline)
         print(result.stdout + result.stderr, end="", flush=True)
         if result.returncode:
             raise SystemExit(result.returncode)
         if args.mutants:
             mutants = [
+                ("sampled-unknown-positions", "T7", "T7 sampled W advances beyond boot_start",
+                 "        in->positions_known = true;", "        in->positions_known = false;"),
+                ("drop-has-pending-rollback", "T8", "T8 first failed watermark rolls back has_pending",
+                 "        t->has_pending = before.has_pending;", "        /* rollback removed */"),
                 ("drop-fence", "T2", "T2 W frozen below fence",
                  "in->consumer_pos >= t->p_fence", "true"),
                 ("newer-fence", "T1", "T1 W advances every tick despite backlog",
@@ -370,7 +410,7 @@ def main():
                 assert result.returncode != 0 and intended in result.stderr, (
                     name, result.returncode, result.stdout, result.stderr)
                 print(f"MUTANT {name}: RED on {case}: {intended}", flush=True)
-    print("test_coverage_drain: PASS (production fence tracker, T1-T6)")
+    print("test_coverage_drain: PASS (production fence tracker, T1-T8)")
 
 
 if __name__ == "__main__":

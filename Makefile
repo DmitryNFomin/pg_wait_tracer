@@ -39,25 +39,27 @@ print-build-version:
 # The BPF program and daemon use USDT support: the BPF-side header
 # <bpf/usdt.bpf.h> and the userspace function bpf_program__attach_usdt(),
 # both of which require libbpf >= 0.8. Ubuntu (CI), Rocky 9 / RHEL 9 (CRB)
-# supply USDT. Coverage additionally requires the 1.3+ position APIs;
-# check-libbpf-positions validates the selected headers AND linked library.
+# supply USDT. Coverage additionally requires the 1.3+ position APIs. The
+# selection probe requires both in the system headers AND linked library.
 #
 # Rocky 8 / RHEL 8 ships libbpf 0.5.0, which predates USDT entirely (no
 # usdt.bpf.h, no attach_usdt symbol). When the system libbpf is too old we
 # build a pinned libbpf from source into build/libbpf and link it statically.
 # This is detection-driven, so it is a no-op on every distro that already has
-# USDT-capable libbpf. Missing position APIs fail loudly, without fallback.
+# USDT and reservation-position APIs. The bundled build is checked loudly
+# if it unexpectedly lacks the required position APIs.
 # ---------------------------------------------------------------------------
 LIBBPF_VERSION  ?= v1.4.7
 BPFTOOL_VERSION ?= v7.4.0
 
-# Probe: does the system libbpf expose bpf_program__attach_usdt AND usdt.bpf.h?
+# Probe USDT (header + symbol) AND all three ring-position APIs.
+# Historical variable name retained for existing build/test overrides.
 # Delegated to a script so make's $(shell ...) never has to parse C source
 # (parentheses in main(void) confuse make's paren matching).
 SYSTEM_LIBBPF_HAS_USDT := $(shell CC='$(CC)' sh scripts/detect_libbpf_usdt.sh)
 
 ifeq ($(SYSTEM_LIBBPF_HAS_USDT),yes)
-  # Use the USDT-capable system library; validate coverage APIs at build time.
+  # System headers/library passed both USDT and coverage API probes.
   BPF_LIBBPF_INC =
   LIBBPF_INC     =
   LIBBPF_LIB     = -lbpf
@@ -65,7 +67,7 @@ ifeq ($(SYSTEM_LIBBPF_HAS_USDT),yes)
   # System bpftool is fine when its libbpf matches the build's libbpf.
   BPFTOOL_DEP    =
 else
-  # System libbpf lacks USDT (Rocky 8 / RHEL 8: libbpf 0.5.0). Build a pinned
+  # System libbpf lacks USDT or reservation positions. Build a pinned
   # libbpf from source and link it statically.
   BUNDLED_LIBBPF_DIR  = $(BUILD_DIR)/libbpf
   BUNDLED_LIBBPF_SRC  = $(BUNDLED_LIBBPF_DIR)/src
@@ -225,11 +227,11 @@ bench:
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
-# Step 0 (Rocky 8 only): build a pinned libbpf + bpftool from source when the
-# system libbpf is too old for USDT. Only referenced when *_DEP is non-empty.
+# Step 0: build pinned libbpf + bpftool when the system library lacks
+# USDT or ring-position APIs. Only referenced when *_DEP is non-empty.
 ifneq ($(LIBBPF_DEP),)
 $(BUNDLED_LIBBPF_A): | $(BUILD_DIR)
-	@echo "  LIBBPF   system libbpf lacks USDT — building $(LIBBPF_VERSION) from source"
+	@echo "  LIBBPF   system libbpf lacks USDT or ring-position APIs — building $(LIBBPF_VERSION) from source"
 	@rm -rf $(BUNDLED_LIBBPF_DIR)
 	@git clone -q --depth 1 --branch $(LIBBPF_VERSION) \
 		https://github.com/libbpf/libbpf.git $(BUNDLED_LIBBPF_DIR)

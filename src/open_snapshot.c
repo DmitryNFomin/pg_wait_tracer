@@ -643,6 +643,13 @@ static uint64_t cov_clock(void *ctx)
 static void cov_positions(void *ctx, struct pgwt_cov_tick_in *in)
 {
     struct pgwt_daemon *d = ctx;
+    /* Pure sampled mode reserves no event-ring records. Its empty fence is
+     * crossed by construction; exact-perf has a different transport. */
+    if (!d->event_rb && d->mode == PGWT_MODE_SAMPLED && !d->exact_perf) {
+        in->positions_known = true;
+        in->producer_pos = in->consumer_pos = 0;
+        return;
+    }
     /* A consumer cannot pass a busy reservation, even if later records have
      * committed. No emptiness/consume-return-value shortcut is valid here. */
     struct ring *ring = d->event_rb ? ring_buffer__ring(d->event_rb, 0) : NULL;

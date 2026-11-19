@@ -213,8 +213,11 @@ write), `sample_period_ns = 0`, v4 extension 0. Payload (little-endian):
 
 A writer session that enables coverage (the daemon always does) writes BOOT
 as the first block of every file and file_no runs on across rotation. The
-daemon writes a WATERMARK every second (W = the previous good tick's publish
-point, repeated as a heartbeat when it cannot advance), GAP records when the
+daemon writes a WATERMARK every second. W advances to the oldest pending
+publish point P once the consumer crosses its reservation-position fence,
+sampled after P on the single event ring, and the counters and publication
+succeed. Until then W repeats as a heartbeat. Sampled mode has no event ring
+and its empty fence is always crossed. The daemon writes GAP records when the
 capture counter vector moves or cannot be read, and SEAL only on a clean
 shutdown. Every data path skips type 3 (`tests/test_block_type_sites.py`
 enumerates the sites); recovery keeps it. Codec: `src/coverage_record.h`.
