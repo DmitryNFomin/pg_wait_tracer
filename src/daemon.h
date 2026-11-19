@@ -606,8 +606,8 @@ int pgwt_process_lifecycle_payload(struct pgwt_daemon *d,
  * escalation and open-snapshot callers). Keeps B out of those files. */
 int pgwt_consume_event_ring(struct pgwt_daemon *d, bool bounded);
 
-/* One event-loop or coverage drain yields after this many callbacks. Keep
- * coverage within the loop's per-pass bound even when callbacks are slow. */
+/* One event-loop drain yields after this many callbacks. Coverage ticks
+ * inspect positions and never consume callbacks themselves. */
 #define PGWT_EVENT_DRAIN_CALLBACK_BUDGET 64U
 
 /* Run the main event loop. Returns on signal or duration timeout. */

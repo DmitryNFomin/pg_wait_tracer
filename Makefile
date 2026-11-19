@@ -39,13 +39,14 @@ print-build-version:
 # The BPF program and daemon use USDT support: the BPF-side header
 # <bpf/usdt.bpf.h> and the userspace function bpf_program__attach_usdt(),
 # both of which require libbpf >= 0.8. Ubuntu (CI), Rocky 9 / RHEL 9 (CRB)
-# all ship a recent enough libbpf, so the system one is used unchanged.
+# supply USDT. Coverage additionally requires the 1.3+ position APIs;
+# check-libbpf-positions validates the selected headers AND linked library.
 #
 # Rocky 8 / RHEL 8 ships libbpf 0.5.0, which predates USDT entirely (no
 # usdt.bpf.h, no attach_usdt symbol). When the system libbpf is too old we
 # build a pinned libbpf from source into build/libbpf and link it statically.
 # This is detection-driven, so it is a no-op on every distro that already has
-# a usable libbpf — no Rocky 9 / Ubuntu / CI behaviour change.
+# USDT-capable libbpf. Missing position APIs fail loudly, without fallback.
 # ---------------------------------------------------------------------------
 LIBBPF_VERSION  ?= v1.4.7
 BPFTOOL_VERSION ?= v7.4.0
@@ -56,7 +57,7 @@ BPFTOOL_VERSION ?= v7.4.0
 SYSTEM_LIBBPF_HAS_USDT := $(shell CC='$(CC)' sh scripts/detect_libbpf_usdt.sh)
 
 ifeq ($(SYSTEM_LIBBPF_HAS_USDT),yes)
-  # System libbpf is recent enough — use it (Rocky 9, Ubuntu, CI: unchanged).
+  # Use the USDT-capable system library; validate coverage APIs at build time.
   BPF_LIBBPF_INC =
   LIBBPF_INC     =
   LIBBPF_LIB     = -lbpf
@@ -247,6 +248,14 @@ $(BUNDLED_BPFTOOL): | $(BUILD_DIR)
 	@echo "  BPFTOOL  built $@"
 endif
 
+# Coverage must not degrade to an emptiness heuristic on older system libbpf.
+# Order-only PHONY prerequisite: validate every daemon build, without forcing
+# recompilation. It is intentionally absent from the BPF-free server build.
+.PHONY: check-libbpf-positions
+check-libbpf-positions: $(LIBBPF_DEP)
+	@CC='$(CC)' CFLAGS='$(CFLAGS)' LIBBPF_LIB='$(LIBBPF_LIB)' \
+		sh scripts/check-libbpf-positions.sh
+
 # Step 1: Generate vmlinux.h from kernel BTF
 $(INC_DIR)/vmlinux.h: $(BPFTOOL_DEP)
 	@echo "  VMLINUX  $@"
@@ -258,7 +267,7 @@ $(BUILD_DIR)/pg_wait_tracer.bpf.o: $(BPF_DIR)/pg_wait_tracer.bpf.c \
                                     $(INC_DIR)/vmlinux.h \
                                     $(LIBBPF_DEP) \
                                     $(SRC_DIR)/pgwt_transport_wire.h \
-                                    $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR)
+                                    $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR) check-libbpf-positions
 	@echo "  BPF      $@"
 	@$(CLANG) $(BPF_CFLAGS) -c $< -o $@
 	@$(LLVM_STRIP) -g $@
@@ -271,13 +280,13 @@ $(INC_DIR)/pg_wait_tracer.skel.h: $(BUILD_DIR)/pg_wait_tracer.bpf.o
 # Step 4: Compile userspace C (all depend on skeleton + shared header)
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(INC_DIR)/pg_wait_tracer.skel.h \
                   $(LIBBPF_DEP) \
-                  $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR)
+                  $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR) check-libbpf-positions
 	@echo "  CC       $@"
 	@mkdir -p $(dir $@)
 	@$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Step 5: Link
-$(TARGET): $(USER_OBJS)
+$(TARGET): $(USER_OBJS) | check-libbpf-positions
 	@echo "  LINK     $@"
 	@$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 	@echo "  DONE     $@"

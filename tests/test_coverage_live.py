@@ -13,6 +13,8 @@ payload/CRC decoder is independent of the C codec. -i 5 tests timer autonomy.
 --self-test exercises the gate itself without Linux, root, PostgreSQL or BPF.
 """
 import argparse
+import ctypes
+import ctypes.util
 from collections import Counter
 import os
 from pathlib import Path
@@ -33,6 +35,13 @@ TRACER = ROOT / "pg_wait_tracer"
 PSQL = ["psql", "-X", "-U", "postgres", "-qAt", "-v", "ON_ERROR_STOP=1"]
 DB = "pgwt_coverage_live"
 SEC = 1_000_000_000
+TICK_NS = SEC
+# Healthy loop drains cross a reservation fence within one tick. A record
+# arriving just after P can wait one tick for a fence and one more for its
+# promotion: at most 2 ticks. Allow half a tick for timer scheduling, floor
+# reads and publication (the existing 2.5 s tick-spacing gate). Compare with
+# the LAST TICK'S observation, so kill/control-socket latency is excluded.
+FRESHNESS_NS = 2 * TICK_NS + TICK_NS // 2
 
 FILE_HDR = struct.Struct("<IHHIQQQ")        # v4/v6: 36 bytes
 BLOCK_HDR = struct.Struct("<QQIIIHHQQ")     # v4/v6: 48 bytes
@@ -50,7 +59,42 @@ def crc32c(data):
     return crc ^ 0xFFFFFFFF
 
 
-def coverage_records(path):
+def data_timestamps(payload, usize, count):
+    """v6 TRANSITIONS and SAMPLES share the first delta-varint column.
+
+    Decode every record, including mixed blocks that straddle W. Block
+    first/last timestamps cannot count individual late reservations.
+    """
+    assert 0 < usize <= 10 * 1024 * 1024, ("uncompressed size", usize)
+    if not hasattr(data_timestamps, "lz4"):
+        library = ctypes.util.find_library("lz4")
+        assert library, "liblz4 required for the file-order completeness scan"
+        lz4 = ctypes.CDLL(library)
+        lz4.LZ4_decompress_safe.argtypes = [ctypes.c_char_p, ctypes.c_void_p,
+                                            ctypes.c_int, ctypes.c_int]
+        lz4.LZ4_decompress_safe.restype = ctypes.c_int
+        data_timestamps.lz4 = lz4
+    out = ctypes.create_string_buffer(usize)
+    size = data_timestamps.lz4.LZ4_decompress_safe(payload, out, len(payload), usize)
+    assert size == usize, ("LZ4 data block", size, usize)
+    data, offset, previous = out.raw, 0, 0
+    for _ in range(count):
+        delta = 0
+        for shift in range(0, 70, 7):
+            assert offset < size, "truncated timestamp varint"
+            byte = data[offset]
+            offset += 1
+            assert shift < 63 or byte <= 1, "timestamp varint overflow"
+            delta |= (byte & 127) << shift
+            if not byte & 128:
+                break
+        else:
+            raise AssertionError("unterminated timestamp varint")
+        previous = (previous + delta) & ((1 << 64) - 1)
+        yield previous
+
+
+def coverage_records(path, scan=None):
     """[(observation, kind, reason, a, b, c, d, nonce)] in file order, the
     header flags and the number of data blocks. Walks blocks from the header
     until the bytes run out (a live file has no footer; an archive's footer
@@ -77,10 +121,50 @@ def coverage_records(path):
             assert (len(p) == 80) == (kind == 1), "BOOT is 80 bytes, others 48"
             nonce = p[40:56] if kind == 1 else None
             recs.append((first, KINDS[kind], reason, a, b, c, d, nonce))
+            if scan is not None and kind == 2:
+                scan["W"] = max(scan["W"], a)
         else:
             data += 1
+            if scan is not None:
+                assert btype in (1, 2), ("unknown data block", btype)
+                for timestamp in data_timestamps(blob[off + BLOCK_HDR.size:end], usize, nev):
+                    scan["data"] += 1
+                    if timestamp <= scan["W"]:
+                        scan["late"] += 1
         off = end
     return recs, flags, data
+
+
+def report_leg(recs, files, log, label, start_ns=0, end_ns=None):
+    """Scan a boot in file_no order; count each late data record once.
+
+    W persists across rotation BOOTs and repeated heartbeats. Any data record
+    timestamp <= the latest preceding WATERMARK is the residual from item 6,
+    whether it was reserved late or delayed by some other capture path.
+    """
+    scan = {"W": -1, "late": 0, "data": 0}
+    for _, path, _, _ in files:
+        coverage_records(path, scan)
+    wms = watermarks(recs)
+    previous = recs[0][3]
+    heartbeats = promotions = 0
+    for obs, w, _, _ in wms:
+        if start_ns <= obs and (end_ns is None or obs <= end_ns):
+            heartbeats += w == previous
+            promotions += w > previous
+        previous = w
+    ticks = [tuple(map(int, m)) for m in re.findall(
+        r"COVERAGE-TICK: obs=(\d+) W=(\d+) fence=(\d+) consumer=(\d+) "
+        r"promotions=\d+ heartbeats=\d+", log)]
+    ticks = [t for t in ticks if start_ns <= t[0] <= (end_ns or wms[-1][0])]
+    assert ticks, (label, "position diagnostics for every leg")
+    lag = [max(0, fence - consumer) for _, _, fence, consumer in ticks]
+    print(f"coverage live {label}: heartbeats={heartbeats} promotions={promotions}; "
+          f"fence={ticks[-1][2]} consumer={ticks[-1][3]} "
+          f"fence_consumer_lag_bytes last={lag[-1]} max={max(lag)}; "
+          f"late_after_W={scan['late']} data_records={scan['data']}", flush=True)
+    assert scan["late"] == 0, (label, "data timestamp <= preceding WATERMARK", scan)
+    return scan
 
 
 def find_pgbench():
@@ -103,7 +187,7 @@ def start_daemon(pm_pid, directory, log, env=None):
     print("coverage live: " + " ".join(cmd), flush=True)
     err = open(log, "w")
     d = subprocess.Popen(cmd, stderr=err, stdout=subprocess.DEVNULL,
-                         env={**os.environ, **(env or {})})
+                         env={**os.environ, "PGWT_DEBUG_DUMP_STATE": "1", **(env or {})})
     wait_for(d, lambda: (directory / "pgwt.sock").exists(), 45,
              "control socket not ready")
     return d, err
@@ -200,11 +284,13 @@ def drop_counter_tick(d, directory):
     return count
 
 
-def quiet_leg(d, directory, label, after=None):
+def quiet_leg(d, directory, label, after=None, log=None):
     time.sleep(5)
     assert d.poll() is None, (label, "daemon died during quiet control")
-    recs, _ = boot_files(directory)
+    recs, files = boot_files(directory)
     wms = watermarks(recs)
+    if log is not None:
+        report_leg(recs, files, Path(log).read_text(), label + " QUIET leg", start_ns=after or 0)
     assert len(wms) >= 3 and wms[-1][1] > recs[0][3], \
         (label, "quiet control must advance W beyond boot_start", wms)
     if after is not None:
@@ -236,11 +322,11 @@ def assert_load_coverage(recs, start_ns, end_ns, delta, label):
             pairs.append((op, r))
     loaded = [w for w in wms if start_ns <= w[0] <= end_ns]
     assert len(loaded) >= 8, (label, "load exercises several ticks", len(loaded))
-    lag_s = (end_ns - loaded[-1][1]) / SEC
+    lag_s = (loaded[-1][0] - loaded[-1][1]) / SEC
     print(f"coverage live MEASURED {label}: last W lag={lag_s:.3f}s", flush=True)
     drop_pairs = [(op, cl) for op, cl in pairs if op[2] == 2 and start_ns <= op[0] <= end_ns]
     if delta == 0:
-        assert 0 <= lag_s <= 2, (label, "fresh W within 2 s", lag_s)
+        assert 0 <= lag_s <= FRESHNESS_NS / SEC, (label, "fresh W within 2 ticks + 0.5 s of last observation", lag_s)
         drop_opens = [r for r in recs if r[1] == "GAP_OPEN" and r[2] == 2
                       and start_ns <= r[0] <= end_ns]
         assert not drop_opens, (label, "no drop gap without an independent drop", drop_opens)
@@ -260,7 +346,7 @@ def assert_load_coverage(recs, start_ns, end_ns, delta, label):
         for op, cl in sorted(drop_pairs, key=lambda pair: pair[0][3]):
             if op[3] <= through:
                 through = max(through, cl[3])
-        assert through >= end_ns - 2 * SEC, (label, "drop gaps must chain from last W to endpoint - 2 s", through, end_ns)
+        assert through >= loaded[-1][0] - FRESHNESS_NS, (label, "drop gaps must chain from last W to last observation - freshness bound", through, loaded[-1][0])
     return branch
 
 
@@ -288,6 +374,11 @@ def self_test():
     resumed = stalled + [rec(17, "WATERMARK", 4)] + [rec(t, "WATERMARK", t - 1) for t in range(18, 22)]
     assert_load_coverage(resumed, 5 * SEC, int(21.25 * SEC), 12, "self resumed")
 
+    # Delaying SIGKILL/control I/O must not change a last-tick verdict.
+    assert_load_coverage(clean, 5 * SEC, 30 * SEC, 0, "self delayed kill")
+    at_bound = clean[:-2] + [rec(15, "WATERMARK", 13.5), rec(16, "WATERMARK", 13.5)]
+    assert_load_coverage(at_bound, 5 * SEC, 30 * SEC, 0, "self two ticks plus margin")
+
     def refused(records, delta, label):
         with contextlib.redirect_stdout(io.StringIO()):
             try:
@@ -297,6 +388,8 @@ def self_test():
         raise AssertionError("live gate accepted " + label)
 
     refused(stalled, 0, "unwitnessed stall")
+    refused(clean[:-3] + [rec(t, "WATERMARK", 13.49) for t in (14, 15, 16)],
+            0, "last observation beyond two ticks plus margin")
     refused(clean + [rec(6, "GAP_OPEN", 3, c=99, reason=2)], 0, "unclosed false drop")
     refused(clean + [rec(6, "GAP_OPEN", 3, c=99, reason=2), rec(6, "GAP_CLOSE", 6, c=99)], 0, "false drop comparison")
     refused([r for r in stalled if not (r[0] == 10 * SEC and r[1].startswith("GAP_"))], 12, "one stalled tick without its own pair")
@@ -378,6 +471,73 @@ def self_test():
             assert "CRC" in str(exc)
         else:
             raise AssertionError("corrupt COVERAGE accepted")
+    def data_block(timestamps, kind=1):
+        # Independent LZ4 literals-only block and unsigned delta-varints;
+        # only the shared timestamp column is needed by this scanner.
+        raw, previous = bytearray(), 0
+        for timestamp in timestamps:
+            delta = (timestamp - previous) & ((1 << 64) - 1)
+            previous = timestamp
+            while delta >= 128:
+                raw.append((delta & 127) | 128)
+                delta >>= 7
+            raw.append(delta)
+        size = len(raw)
+        payload = bytearray([min(15, size) << 4])
+        if size >= 15:
+            extra = size - 15
+            while extra >= 255:
+                payload.append(255)
+                extra -= 255
+            payload.append(extra)
+        payload += raw
+        return BLOCK_HDR.pack(timestamps[0], timestamps[-1], len(timestamps),
+                              len(payload), size, kind, 0, 0, 0) + payload
+
+    def tick_log(records):
+        return "\n".join(f"COVERAGE-TICK: obs={obs} W={w} fence=800 consumer=792 "
+                         "promotions=1 heartbeats=1" for obs, w, _, _ in watermarks(records))
+
+    with tempfile.TemporaryDirectory(prefix="pgwt-coverage-order-") as tmp:
+        directory = Path(tmp)
+        nonce = bytes(range(16))
+        header = FILE_HDR.pack(0x54574750, 6, 0, 18, 0, 0, 0)
+        first = [rec(0, "BOOT", b=0, nonce=nonce), rec(6, "WATERMARK", 5),
+                 rec(7, "WATERMARK", 5)]
+        second = [rec(8, "BOOT", b=1, nonce=nonce), rec(10, "WATERMARK", 8)]
+        (directory / "z.trace.lz4").write_bytes(
+            header + block(first[0]) + data_block([1 * SEC, 2 * SEC]) + block(first[1])
+            + data_block([6 * SEC, 5 * SEC, 4 * SEC, 7 * SEC]) + block(first[2])
+            + data_block([5 * SEC]))
+        (directory / "a.trace.lz4").write_bytes(
+            header + block(second[0]) + data_block([5 * SEC]) + block(second[1])
+            + data_block([9 * SEC, 8 * SEC, 6 * SEC], kind=2))
+        records, files = boot_files(directory, nonce)
+        state = {"W": -1, "late": 0, "data": 0}
+        for _, path, _, _ in files:
+            coverage_records(path, state)
+        assert state == {"W": 8 * SEC, "late": 6, "data": 11}, state
+        # Exact W equality, both data types, unsorted timestamps, repeated
+        # watermarks and a rotation BOOT must all be counted in file order.
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            try:
+                report_leg(records, files, tick_log(records), "self late")
+            except AssertionError as exc:
+                assert "data timestamp <= preceding WATERMARK" in str(exc), exc
+            else:
+                raise AssertionError("late-after-W scan accepted six late records")
+        assert "late_after_W=6" in printed.getvalue()
+        (directory / "a.trace.lz4").unlink()
+        clean_records = [first[0], first[1], rec(8, "WATERMARK", 7)]
+        (directory / "z.trace.lz4").write_bytes(
+            header + block(first[0]) + data_block([1 * SEC, 2 * SEC])
+            + block(first[1]) + data_block([6 * SEC, 7 * SEC], kind=2)
+            + block(clean_records[-1]) + data_block([8 * SEC]))
+        records, files = boot_files(directory, nonce)
+        state = report_leg(records, files, tick_log(records), "self in-order")
+        assert state == {"W": 7 * SEC, "late": 0, "data": 5}, state
+    print("file-order scan: PASS (exact-W boundary, transitions, samples, heartbeat, rotation, inversion)")
+
     print("test_coverage_live --self-test: PASS (witness branches, per-tick pairs, chain, recovery, stats, rotation, CRC)")
 
 
@@ -411,7 +571,7 @@ def main():
             # Boot 1: quiet positive control, then SIGKILL under load.
             d, err = start_daemon(pm_pid, directory, base / "boot1.log")
             idle = idle_psql()
-            quiet_leg(d, directory, "boot1 before load")
+            quiet_leg(d, directory, "boot1 before load", log=base / "boot1.log")
             drops0 = drop_counter_tick(d, directory)
             load_start = time.monotonic_ns()
             load = pgbench(pgb, 30)
@@ -425,6 +585,8 @@ def main():
             recs1, files1 = boot_files(directory)
             assert "SEAL" not in [r[1] for r in recs1], "SIGKILL has no SEAL"
             assert not files1[-1][2] & FLAG_CLOSED_CLEAN, "killed file unclean"
+            report_leg(recs1, files1, (base / "boot1.log").read_text(),
+                       "boot1 SIGKILL", load_start, kill_ns)
             assert_load_coverage(recs1, load_start, kill_ns, delta1, "boot1 SIGKILL")
             assert len([w for w in watermarks(recs1) if w[0] >= load_start]) >= 12, \
                 "about one WATERMARK per second during boot 1 load"
@@ -439,7 +601,7 @@ def main():
 
             # Boot 2: restart proves all boot-1 files survive, even if rotated.
             d, err = start_daemon(pm_pid, directory, base / "boot2.log")
-            quiet_leg(d, directory, "boot2 before load")
+            quiet_leg(d, directory, "boot2 before load", log=base / "boot2.log")
             arecs, afiles = boot_files(directory, nonce1)
             assert arecs == recs1, "recovery preserves every COVERAGE record in file order"
             assert afiles[-1][2] & FLAG_RECOVERED and not afiles[-1][2] & FLAG_CLOSED_CLEAN, afiles
@@ -450,12 +612,14 @@ def main():
             assert d.poll() is None and load.poll() is None, "boot2 died under load"
             delta2 = drop_counter_tick(d, directory) - drops0
             load_check = time.monotonic_ns()
-            loaded_recs, _ = boot_files(directory)
+            loaded_recs, loaded_files = boot_files(directory)
+            report_leg(loaded_recs, loaded_files, (base / "boot2.log").read_text(),
+                       "boot2 load", load_start, load_check)
             assert_load_coverage(loaded_recs, load_start, load_check, delta2, "boot2 load")
             load.wait(timeout=15)
             assert load.returncode == 0, load.stderr.read()
             load_end = time.monotonic_ns()
-            quiet_leg(d, directory, "boot2 after load", after=load_end)
+            quiet_leg(d, directory, "boot2 after load", after=load_end, log=base / "boot2.log")
             # The final check uses the same witness rule up to SIGTERM, and
             # additionally requires recovery freshness after losses stop.
             delta2 = drop_counter_tick(d, directory) - drops0
@@ -473,8 +637,11 @@ def main():
             # Exclude the shutdown tick's observation after the signal; its W
             # is checked separately against the actual termination boundary.
             before_term = [r for r in recs2 if r[0] <= term_ns]
+            report_leg(recs2, files2, (base / "boot2.log").read_text(),
+                       "boot2 SIGTERM", load_start, term_ns)
             assert_load_coverage(before_term, load_start, term_ns, delta2, "boot2 before SIGTERM")
-            assert term_ns - 2 * SEC <= recs2[-1][3] <= term_ns, "fresh W_final after quiet recovery"
+            assert 0 <= wm2[-1][0] - recs2[-1][3] <= FRESHNESS_NS and recs2[-1][3] <= term_ns, \
+                "fresh W_final relative to last observation after quiet recovery"
             assert files2[-1][2] & FLAG_CLOSED_CLEAN, files2
             stats = coverage_stats((base / "boot2.log").read_text())
             runtime_s = (recs2[-1][0] - recs2[0][3]) / SEC
@@ -491,7 +658,7 @@ def main():
                   f"heartbeats={stats['heartbeats']} gaps={stats['gaps']}", flush=True)
             assert int(stats["write_failures"]) == 0, stats
 
-            # Boot 3: forced yields must still write heartbeat records.
+            # Boot 3: a held consumer witness must still write heartbeat records.
             d, err = start_daemon(pm_pid, directory, base / "boot3.log",
                                   {"PGWT_TEST_COVERAGE_YIELD": "1"})
             time.sleep(5)
@@ -499,10 +666,11 @@ def main():
             d.wait(timeout=30)
             assert d.returncode == 0, d.returncode
             err.close()
-            recs3, _ = boot_files(directory)
+            recs3, files3 = boot_files(directory)
+            report_leg(recs3, files3, (base / "boot3.log").read_text(), "boot3 held consumer")
             wm3 = watermarks(recs3)
             assert len(wm3) >= 3, len(wm3)
-            assert all(w == recs3[0][3] for _, w, _, _ in wm3), "forced yields hold W at boot_start"
+            assert all(w == recs3[0][3] for _, w, _, _ in wm3), "held consumer holds W at boot_start"
             assert recs3[-1][1] == "SEAL" and recs3[-1][3] == recs3[0][3], "W_final = boot_start"
             print(f"coverage live: forced-yield heartbeats ({len(wm3)} watermarks)", flush=True)
         finally:

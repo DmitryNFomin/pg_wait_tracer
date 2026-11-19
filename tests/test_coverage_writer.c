@@ -191,7 +191,7 @@ static struct pgwt_counter_vector cv_with(uint64_t drop)
     return v;
 }
 
-static struct pgwt_cov_tick_in tick_in(uint64_t pf, bool good_drain,
+static struct pgwt_cov_tick_in tick_in(uint64_t pf, bool fence_reached,
                                        const struct pgwt_counter_vector *cv,
                                        uint64_t fd, uint64_t fi)
 {
@@ -202,7 +202,9 @@ static struct pgwt_cov_tick_in tick_in(uint64_t pf, bool good_drain,
     in.floors_known = true;
     in.floor_db_ns = fd;
     in.floor_idle_ns = fi;
-    in.drain_complete = good_drain;
+    in.positions_known = true;
+    in.producer_pos = pf;
+    in.consumer_pos = fence_reached ? pf : 0;
     in.publish_ok = true;
     in.cv = cv;
     return in;
@@ -414,7 +416,7 @@ static void test_w_lags_one_tick_and_heartbeat(void)
     CHECK(pgwt_cov_tracker_tick(&t, &w, &in) == 0, "tick 1");
     in = tick_in(BASE + 2 * SEC, true, &cv, BASE + 1900 * MS, BASE + 1500 * MS);
     CHECK(pgwt_cov_tracker_tick(&t, &w, &in) == 0, "tick 2");
-    /* Forced drain yield: not a good tick. */
+    /* The consumer is still below the pending reservation fence. */
     in = tick_in(BASE + 3 * SEC, false, &cv, BASE + 2900 * MS, BASE + 2500 * MS);
     CHECK(pgwt_cov_tracker_tick(&t, &w, &in) == 0, "tick 3 (yield)");
     /* A failed publish is not good either. */
@@ -444,7 +446,7 @@ static void test_w_lags_one_tick_and_heartbeat(void)
         CHECK(x[1].w < BASE + 2 * SEC, "W never equals this tick's P");
         /* ticks 3 and 4: heartbeats repeat the last written triple */
         CHECK(x[2].w == x[1].w && x[2].fd == x[1].fd && x[2].fi == x[1].fi,
-              "a drain yield repeats W (heartbeat)");
+              "an incomplete reservation prefix repeats W (heartbeat)");
         CHECK(x[3].w == x[1].w, "a failed publish repeats W");
         CHECK(x[2].obs == BASE + 3 * SEC + 2 * MS,
               "a heartbeat is still a fresh observation");
@@ -554,7 +556,7 @@ static void test_counter_gaps(void)
 }
 
 /* Exercise the SAME collection sequence as the daemon, with an actual
- * daemon-side loss during drain. A post-drain counter read would consume it
+ * daemon-side loss during publish. A post-publish counter read would consume it
  * at tick k and close its only gap BEFORE the loss. */
 struct drain_loss {
     struct pgwt_counter_vector cv;
@@ -569,7 +571,13 @@ static uint64_t loss_clock(void *ctx)
 {
     return ((struct drain_loss *)ctx)->now;
 }
-static void loss_drain_publish(void *ctx, struct pgwt_cov_tick_in *in)
+static void loss_positions(void *ctx, struct pgwt_cov_tick_in *in)
+{
+    (void)ctx;
+    in->positions_known = true;
+    in->producer_pos = in->consumer_pos = 0;
+}
+static bool loss_publish(void *ctx)
 {
     struct drain_loss *d = ctx;
     if (d->inject) {
@@ -578,9 +586,9 @@ static void loss_drain_publish(void *ctx, struct pgwt_cov_tick_in *in)
         d->inject = false;
     }
     d->now += 2 * MS;
-    in->drain_complete = in->publish_ok = true;
+    return true;
 }
-static void test_loss_during_drain(void)
+static void test_loss_during_publish(void)
 {
     char dir[] = "/tmp/pgwt_cov_drain_loss_XXXXXX";
     if (make_dir(dir) != 0) { failures++; return; }
@@ -591,7 +599,7 @@ static void test_loss_during_drain(void)
     struct pgwt_cov_tracker t;
     pgwt_cov_tracker_init(&t, BASE, true, &d.cv);
     const struct pgwt_cov_tick_ops ops = {
-        loss_counters, loss_clock, loss_drain_publish,
+        loss_counters, loss_clock, loss_positions, loss_publish,
     };
     for (int k = 1; k <= 6; k++) {
         d.now = BASE + k * SEC;
@@ -620,9 +628,9 @@ static void test_loss_during_drain(void)
             pairs++;
         }
     }
-    CHECK(d.lost_at == BASE + 3 * SEC + MS, "stimulus during tick 3 drain");
+    CHECK(d.lost_at == BASE + 3 * SEC + MS, "stimulus during tick 3 publish");
     CHECK(pairs == 1 && start <= d.lost_at && d.lost_at < end,
-          "writer_push_fail during drain is covered by a drop gap");
+          "writer_push_fail during publish is covered by a drop gap");
     CHECK(end == BASE + 4 * SEC, "next tick detects loss and bounds its gap");
     CHECK(t.w_ns > d.lost_at, "W later passes the loss, which remains gapped");
     rm_rf(dir);
@@ -1027,7 +1035,7 @@ int main(void)
     test_boot_per_file();
     test_w_lags_one_tick_and_heartbeat();
     test_counter_gaps();
-    test_loss_during_drain();
+    test_loss_during_publish();
     test_floors();
     test_seal_only_on_clean_close();
     test_v4_paths_skip_type3();

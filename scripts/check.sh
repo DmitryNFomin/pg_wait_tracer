@@ -74,7 +74,8 @@ run python3 -B tests/test_init_hint_known_class.py
 # Keep ASan/UBSan coverage in this gate; standalone runs select it via CFLAGS.
 step "coverage live gate controls (host, no BPF)"
 run python3 -B tests/test_coverage_live_helpers.py
-run python3 -B tests/test_coverage_drain.py
+run python3 -B tests/test_coverage_drain.py --mutants
+run python3 -B tests/test_libbpf_positions.py
 
 step "capture counter vector, validity and sticky writer (host C, Refs #871)"
 run python3 -B tests/test_counter_vector_portable.py

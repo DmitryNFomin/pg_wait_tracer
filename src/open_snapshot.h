@@ -440,14 +440,12 @@ void pgwt_collect_open_intervals(struct pgwt_daemon *d,
  * floor fold are PURE (no BPF, no daemon): tests/test_coverage_writer.c
  * drives them against the real writer on any host.
  *
- * W is the PREVIOUS good tick's publish_from (C5): a record stamped before
- * P(t-1) is in the ring by drain(t) unless its BPF program was preempted for
- * more than a tick between stamping it and outputting it. A tick is GOOD when
- * the drain completed, the publish succeeded and the counter vector is known
- * and unchanged since the last good tick. A good tick writes
- * WATERMARK(pending) and keeps this tick's triple as the new pending one;
- * any other tick writes WATERMARK(last written) as a heartbeat (C4), so a
- * running daemon writes one every tick and "stale" means "gone". */
+ * W is the OLDEST pending publish point whose fixed reservation fence the
+ * event loop has consumed and successfully published. The coverage tick never
+ * consumes the ring. Newer traffic cannot move that fence; a busy head cannot
+ * be passed. Known, unchanged loss counters are also required. Until then a
+ * tick repeats the last written triple as a heartbeat (C4). The producer's
+ * timestamp-before-reservation window remains a measured residual. */
 
 #include "counter_vector.h"
 
@@ -479,22 +477,24 @@ pgwt_cov_cv_compare(const struct pgwt_counter_vector *base,
 
 struct pgwt_cov_tick_in {
     uint64_t observation_ns;     /* mono at write */
-    uint64_t publish_from_ns;    /* mono taken before this tick's drain */
+    uint64_t publish_from_ns;    /* mono before the reservation fence */
     bool     floors_known;       /* false: no watchpoint intervals (sampled
                                   * tier, de-escalated tiered): floors = W */
     uint64_t floor_db_ns, floor_idle_ns;
-    bool     drain_complete;     /* the bounded drain did not yield */
+    bool     positions_known;
+    uint64_t producer_pos, consumer_pos; /* libbpf reservation byte positions */
     bool     publish_ok;
     const struct pgwt_counter_vector *cv;   /* NULL = unreadable */
 };
 
-/* The ordering seam used by the daemon and the host regression: a counter
- * increment during drain/publish belongs to the NEXT tick's gap, whose end
- * is later than that increment. Floors are filled before this call. */
+/* Floors, counters, P, producer fence, consumer position, publish, observation.
+ * A loss after the counter read belongs to the NEXT tick's gap, ending after
+ * that loss. The ops deliberately expose no ring consume operation. */
 struct pgwt_cov_tick_ops {
     struct pgwt_counter_vector (*counters)(void *ctx);
     uint64_t (*clock)(void *ctx);
-    void (*drain_publish)(void *ctx, struct pgwt_cov_tick_in *in);
+    void (*positions)(void *ctx, struct pgwt_cov_tick_in *in);
+    bool (*publish)(void *ctx);
 };
 void pgwt_cov_collect_tick(struct pgwt_cov_tick_in *in,
                            struct pgwt_counter_vector *cv, void *ctx,
@@ -502,21 +502,22 @@ void pgwt_cov_collect_tick(struct pgwt_cov_tick_in *in,
 
 struct pgwt_cov_tracker {
     bool     watermarks;         /* false (lightweight, exact_perf): SEAL only */
+    bool     consume_failed;     /* unexpected callback/consume error: fail closed */
     uint64_t boot_start_ns;
     /* last WRITTEN watermark triple (boot_start until the first one) */
     uint64_t w_ns, fd_ns, fi_ns;
-    /* the previous good tick's triple, written by the next good tick */
+    /* oldest pending triple and its FIXED producer reservation fence */
     bool     has_pending;
-    uint64_t p_ns, pfd_ns, pfi_ns;
+    uint64_t p_ns, pfd_ns, pfi_ns, p_fence;
     bool     base_known;
     struct pgwt_counter_vector base;
     bool     gap_open;
     uint64_t gap_id;             /* id of the open gap, or the last one */
     /* measurements (box test, status) */
     uint64_t ticks, good_ticks, heartbeats, gaps, write_failures;
+    uint64_t promotions, fence_pos, consumer_pos;
     uint64_t tick_cpu_ns;        /* daemon thread CPU inside coverage ticks */
-    uint64_t drain_cpu_ns;       /* ...of which the ring drain (work the main
-                                  * loop would otherwise do) */
+    uint64_t drain_cpu_ns;       /* retained cost field: always zero */
 };
 
 /* `base` is the counter vector at boot_start (NULL or invalid: unknown, so

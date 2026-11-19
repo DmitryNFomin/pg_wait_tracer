@@ -108,7 +108,14 @@ int pgwt_consume_event_ring(struct pgwt_daemon *d, bool bounded)
     if (d->exact_perf)
         return d->transport.consume
             ? d->transport.consume(d, PGWT_WIRE_DEST_E, bounded) : -ENOSYS;
-    return ring_buffer__consume(d->event_rb);
+    int rc = ring_buffer__consume(d->event_rb);
+    bool yielded = rc == -EAGAIN && d->event_drain_callback_limit != 0 &&
+                   d->event_drain_callbacks_current >= d->event_drain_callback_limit;
+    /* libbpf can advance consumer_pos past a rejected callback. Crossing a
+     * fence after such an error cannot certify that prefix for this boot. */
+    if (rc < 0 && !yielded)
+        d->coverage.consume_failed = true;
+    return rc;
 }
 
 static bool consume_event_ring(struct pgwt_daemon *d, const char *op,

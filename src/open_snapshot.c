@@ -330,7 +330,8 @@ void pgwt_cov_collect_tick(struct pgwt_cov_tick_in *in,
     *cv = ops->counters(ctx);
     in->cv = cv;
     in->publish_from_ns = ops->clock(ctx);
-    ops->drain_publish(ctx, in);
+    ops->positions(ctx, in);
+    in->publish_ok = ops->publish(ctx);
     in->observation_ns = ops->clock(ctx);
 }
 
@@ -432,6 +433,7 @@ static void cov_take_pending(struct pgwt_cov_tracker *t)
     t->fd_ns = t->pfd_ns > t->w_ns ? t->w_ns : t->pfd_ns;
     t->fi_ns = t->pfi_ns > t->fd_ns ? t->fd_ns : t->pfi_ns;
     t->has_pending = false;
+    t->promotions++;
 }
 
 static void cov_set_pending(struct pgwt_cov_tracker *t,
@@ -447,6 +449,7 @@ static void cov_set_pending(struct pgwt_cov_tracker *t,
     if (fi > fd) fi = fd;
     if (fd < t->boot_start_ns) fd = t->boot_start_ns;
     if (fi < t->boot_start_ns) fi = t->boot_start_ns;
+    t->p_fence = in->producer_pos;
     t->p_ns = p;
     t->pfd_ns = fd;
     t->pfi_ns = fi;
@@ -461,20 +464,36 @@ int pgwt_cov_tracker_tick(struct pgwt_cov_tracker *t,
         return 0;
     int rc = 0;
     t->ticks++;
+    struct pgwt_cov_tracker before = *t;
     bool good = cov_counters(t, w, in, &rc) &&
-                in->drain_complete && in->publish_ok;
+                in->positions_known && in->publish_ok;
+    t->fence_pos = t->has_pending ? t->p_fence : in->producer_pos;
+    t->consumer_pos = in->consumer_pos;
     if (good) {
         t->good_ticks++;
-        if (t->has_pending)
+        if (t->has_pending && in->consumer_pos >= t->p_fence)
             cov_take_pending(t);
         else
             t->heartbeats++;
-        cov_set_pending(t, in);
+        /* Retain the oldest point AND its floors/fence while it is pending. */
+        if (!t->has_pending)
+            cov_set_pending(t, in);
     } else {
         t->heartbeats++;
     }
-    if (cov_write_wm(t, w, in->observation_ns) != 0)
+    if (cov_write_wm(t, w, in->observation_ns) != 0) {
+        /* Only a successfully written WATERMARK can commit a promotion. */
+        t->w_ns = before.w_ns;
+        t->fd_ns = before.fd_ns;
+        t->fi_ns = before.fi_ns;
+        t->has_pending = before.has_pending;
+        t->p_ns = before.p_ns;
+        t->pfd_ns = before.pfd_ns;
+        t->pfi_ns = before.pfi_ns;
+        t->p_fence = before.p_fence;
+        t->promotions = before.promotions;
         rc = -1;
+    }
     return rc;
 }
 
@@ -490,19 +509,8 @@ int pgwt_cov_tracker_seal(struct pgwt_cov_tracker *t,
     if (!w->cov_enabled ||
         (!w->fp && w->cov_next_file_no == 0 && !t->watermarks))
         return 0;
-    if (t->watermarks) {
-        t->ticks++;
-        bool good = cov_counters(t, w, in, &rc) &&
-                    in->drain_complete && in->publish_ok;
-        if (good && t->has_pending) {
-            t->good_ticks++;
-            cov_take_pending(t);
-        } else {
-            t->heartbeats++;
-        }
-        if (cov_write_wm(t, w, in->observation_ns) != 0)
-            rc = -1;
-    }
+    if (t->watermarks && pgwt_cov_tracker_tick(t, w, in) != 0)
+        return -1;
     if (pgwt_writer_coverage_seal(w, in->observation_ns, t->w_ns) != 0) {
         t->write_failures++;
         rc = -1;
@@ -602,8 +610,8 @@ static uint64_t cov_thread_cpu_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-/* TEST ONLY: PGWT_TEST_COVERAGE_YIELD=1 makes every coverage drain report a
- * yield, so the box test can watch the heartbeat path on a real daemon. */
+/* TEST ONLY: hold the consumer witness below every reservation fence so
+ * the live test can exercise heartbeat-only ticks, including shutdown. */
 static bool cov_test_force_yield(void)
 {
     static int v = -1;
@@ -616,7 +624,14 @@ static bool cov_test_force_yield(void)
 
 static struct pgwt_counter_vector cov_read_counters(void *ctx)
 {
-    return pgwt_daemon_counter_vector(ctx);
+    struct pgwt_daemon *d = ctx;
+    struct pgwt_counter_vector cv = pgwt_daemon_counter_vector(d);
+    /* An unexpected consume/callback error leaves the prefix unverifiable.
+     * Reuse the fail-closed unknown gap until a new boot, never infer success
+     * from a consumer position that may have passed the rejected record. */
+    if (d->coverage.consume_failed)
+        cv.valid = false;
+    return cv;
 }
 
 static uint64_t cov_clock(void *ctx)
@@ -625,29 +640,29 @@ static uint64_t cov_clock(void *ctx)
     return now_ns();
 }
 
-static void cov_drain_publish(void *ctx, struct pgwt_cov_tick_in *in)
+static void cov_positions(void *ctx, struct pgwt_cov_tick_in *in)
 {
     struct pgwt_daemon *d = ctx;
-    in->drain_complete = true;
-    uint64_t drain_cpu0 = cov_thread_cpu_ns();
-    if (d->event_rb) {
-        d->event_drain_callbacks_current = 0;
-        /* This runs on every coverage timer tick. One loop-sized pass is
-         * enough: a backlog yields a heartbeat, never a larger drain that
-         * can starve the display timer under slow callbacks. */
-        d->event_drain_callback_limit = PGWT_EVENT_DRAIN_CALLBACK_BUDGET;
-        int rc = pgwt_consume_event_ring(d, true);
-        bool yielded = d->event_drain_callbacks_current
-                       >= PGWT_EVENT_DRAIN_CALLBACK_BUDGET && rc < 0;
-        d->event_drain_callback_limit = 0;
-        in->drain_complete = !yielded;
+    /* A consumer cannot pass a busy reservation, even if later records have
+     * committed. No emptiness/consume-return-value shortcut is valid here. */
+    struct ring *ring = d->event_rb ? ring_buffer__ring(d->event_rb, 0) : NULL;
+    in->positions_known = ring != NULL;
+    if (ring) {
+        in->producer_pos = ring__producer_pos(ring);
+        in->consumer_pos = ring__consumer_pos(ring);
+        if (cov_test_force_yield()) {
+            in->producer_pos = in->producer_pos ? in->producer_pos : 1;
+            in->consumer_pos = 0;
+        }
     }
-    d->coverage.drain_cpu_ns += cov_thread_cpu_ns() - drain_cpu0;
-    if (cov_test_force_yield())
-        in->drain_complete = false;
-    /* A publish with nothing appended since the last one writes nothing:
-     * the writer's buffers are empty and both flushes return at once. */
-    in->publish_ok = pgwt_writer_publish(d->event_writer) == 0;
+}
+
+static bool cov_publish(void *ctx)
+{
+    struct pgwt_daemon *d = ctx;
+    /* Only publish what the event loop has already consumed. Empty buffers
+     * make this a no-op; callback cost is outside the coverage tick. */
+    return pgwt_writer_publish(d->event_writer) == 0;
 }
 
 static void cov_gather(struct pgwt_daemon *d, struct pgwt_cov_tick_in *in,
@@ -659,7 +674,7 @@ static void cov_gather(struct pgwt_daemon *d, struct pgwt_cov_tick_in *in,
     int state_fd = (wp && d->skel)
                  ? bpf_map__fd(d->skel->maps.state_map) : -1;
     if (wp) {
-        /* Floors FIRST, then the drain (open_snapshot order): a wait open at
+        /* Floors FIRST, then P and its fence: a wait open at
          * the snapshot started at or after its floor. */
         struct pgwt_cov_floors f;
         pgwt_cov_floors_begin(&f, now_ns());
@@ -684,7 +699,8 @@ static void cov_gather(struct pgwt_daemon *d, struct pgwt_cov_tick_in *in,
     const struct pgwt_cov_tick_ops ops = {
         .counters = cov_read_counters,
         .clock = cov_clock,
-        .drain_publish = cov_drain_publish,
+        .positions = cov_positions,
+        .publish = cov_publish,
     };
     pgwt_cov_collect_tick(in, cv, d, &ops);
 }
@@ -699,11 +715,22 @@ void pgwt_coverage_tick(struct pgwt_daemon *d)
     if (!d->coverage_started || !d->event_writer || !d->coverage.watermarks)
         return;
     uint64_t cpu0 = cov_thread_cpu_ns();
+    uint64_t wall0 = now_ns();
     struct pgwt_cov_tick_in in;
     struct pgwt_counter_vector cv;
     cov_gather(d, &in, &cv);
     pgwt_cov_tracker_tick(&d->coverage, d->event_writer, &in);
     d->coverage.tick_cpu_ns += cov_thread_cpu_ns() - cpu0;
+    if (d->debug_dump_state)
+        fprintf(stderr, "COVERAGE-TICK: obs=%llu W=%llu fence=%llu consumer=%llu "
+                "promotions=%llu heartbeats=%llu duration_ns=%llu\n",
+                (unsigned long long)in.observation_ns,
+                (unsigned long long)d->coverage.w_ns,
+                (unsigned long long)d->coverage.fence_pos,
+                (unsigned long long)d->coverage.consumer_pos,
+                (unsigned long long)d->coverage.promotions,
+                (unsigned long long)d->coverage.heartbeats,
+                (unsigned long long)(now_ns() - wall0));
 }
 
 void pgwt_coverage_shutdown(struct pgwt_daemon *d)
@@ -712,17 +739,21 @@ void pgwt_coverage_shutdown(struct pgwt_daemon *d)
         return;
     d->coverage_started = false;
     struct pgwt_cov_tick_in in = {0};
-    /* The run loop's final drain was unbounded and is complete; the
-     * open-interval flush has already pushed its closing records. */
-    /* Frozen BEFORE final_drain_from, just as in a periodic tick. Taking a
-     * fresh baseline here would absorb losses during the final drain/flush
-     * into a gap ending before those losses. The conservative pending W
-     * leaves that tail uncovered. */
-    in.cv = &d->final_drain_counters;
-    in.publish_from_ns = d->final_drain_from_ns;
-    in.drain_complete = true;
-    in.publish_ok = pgwt_writer_publish(d->event_writer) == 0;
-    in.observation_ns = now_ns();
+    /* The final drain may stop at a BUSY record. Inspect the same fixed
+     * fence as periodic ticks; SEAL must never assume that drain completed. */
+    /* Re-read counters BEFORE a new shutdown P, after all callbacks and the
+     * open-interval flush. Otherwise an old record rejected in the final
+     * drain could be missed by a frozen pre-drain counter vector. Losses
+     * still get exactly [last written W, P], and the oldest pending point,
+     * its floors and fence remain the only possible promotion. */
+    struct pgwt_counter_vector cv;
+    const struct pgwt_cov_tick_ops ops = {
+        .counters = cov_read_counters,
+        .clock = cov_clock,
+        .positions = cov_positions,
+        .publish = cov_publish,
+    };
+    pgwt_cov_collect_tick(&in, &cv, d, &ops);
     if (pgwt_cov_tracker_seal(&d->coverage, d->event_writer, &in) != 0)
         fprintf(stderr, "WARN: coverage: the SEAL record was not written "
                 "durably — this run will read as stopped uncleanly\n");
@@ -730,7 +761,8 @@ void pgwt_coverage_shutdown(struct pgwt_daemon *d)
     /* One line per run: what the box test reads for the cost budget. */
     fprintf(stderr, "INFO: coverage: ticks=%llu good=%llu heartbeats=%llu "
             "gaps=%llu write_failures=%llu records=%llu bytes=%llu "
-            "tick_cpu_ns=%llu drain_cpu_ns=%llu W_final=%llu\n",
+            "tick_cpu_ns=%llu drain_cpu_ns=%llu W_final=%llu "
+            "promotions=%llu fence=%llu consumer=%llu\n",
             (unsigned long long)t->ticks, (unsigned long long)t->good_ticks,
             (unsigned long long)t->heartbeats, (unsigned long long)t->gaps,
             (unsigned long long)t->write_failures,
@@ -738,6 +770,9 @@ void pgwt_coverage_shutdown(struct pgwt_daemon *d)
             (unsigned long long)d->event_writer->cov_bytes_written,
             (unsigned long long)t->tick_cpu_ns,
             (unsigned long long)t->drain_cpu_ns,
-            (unsigned long long)t->w_ns);
+            (unsigned long long)t->w_ns,
+            (unsigned long long)t->promotions,
+            (unsigned long long)t->fence_pos,
+            (unsigned long long)t->consumer_pos);
 }
 #endif /* !PGWT_SERVER */
