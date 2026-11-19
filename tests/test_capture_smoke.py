@@ -45,7 +45,9 @@ import os
 import re
 import secrets
 import select
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -872,6 +874,152 @@ def pgss_query_id_for(pattern):
     return int(out) & 0xFFFFFFFFFFFFFFFF if re.fullmatch(r'-?\d+', out) else None
 
 
+# ── #966: Mode C drill failure diagnostics ─────────────────────────
+# Diagnostics only: nothing here calls check(), so the drill's verdict is
+# decided before the block runs and cannot be changed by it. Every part
+# catches its own errors and prints "DIAG UNAVAILABLE: <reason>".
+
+QATTR_DIAG_METRIC_KEY = re.compile(
+    r'(lost|loss|drop|fail|attach|mask|unattrib|overflow|errno)')
+QATTR_DIAG_MAX_BARS = 60
+
+
+def qattr_diag_keep_root():
+    """Where a failing drill's trace dir is kept (gitignored by default)."""
+    return (os.environ.get("PGWT_QATTR_DIAG_DIR")
+            or os.path.join(PROJECT_DIR, "tests", "results", "qattr_diag"))
+
+
+def qattr_metrics_snapshot(trace_dir):
+    """One `metrics` call over the daemon control socket, taken before the
+    tracer is terminated. Returns (response, None) or (None, reason)."""
+    try:
+        resp = ctl_query(trace_dir, "metrics", timeout=5)
+    except Exception as e:  # diagnostics must never raise into the drill
+        return None, f"metrics call failed: {type(e).__name__}: {e}"
+    if not isinstance(resp, dict) or resp.get("ok") is not True:
+        return None, f"metrics call answered {str(resp)[:200]}"
+    return resp, None
+
+
+def keep_failed_trace_dir(trace_dir, keep_root):
+    """Move trace_dir under keep_root and return the new path. A move across
+    filesystems falls back to a copy that skips sockets and other special
+    files (pgwt.sock), then removes the original."""
+    os.makedirs(keep_root, exist_ok=True)
+    dest = os.path.join(keep_root, os.path.basename(trace_dir.rstrip(os.sep)))
+    try:
+        os.rename(trace_dir, dest)
+        return dest
+    except OSError:
+        pass
+
+    def special_files(directory, names):
+        skipped = []
+        for name in names:
+            mode = os.lstat(os.path.join(directory, name)).st_mode
+            if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                skipped.append(name)
+        return skipped
+
+    shutil.copytree(trace_dir, dest, ignore=special_files)
+    shutil.rmtree(trace_dir, ignore_errors=True)
+    return dest
+
+
+def _qattr_diag_rel_ms(ts_ns, mark_ns):
+    if mark_ns is None:
+        return "n/a"
+    return f"{(ts_ns - mark_ns) / 1e6:+.1f}ms"
+
+
+def qattr_mode_c_diagnostics(trace_dir, metrics, metrics_err, pids, marks):
+    """Print the #966 diagnostics block for a failed full-mode Mode C drill
+    and keep its trace dir. Never raises. Returns the kept path, or None if
+    the dir could not be kept (it is then left in place, never deleted)."""
+    print("  --- #966 qattr Mode C diagnostics (full mode, FAIL only) ---")
+    fire_ns = marks.get("fire_ns")
+    release_ns = marks.get("release_ns")
+
+    # 1a. what the harness knows, on CLOCK_REALTIME (time.time_ns()), the
+    # same wall clock pgwt-server reports trace timestamps in.
+    try:
+        print(f"  diag: pids holder={pids.get('holder')} "
+              f"waiter={pids.get('waiter')} sleeper={pids.get('sleeper')}")
+        print("  diag: harness wall-clock ns: "
+              + " ".join(f"{k}={marks.get(k)}" for k in (
+                  "fire_ns", "fire_returned_ns", "release_ns",
+                  "release_returned_ns", "observed_ns")))
+        if fire_ns is not None and release_ns is not None:
+            print(f"  diag: planned wait fire->release = "
+                  f"{(release_ns - fire_ns) / 1e6:.1f}ms")
+    except Exception as e:
+        print(f"  DIAG UNAVAILABLE: harness marks: {type(e).__name__}: {e}")
+
+    # 1b. the waiter's intervals from the full-mode trace, read through
+    # pgwt-server's session_timeline route (pid filter). Bars merge
+    # back-to-back records of one wait class; total_count counts records.
+    try:
+        waiter = pids.get("waiter")
+        if not waiter:
+            raise RuntimeError("waiter backend pid was not discovered")
+        resp = server_query(trace_dir, "session_timeline", {"pid": waiter},
+                            timeout_s=30)
+        if not isinstance(resp, dict) or "error" in resp:
+            raise RuntimeError(
+                f"session_timeline answered {str(resp)[:200]}")
+        bars = resp.get("events") or []
+        print(f"  diag: reader=pgwt-server session_timeline pid={waiter}: "
+              f"bars={len(bars)} total_count={resp.get('total_count')} "
+              f"truncated={resp.get('truncated')} "
+              f"fidelity={resp.get('fidelity')}")
+        lock_total_ns = 0
+        for bar in bars[:QATTR_DIAG_MAX_BARS]:
+            start = int(bar.get("s", 0))
+            dur = int(bar.get("d", 0))
+            end = start + dur
+            name = bar.get("n")
+            is_lock = name == "Lock:relation"
+            if is_lock:
+                lock_total_ns += dur
+            print(f"  diag: {'LOCK ' if is_lock else '     '}{name} "
+                  f"start={start} end={end} dur={dur / 1e6:.1f}ms "
+                  f"query_id={bar.get('q')} "
+                  f"start-fire={_qattr_diag_rel_ms(start, fire_ns)} "
+                  f"end-release={_qattr_diag_rel_ms(end, release_ns)}")
+        if len(bars) > QATTR_DIAG_MAX_BARS:
+            print(f"  diag: ({len(bars) - QATTR_DIAG_MAX_BARS} more bars "
+                  f"not printed)")
+        print(f"  diag: waiter Lock:relation total in printed bars = "
+              f"{lock_total_ns / 1e6:.1f}ms")
+    except Exception as e:
+        print(f"  DIAG UNAVAILABLE: waiter intervals: "
+              f"{type(e).__name__}: {e}")
+
+    # 2. the one metrics call taken before terminate.
+    try:
+        if metrics is None:
+            raise RuntimeError(metrics_err or "no metrics snapshot")
+        keys = sorted(k for k in metrics if QATTR_DIAG_METRIC_KEY.search(k))
+        print(f"  diag: metrics (before terminate, {len(keys)} loss/attach/"
+              f"unattributed keys):")
+        for i in range(0, len(keys), 4):
+            print("  diag:   " + " ".join(
+                f"{k}={metrics[k]}" for k in keys[i:i + 4]))
+    except Exception as e:
+        print(f"  DIAG UNAVAILABLE: metrics: {type(e).__name__}: {e}")
+
+    # 3. keep the trace dir instead of deleting it.
+    try:
+        kept = keep_failed_trace_dir(trace_dir, qattr_diag_keep_root())
+        print(f"  diag: trace dir kept at {kept}")
+        return kept
+    except Exception as e:
+        print(f"  DIAG UNAVAILABLE: keep trace dir: {type(e).__name__}: {e}; "
+              f"left in place at {trace_dir}")
+        return None
+
+
 def phase_live_query_attribution(pm_pid, mode, pg_major, core=False):
     """Issue #128: the controlled waiter's Lock:relation wait must be
     attributed to ITS statement's query_id — in query_event Mode A (no
@@ -970,7 +1118,9 @@ def phase_live_query_attribution(pm_pid, mode, pg_major, core=False):
         return
     failures_before = tests_failed
     wl = Workload()
-    wl.open_sessions()
+    # Backend pids are discovered before the tracer starts; only the #966
+    # diagnostics block reads them.
+    wl.open_sessions(discover_pids=True)
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_qattr_c_")
     os.chmod(trace_dir, 0o755)
     tracer_stdout = tempfile.TemporaryFile()
@@ -981,27 +1131,40 @@ def phase_live_query_attribution(pm_pid, mode, pg_major, core=False):
          "--interval", "12", "--duration", "60", "--view", "query_event",
          "--query-id", str(signed_truth)],
         stdout=tracer_stdout, stderr=tracer_stderr)
+    diag_marks = {}
+    diag_metrics = None
+    diag_metrics_err = "not taken: the live output reached the floor"
+    diag_pids = {}
     try:
         check(wait_for_control_socket(tracer, trace_dir, timeout_s=180),
               f"qattr/{mode} Mode C: tracer reached the post-attach startup "
               f"boundary")
+        diag_marks["fire_ns"] = time.time_ns()
         wl.fire(sleep_s=3)
+        diag_marks["fire_returned_ns"] = time.time_ns()
         time.sleep(6.5)
+        diag_marks["release_ns"] = time.time_ns()
         wl.release()
-        wait_for_observation(
+        diag_marks["release_returned_ns"] = time.time_ns()
+        observed = wait_for_observation(
             tracer,
             lambda: max((e['total_ms'] for e in parse_system_events(
                 temp_output_text(tracer_stdout))
                 if e['name'] == 'Lock:relation'), default=0) >= lock_floor,
             30)
+        diag_marks["observed_ns"] = time.time_ns()
+        # #966: the live output never reached the floor, so the drill is
+        # about to FAIL; take the one metrics call while the daemon lives.
+        if mode == "full" and not observed:
+            diag_metrics, diag_metrics_err = qattr_metrics_snapshot(trace_dir)
     finally:
         terminate_and_wait(tracer)
+        diag_pids = dict(wl.backend_pids or {})
         wl.stop()
     out = STRIP_ANSI.sub('', temp_output_text(tracer_stdout))
     err = temp_output_text(tracer_stderr)
     tracer_stdout.close()
     tracer_stderr.close()
-    subprocess.run(["rm", "-rf", trace_dir])
     profile = parse_system_events(out)
     lock_ms = max((e['total_ms'] for e in profile
                    if e['name'] == 'Lock:relation'), default=0)
@@ -1011,6 +1174,18 @@ def phase_live_query_attribution(pm_pid, mode, pg_major, core=False):
           f"[issue #128]"
           + ("" if lock_ms >= lock_floor else
              f" (rows: {[(e['name'], e['total_ms']) for e in profile]})"))
+
+    # #966: on a full-mode drill FAIL, print the diagnostics block and keep
+    # the trace dir; otherwise (PASS, or tiered) remove it as before.
+    if mode == "full" and lock_ms < lock_floor:
+        try:
+            qattr_mode_c_diagnostics(trace_dir, diag_metrics,
+                                     diag_metrics_err, diag_pids, diag_marks)
+        except Exception as e:  # the block already guards each part
+            print(f"  DIAG UNAVAILABLE: {type(e).__name__}: {e}; "
+                  f"trace dir left at {trace_dir}")
+    else:
+        subprocess.run(["rm", "-rf", trace_dir])
 
     if tests_failed > failures_before:
         print(f"  Mode C daemon stderr tail: {err[-300:]!r}")
