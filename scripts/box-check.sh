@@ -24,6 +24,8 @@
 #   PGWT_BOX_OUTAGE_SECONDS  total failed-poll/outage budget (default 1800s)
 #   PGWT_BOX_POLL_SECONDS    healthy poll interval (default 10s); transport
 #                     failures back off 2, 4, 8, 16, then 30s, within that budget
+#   PGWT_BOX_RUN_SECONDS     whole detached wait ceiling (default 14400s);
+#                     dead worker / ceiling exits 77, transport give-up exits 76
 #   PGWT_PGPORT / PGWT_PG_PORT_BASE   forwarded to the remote tests/run_all.sh
 #                     (via `sudo env ...`, since sudo's default env_reset would
 #                     otherwise drop them) when set on the Mac side; see
@@ -85,6 +87,9 @@
 # box-check-ephemeral-<os>-<ts>.log for EPHEMERAL=1 runs); the last lines
 # (run_all.sh summary) are echoed so an agent can paste them into a PR.
 set -uo pipefail
+# A signal can arrive inside a poll whose stdout is redirected to a reply
+# file. Keep the caller's output available for the abort diagnostic.
+exec 3>&1
 cd "$(dirname "$0")/.."
 
 OS="${OS:-ubuntu}"
@@ -93,8 +98,10 @@ EPHEMERAL="${EPHEMERAL:-0}"
 KEEP="${KEEP:-0}"
 outage_bound="${PGWT_BOX_OUTAGE_SECONDS:-1800}"
 poll_interval="${PGWT_BOX_POLL_SECONDS:-10}"
-for value in "$outage_bound" "$poll_interval"; do
-    [[ "$value" =~ ^[1-9][0-9]*$ ]] || { echo 'box-check: poll/outage seconds must be positive integers' >&2; exit 2; }
+run_bound="${PGWT_BOX_RUN_SECONDS:-14400}"
+startup_bound=60
+for value in "$outage_bound" "$poll_interval" "$run_bound"; do
+    [[ "$value" =~ ^[1-9][0-9]*$ ]] || { echo 'box-check: poll/outage/run seconds must be positive integers' >&2; exit 2; }
 done
 
 # Bound dead connections so failures reach the EXIT cleanup trap. Keep the
@@ -382,6 +389,61 @@ rsync_e="ssh ${ssh_keepalive[*]}"
 source_manifest=""
 poll_reply=""
 remote_started=0
+retain_remote=0
+active_ssh=""
+# SSH's keepalive bounds a dead connection, but not a responsive, stuck
+# command. Bound the poll by the remaining run time and abort by 20 seconds.
+bounded_ssh() {
+    python3 -c 'import os, signal, subprocess, sys
+child = None
+def stop(signum, frame):
+    if child is not None:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+    sys.exit(128 + signum)
+signal.signal(signal.SIGTERM, stop)
+child = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    rc = child.wait(timeout=int(sys.argv[1]))
+    sys.exit(rc if rc >= 0 else 1)
+except subprocess.TimeoutExpired:
+    os.killpg(child.pid, signal.SIGKILL)
+    child.wait()
+    print("box-check: bounded SSH timed out", file=sys.stderr)
+    sys.exit(124)
+' "$@" <&0 &
+    active_ssh=$!
+    # Unlike a foreground command, bash's wait builtin runs signal traps
+    # immediately. Preserve stdin explicitly for the remote poll heredoc.
+    wait "$active_ssh"
+    local rc=$?
+    active_ssh=""
+    return "$rc"
+}
+abort_run() {
+    local signal_name=$1 exit_code=$2
+    trap '' INT TERM HUP
+    if [[ -n "$active_ssh" ]]; then
+        kill -TERM "$active_ssh" 2>/dev/null || true
+        wait "$active_ssh" 2>/dev/null || true
+        active_ssh=""
+    fi
+    if [[ "$remote_started" == 1 && -n "$remote_dir" ]]; then
+        echo "box-check: $signal_name abort; terminating worker group on $target at $remote_dir" | tee -a "$log"
+        # Read the worker-published setsid leader, even if the launch reply
+        # was interrupted. sudo also reaches root descendants of the tier.
+        if bounded_ssh 20 ssh -o BatchMode=yes -o ConnectTimeout=10 "${ssh_keepalive[@]}" $ssh_strict "$target" \
+            "cd '$remote_dir' && pid=\$(cat .box-check.pid) && case \$pid in ''|*[!0-9]*) exit 1;; esac; [ \"\${pid:-0}\" -gt 1 ] || exit 1; sudo kill -TERM -- -\$pid 2>/dev/null || exit 1; sleep 5; if sudo kill -0 -- -\$pid 2>/dev/null; then sudo kill -KILL -- -\$pid || exit 1; echo \"box-check: abort pid=\$pid TERM then KILL sent\"; else echo \"box-check: abort pid=\$pid group stopped after TERM\"; fi" 2>&1 | tee -a "$log"; then
+            echo "box-check: abort remote termination completed" | tee -a "$log"
+        else
+            echo "box-check: WARNING: abort could not confirm remote termination; log=$target:$remote_dir/.box-check.log" | tee -a "$log" >&2
+        fi
+    fi
+    exit "$exit_code"
+}
 run_cleanup() {
     local rc=$?
     [[ -z "$source_manifest" ]] || rm -f "$source_manifest" "$source_manifest.paths"
@@ -390,10 +452,9 @@ run_cleanup() {
         ephemeral_cleanup
     elif [[ -n "$remote_dir" ]]; then
         # OpenSSH uses the first value; retain cleanup's shorter connect timeout.
-        # A lost launch acknowledgement can leave the PID unknown locally.
-        # In that case retain the directory too; never interrupt a gate run.
+        # Retain give-up evidence even if the worker finished while offline.
         if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "${ssh_keepalive[@]}" "$target" \
-            "if [ '$remote_started' = 0 ] || [ -f '$remote_dir/.box-check.exit' ] || { [ -s '$remote_dir/.box-check.pid' ] && ! kill -0 \"\$(cat '$remote_dir/.box-check.pid')\" 2>/dev/null; }; then sudo rm -rf -- '$remote_dir'; else echo 'box-check: retaining active remote run at $target:$remote_dir'; fi"; then
+            "if [ '$remote_started' = 0 ] || { [ '$retain_remote' = 0 ] && { [ -f '$remote_dir/.box-check.exit' ] || { [ -s '$remote_dir/.box-check.pid' ] && ! kill -0 \"\$(cat '$remote_dir/.box-check.pid')\" 2>/dev/null; }; }; }; then sudo rm -rf -- '$remote_dir'; else echo 'box-check: retaining remote run at $target:$remote_dir'; fi"; then
             echo "box-check: WARNING: could not prune $target:$remote_dir; remove it manually" >&2
             [[ "$rc" -ne 0 ]] || rc=1
         fi
@@ -401,9 +462,9 @@ run_cleanup() {
     exit "$rc"
 }
 trap run_cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+trap 'abort_run INT 130 >&3' INT
+trap 'abort_run TERM 143 >&3' TERM
+trap 'abort_run HUP 129 >&3' HUP
 # shellcheck disable=SC2086,SC2029
 remote_dir=$(ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
     "mkdir -p '$remote_root' && mktemp -d '$remote_root/$branch.XXXXXXXXXX'") || exit 1
@@ -563,15 +624,20 @@ sudo_env="$sudo_env PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES"
 # the tests' default -lbpf would silently select the old system library.
 lock_header='exec 9>/tmp/pgwt-box-check.lock; if flock -n 9; then echo "box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)"; else lock_wait_start_ns=$(date +%s%N); echo "box-check: waiting for /tmp/pgwt-box-check.lock"; flock 9 || exit; lock_wait_ms=$(( ($(date +%s%N) - lock_wait_start_ns) / 1000000 )); echo "box-check: lock acquired (waited_for_lock=yes, lock_wait_ms=${lock_wait_ms})"; fi;'
 # Detach the shared box tier (including live UI smoke), retaining fd 9
-# until it finishes. Provisioning and source rsync stay attached. No new
-# whole-run timeout is introduced: the caller's existing deadline still applies.
+# until it finishes. Provisioning and source rsync stay attached.
 # The EXIT trap publishes the status atomically, after ALL worker log writes.
-worker="trap 'rc=\$?; printf \"%s\\n\" \"\$rc\" > .box-check.exit.tmp; mv .box-check.exit.tmp .box-check.exit' EXIT; $lock_header env OS=$OS$sudo_env bash scripts/box-tier.sh $tree_hash $commit $pgarg"
+worker="printf '%s\\n' \"\$\$\" > .box-check.pid || exit; trap 'rc=\$?; printf \"%s\\n\" \"\$rc\" > .box-check.exit.tmp; mv .box-check.exit.tmp .box-check.exit' EXIT; $lock_header env OS=$OS$sudo_env bash scripts/box-tier.sh $tree_hash $commit $pgarg"
 # Quote the command for the remote login shell, including the trap's quotes.
 worker_quoted="'${worker//\'/\'\\\'\'}'"
 remote_started=1
 remote_pid=$(ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
-    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && { nohup setsid bash -c $worker_quoted > .box-check.log 2>&1 < /dev/null & echo \$! > .box-check.pid; cat .box-check.pid; }" 2>>"$log") || true
+    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && { nohup setsid bash -c $worker_quoted > .box-check.log 2>&1 < /dev/null & echo \$!; }" 2>>"$log")
+launch_rc=$?
+if [[ "$launch_rc" -ne 0 ]]; then
+    remote_started=0
+    echo "box-check: FATAL launch SSH failed (exit=$launch_rc) on $target; remote log=$remote_dir/.box-check.log" | tee -a "$log" >&2
+    exit 1
+fi
 [[ "$remote_pid" =~ ^[0-9]+$ ]] || remote_pid=unknown
 echo "box-check: detached pid=$remote_pid remote log=$target:$remote_dir/.box-check.log" | tee -a "$log"
 
@@ -580,21 +646,32 @@ offset=0
 outage_used=0
 outage_start=0
 backoff=2
+run_start=$(date +%s)
+startup_used=0
 transport_give_up() {
     local identity="$target"
     [[ "$EPHEMERAL" != 1 ]] || identity="VM id=$server_id"
+    retain_remote=1
     echo "box-check: FATAL transport outage exceeded ${outage_bound}s for $identity; remote log=$remote_dir/.box-check.log pid=$remote_pid" | tee -a "$log" >&2
     exit 76
 }
+run_failed() {
+    local identity="$target"
+    [[ "$EPHEMERAL" != 1 ]] || identity="VM id=$server_id"
+    echo "box-check: FATAL $1 for $identity; remote log=$remote_dir/.box-check.log pid=$remote_pid" | tee -a "$log" >&2
+    exit 77
+}
 while :; do
     poll_start=$(date +%s)
+    run_remaining=$((run_bound - poll_start + run_start))
+    (( run_remaining > 0 )) || run_failed "run ceiling exceeded ${run_bound}s"
     if [[ "$outage_start" -ne 0 ]] && (( outage_used + poll_start - outage_start >= outage_bound )); then
         transport_give_up
     fi
     # Status is sampled BEFORE log size: a published exit guarantees this
     # snapshot includes the final bytes. A failed/partial SSH response is
     # discarded, leaving offset unchanged for the next transport attempt.
-    if ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
+    if bounded_ssh "$run_remaining" ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
         "cd '$remote_dir' && python3 - '$offset'" >"$poll_reply" 2>>"$log" <<'POLL'
 import os
 import pathlib
@@ -602,12 +679,30 @@ import sys
 offset = int(sys.argv[1])
 status = pathlib.Path('.box-check.exit')
 rc = status.read_text().strip() if status.exists() else 'running'
-pid = pathlib.Path('.box-check.pid').read_text().strip()
+pid_file = pathlib.Path('.box-check.pid')
+pid = pid_file.read_text().strip() if pid_file.exists() else 'unknown'
+alive = 'unknown'
+if pid.isdigit() and int(pid) > 1:
+    try:
+        os.kill(int(pid), 0)
+        alive = 'alive'
+    except ProcessLookupError:
+        alive = 'dead'
+        # The worker can publish between the first status read and death.
+        rc = 'running' if not status.exists() else status.read_text().strip()
+    except PermissionError:
+        alive = 'alive'
+else:
+    pid = 'unknown'
+    rc = 'starting'
+if not pathlib.Path('.box-check.log').exists() and rc == 'starting':
+    print(0, rc, pid, alive, flush=True)
+    sys.exit(0)
 with open('.box-check.log', 'rb') as log:
     size = os.fstat(log.fileno()).st_size
     if size < offset:
         raise RuntimeError('remote log shrank')
-    print(size, rc, pid, flush=True)
+    print(size, rc, pid, alive, flush=True)
     log.seek(offset)
     remaining = size - offset
     while remaining:
@@ -618,10 +713,14 @@ with open('.box-check.log', 'rb') as log:
         remaining -= len(chunk)
 POLL
     then
-        read -r size status pid < "$poll_reply"
+        poll_end=$(date +%s)
+        (( poll_end - run_start < run_bound )) || run_failed "run ceiling exceeded ${run_bound}s"
+        read -r size status pid alive < "$poll_reply"
         received=$(tail -n +2 "$poll_reply" | wc -c | tr -d ' ')
-        if [[ "$size" =~ ^[0-9]+$ && "$pid" =~ ^[0-9]+$ &&
-              ( "$status" == running || "$status" =~ ^[0-9]+$ ) ]] &&
+        if [[ "$size" =~ ^[0-9]+$ &&
+              ( ( "$pid" =~ ^[0-9]+$ && ( "$alive" == alive || "$alive" == dead ) &&
+                  ( "$status" == running || "$status" =~ ^[0-9]+$ ) ) ||
+                ( "$pid" == unknown && "$alive" == unknown && "$status" == starting ) ) ]] &&
               (( size >= offset && received == size - offset )); then
             if [[ "$outage_start" -ne 0 ]]; then
                 outage_used=$((outage_used + $(date +%s) - outage_start))
@@ -630,23 +729,45 @@ POLL
             fi
             tail -n +2 "$poll_reply" | tee -a "$log"
             offset=$size
-            remote_pid=$pid
+            [[ "$pid" == unknown ]] || remote_pid=$pid
             backoff=2
+            if [[ "$status" == starting ]]; then
+                startup_used=$((startup_used + poll_end - poll_start))
+                if (( startup_used >= startup_bound )); then
+                    remote_started=0
+                    echo "box-check: FATAL worker pid file absent after ${startup_bound}s of successful polls on $target; remote log=$remote_dir/.box-check.log" | tee -a "$log" >&2
+                    exit 1
+                fi
+                delay=$poll_interval
+                (( delay <= startup_bound - startup_used )) || delay=$((startup_bound - startup_used))
+                (( delay <= run_bound - poll_end + run_start )) || delay=$((run_bound - poll_end + run_start))
+                sleep "$delay"
+                startup_used=$((startup_used + delay))
+                continue
+            fi
+            if [[ "$alive" == dead && "$status" == running ]]; then
+                run_failed 'worker disappeared without an exit file'
+            fi
             if [[ "$status" != running ]]; then
                 rc=$status
                 break
             fi
-            sleep "$poll_interval"
+            delay=$poll_interval
+            (( delay <= run_bound - poll_end + run_start )) || delay=$((run_bound - poll_end + run_start))
+            sleep "$delay"
             continue
         fi
     fi
     [[ "$outage_start" -ne 0 ]] || outage_start=$poll_start
     remaining=$((outage_bound - outage_used - $(date +%s) + outage_start))
+    run_remaining=$((run_bound - $(date +%s) + run_start))
+    (( run_remaining > 0 )) || run_failed "run ceiling exceeded ${run_bound}s"
     if (( remaining <= 0 )); then
         transport_give_up
     fi
     delay=$backoff
     (( delay <= remaining )) || delay=$remaining
+    (( delay <= run_remaining )) || delay=$run_remaining
     sleep "$delay"
     backoff=$((backoff * 2))
     (( backoff <= 30 )) || backoff=30
