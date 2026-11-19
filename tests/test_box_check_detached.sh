@@ -450,6 +450,38 @@ def mutation(before, after):
     return original.replace(before, after, 1)
 
 
+def assert_exit_reread(source):
+    # Inject publication at the kill(0) syscall seam, after the actual poll's
+    # first status read. This deterministic race needs no timing allowance:
+    # the worker publishes status and disappears before kill(0) returns.
+    polls = re.findall(r"<<'POLL'\n(.*?)\nPOLL\n", source, re.S)
+    require(len(polls) == 1, 'missing/ambiguous remote poll program')
+    with tempfile.TemporaryDirectory(prefix='pgwt-exit-reread-') as temp:
+        base = Path(temp)
+        payload = b'final worker output\n'
+        (base / '.box-check.log').write_bytes(payload)
+        (base / '.box-check.pid').write_text('424242\n')
+        harness = '''import os
+from pathlib import Path
+import sys
+def exited_during_probe(pid, sig):
+    assert (pid, sig) == (424242, 0), 'wrong worker probe'
+    status = Path('.box-check.exit')
+    assert not status.exists(), 'exit file existed before death probe'
+    status.write_text('7\\n')
+    Path('death-probed').touch()
+    raise ProcessLookupError
+os.kill = exited_during_probe
+sys.argv = ['-', '0']
+'''
+        result = subprocess.run([sys.executable, '-c', harness + polls[0]],
+                                cwd=base, capture_output=True, timeout=10)
+        require(result.returncode == 0, 'poll program failed: ' + result.stderr.decode())
+        require((base / 'death-probed').exists(), 'exit re-read death branch not reached')
+        require(result.stdout == f'{len(payload)} 7 424242 dead\n'.encode() + payload,
+                'exit re-read lost published status or final log bytes: ' + repr(result.stdout))
+
+
 if len(sys.argv) == 4 and sys.argv[2] == '--check-only':
     print('PASS: ' + run_case(Path(sys.argv[3]).read_text()))
     sys.exit(0)
@@ -470,6 +502,16 @@ for abort_signal in ('INT', 'TERM', 'HUP'):
     print('PASS: ephemeral ' + run_case(original, scenario='abort-' + abort_signal, ephemeral=True))
 print('PASS: blocked poll ' + run_case(original, scenario='abort-INT', blocked_poll=True))
 print('PASS: ' + run_case(original, give_up=True, scenario='give-up-finished'))
+assert_exit_reread(original)
+print('PASS: poll re-reads exit=7 published between initial status read and worker death')
+try:
+    assert_exit_reread(mutation("rc = 'running' if not status.exists() else status.read_text().strip()",
+                                "rc = 'running'"))
+except AssertionError as error:
+    require('exit re-read lost published status' in str(error), 'exit re-read mutant: wrong failure: ' + str(error))
+    print('PASS: mutant exit re-read replaced with running rejected: exit re-read lost published status')
+else:
+    raise AssertionError('mutant survived: exit re-read replaced with running')
 mutants = [
     ('no retry', mutation('    delay=$backoff', '    exit 255\n    delay=$backoff'), False,
      'completion exit mapping'),
@@ -521,5 +563,5 @@ for name, source, options, intended in new_mutants:
         print(f'PASS: mutant {name} rejected: {intended}')
     else:
         raise AssertionError('mutant survived: ' + name)
-print('OK: detached box-check host tests (11 mutants rejected)')
+print('OK: detached box-check host tests (12 mutants rejected)')
 PY

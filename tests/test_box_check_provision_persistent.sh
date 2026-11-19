@@ -135,6 +135,11 @@ case "$name" in
         case "$remote_command" in
             'mkdir -p pgwt-provision') exit "${MKDIR_RC:-0}" ;;
             *'mktemp -d '*) printf 'pgwt-check/fixture-head.run1234567\n' ;;
+            # The build fixture completes successfully before its first poll.
+            # Keep launch stdout separate from the four-field poll protocol.
+            *'nohup setsid bash -c '*) printf '999999\n' ;;
+            *"&& python3 - '"*) printf '0 0 999999 dead\n' ;;
+            'if '*'; then sudo rm -rf -- '*) exit 0 ;;
             'rm -f '*) exit "${CLEANUP_RC:-0}" ;;
             'sudo bash pgwt-provision/'*-tests-provision-runner.sh\ *)
                 if [[ -n "${PROVISION_REAL:-}" ]]; then
