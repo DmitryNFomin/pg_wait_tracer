@@ -1639,3 +1639,4 @@ void pgwt_tick_duties(struct pgwt_daemon *d){++d->tick;}
 int pgwt_recover_unattached_backends(struct pgwt_daemon *d){(void)d;return 0;}
 int pgwt_sweep_stale_state(struct pgwt_daemon *d){(void)d;return 0;}
 void pgwt_escalation_check_budget(struct pgwt_daemon *d){(void)d;}
+uint64_t pgwt_debug_monotonic_ns(void){static uint64_t fake_ns;return fake_ns += 1000;} /* monotonic stand-in; strict -std=c11 hides clock_gettime */
