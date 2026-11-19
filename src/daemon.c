@@ -34,7 +34,6 @@
 
 #define PGWT_DEBUG_BLOCK_NS (50ULL * 1000ULL * 1000ULL)
 #define PGWT_TEST_EVENT_DELAY_COUNT 1024U
-#define PGWT_EVENT_DRAIN_CALLBACK_BUDGET 64U
 
 /* #416: how many budgeted passes the per-tick drain (drain_event_ring_for_tick
  * below) may take before it gives up on this tick. The cap exists because

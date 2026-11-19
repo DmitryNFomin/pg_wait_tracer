@@ -155,7 +155,10 @@ def boot_files(directory, nonce=None):
     Returns records and (file_no, path, flags, bytes) for the selected boot.
     """
     boots = {}
-    paths = list(directory.glob("*.trace.lz4")) + [directory / "current.trace"]
+    paths = list(directory.glob("*.trace.lz4"))
+    current = directory / "current.trace"
+    if current.exists():
+        paths.append(current)
     for path in paths:
         recs, flags, _ = coverage_records(path)
         assert recs and recs[0][1] == "BOOT", (path, recs[:1])
@@ -176,6 +179,25 @@ def drop_counter(directory):
     value = ctl(directory).get("ringbuf_drops_total")
     assert type(value) is int and value >= 0, ("independent drop witness", value)
     return value
+
+
+def drop_counter_tick(d, directory):
+    """Read the witness, then await its next coverage tick, even if W repeats.
+
+    A pending drop just before this read belongs to that tick. At the start
+    boundary it must be written before we start checking load observations;
+    at the end boundary it must be written before we kill/read the daemon.
+    Poll for a new observation, never retry a coverage assertion.
+    """
+    count = drop_counter(directory)
+    read_ns = time.monotonic_ns()
+
+    def next_tick():
+        recs, _ = boot_files(directory)
+        return any(obs > read_ns for obs, *_ in watermarks(recs))
+
+    wait_for(d, next_tick, 5, "no coverage tick after drop-counter read")
+    return count
 
 
 def quiet_leg(d, directory, label, after=None):
@@ -291,6 +313,26 @@ def self_test():
         def poll(self):
             return None
 
+    # The read boundary must wait for an observation, not for W to advance:
+    # losses and forced yields deliberately repeat W. A tick already in the
+    # file when the witness was read does not satisfy the wait.
+    snapshots = iter([quiet, quiet + [rec(5, "WATERMARK", 3)]])
+    calls = []
+    def read_witness(_):
+        calls.append("counter")
+        return 7
+    def await_tick(d, predicate, seconds, reason):
+        assert isinstance(d, Alive) and seconds == 5 and reason
+        assert calls == ["counter"]
+        assert not predicate(), "old tick must not satisfy the boundary"
+        assert predicate(), "heartbeat observation must satisfy the boundary"
+        calls.append("tick")
+    with patch.object(time, "monotonic_ns", return_value=int(4.5 * SEC)), \
+         patch.dict(globals(), {"drop_counter": read_witness, "wait_for": await_tick,
+                               "boot_files": lambda _: (next(snapshots), [])}):
+        assert drop_counter_tick(Alive(), None) == 7
+    assert calls == ["counter", "tick"]
+
     for records, after in [(quiet[:1] + [rec(t, "WATERMARK", 0) for t in range(1, 6)], None),
                            (stalled, 16 * SEC)]:
         with patch.object(time, "sleep"), patch.dict(globals(), {"boot_files": lambda _: (records, [])}):
@@ -322,6 +364,11 @@ def self_test():
         records, files = boot_files(directory, n1)
         assert records == first + second and [f[0] for f in files] == [0, 1], "read rotated boot in file_no order"
         assert boot_files(directory)[0] == latest, "select latest boot by start, not filename"
+        # Rotation may leave only archives until the next lazy file open.
+        current_blob = (directory / "current.trace").read_bytes()
+        (directory / "current.trace").unlink()
+        assert boot_files(directory, n1)[0] == first + second, "rotation without current.trace"
+        (directory / "current.trace").write_bytes(current_blob)
         corrupt = bytearray((directory / "current.trace").read_bytes())
         corrupt[-8] ^= 1
         (directory / "current.trace").write_bytes(corrupt)
@@ -365,12 +412,12 @@ def main():
             d, err = start_daemon(pm_pid, directory, base / "boot1.log")
             idle = idle_psql()
             quiet_leg(d, directory, "boot1 before load")
-            drops0 = drop_counter(directory)
+            drops0 = drop_counter_tick(d, directory)
             load_start = time.monotonic_ns()
             load = pgbench(pgb, 30)
             time.sleep(15)
             assert d.poll() is None and load.poll() is None, "died under load"
-            delta1 = drop_counter(directory) - drops0
+            delta1 = drop_counter_tick(d, directory) - drops0
             kill_ns = time.monotonic_ns()
             d.kill()
             d.wait(timeout=10)
@@ -396,12 +443,12 @@ def main():
             arecs, afiles = boot_files(directory, nonce1)
             assert arecs == recs1, "recovery preserves every COVERAGE record in file order"
             assert afiles[-1][2] & FLAG_RECOVERED and not afiles[-1][2] & FLAG_CLOSED_CLEAN, afiles
-            drops0 = drop_counter(directory)
+            drops0 = drop_counter_tick(d, directory)
             load_start = time.monotonic_ns()
             load = pgbench(pgb, 14)
             time.sleep(12)
             assert d.poll() is None and load.poll() is None, "boot2 died under load"
-            delta2 = drop_counter(directory) - drops0
+            delta2 = drop_counter_tick(d, directory) - drops0
             load_check = time.monotonic_ns()
             loaded_recs, _ = boot_files(directory)
             assert_load_coverage(loaded_recs, load_start, load_check, delta2, "boot2 load")
@@ -411,7 +458,7 @@ def main():
             quiet_leg(d, directory, "boot2 after load", after=load_end)
             # The final check uses the same witness rule up to SIGTERM, and
             # additionally requires recovery freshness after losses stop.
-            delta2 = drop_counter(directory) - drops0
+            delta2 = drop_counter_tick(d, directory) - drops0
             term_ns = time.monotonic_ns()
             d.terminate()
             d.wait(timeout=30)

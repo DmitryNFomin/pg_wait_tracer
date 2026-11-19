@@ -632,10 +632,13 @@ static void cov_drain_publish(void *ctx, struct pgwt_cov_tick_in *in)
     uint64_t drain_cpu0 = cov_thread_cpu_ns();
     if (d->event_rb) {
         d->event_drain_callbacks_current = 0;
-        d->event_drain_callback_limit = PGWT_OPEN_SNAPSHOT_DRAIN_BUDGET;
+        /* This runs on every coverage timer tick. One loop-sized pass is
+         * enough: a backlog yields a heartbeat, never a larger drain that
+         * can starve the display timer under slow callbacks. */
+        d->event_drain_callback_limit = PGWT_EVENT_DRAIN_CALLBACK_BUDGET;
         int rc = pgwt_consume_event_ring(d, true);
         bool yielded = d->event_drain_callbacks_current
-                       >= PGWT_OPEN_SNAPSHOT_DRAIN_BUDGET && rc < 0;
+                       >= PGWT_EVENT_DRAIN_CALLBACK_BUDGET && rc < 0;
         d->event_drain_callback_limit = 0;
         in->drain_complete = !yielded;
     }
