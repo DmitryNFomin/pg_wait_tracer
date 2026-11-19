@@ -1054,6 +1054,8 @@ test_summary_qattr_background
 # Persistent box-check must stage/run the current provisioner before build,
 # forwarding the OS and leaving lock ownership to the provisioner itself.
 test_box_check_provision_persistent.sh
+# EL8/EL9 provisioning commands and OS-specific snapshot cloud-init (host shims).
+test_el_provisioning.py
 
 # #861: clean builds, synced source identity and concurrent-run isolation.
 test_box_check_build_provenance.sh

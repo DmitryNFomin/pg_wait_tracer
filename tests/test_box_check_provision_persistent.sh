@@ -53,26 +53,32 @@ run_provisioner_as_nonroot() {
 }
 
 assert_privilege_dispatch() {
-    local script="$1" rc
+    local script="$1" rc os
     : > "$tmpdir/guard-log"
-    run_provisioner_as_nonroot "$script" el9 > "$tmpdir/real-el9" 2>&1
+    # Unknown names remain a usage refusal before privilege checks; this also
+    # detects moving the root check ahead of OS validation.
+    run_provisioner_as_nonroot "$script" plan9 > "$tmpdir/real-unknown" 2>&1
     rc=$?
-    [[ $rc -eq 3 ]] || {
-        echo "FAIL: non-root el9 provisioner must return 3 (got $rc): $(cat "$tmpdir/real-el9")" >&2
+    [[ $rc -eq 2 ]] || {
+        echo "FAIL: unknown OS provisioner must return 2 (got $rc): $(cat "$tmpdir/real-unknown")" >&2
         return 1
     }
-    echo 'PASS: real non-shimmed el9 provisioner exits 3 without root'
-    run_provisioner_as_nonroot "$script" ubuntu > "$tmpdir/real-ubuntu" 2>&1
-    rc=$?
-    [[ $rc -eq 1 ]] || {
-        echo "FAIL: non-root ubuntu provisioner must return 1, not 3 (got $rc): $(cat "$tmpdir/real-ubuntu")" >&2
-        return 1
-    }
-    /usr/bin/grep -Fq 'provision-runner.sh must run as root' "$tmpdir/real-ubuntu" ||
-        { echo 'FAIL: ubuntu provisioner did not reach the root check' >&2; return 1; }
+    /usr/bin/grep -Fq 'Unknown OS: plan9' "$tmpdir/real-unknown" ||
+        { echo 'FAIL: unknown OS lacks refusal diagnostic' >&2; return 1; }
+    echo 'PASS: unknown OS refuses with usage rc=2 before root or mutation'
+    for os in el9 el8 ubuntu; do
+        run_provisioner_as_nonroot "$script" "$os" > "$tmpdir/real-$os" 2>&1
+        rc=$?
+        [[ $rc -eq 1 ]] || {
+            echo "FAIL: non-root $os provisioner must return 1 (got $rc): $(cat "$tmpdir/real-$os")" >&2
+            return 1
+        }
+        /usr/bin/grep -Fq 'provision-runner.sh must run as root' "$tmpdir/real-$os" ||
+            { echo "FAIL: $os provisioner did not reach the root check" >&2; return 1; }
+        echo "PASS: real non-shimmed $os provisioner reaches root check and exits 1"
+    done
     [[ ! -s "$tmpdir/guard-log" ]] ||
         { echo 'FAIL: non-root provisioner reached a mutation guard' >&2; return 1; }
-    echo 'PASS: real non-shimmed ubuntu provisioner reaches root check and exits 1, not 3'
     echo 'PASS: non-root privilege probes leave mutation guard log empty'
 }
 assert_privilege_dispatch "$tmpdir/prov/provision-runner.sh" || exit $?
@@ -105,11 +111,11 @@ for mutation in root-first root-deleted; do
     mutant_rc=$?
     [[ $mutant_rc -ne 0 ]] || fail "$mutation provisioner mutant escaped privilege assertions"
     if [[ "$mutation" == root-first ]]; then
-        /usr/bin/grep -Fq 'el9 provisioner must return 3 (got 1)' "$tmpdir/privilege-mutant-verdict" ||
+        /usr/bin/grep -Fq 'unknown OS provisioner must return 2 (got 1)' "$tmpdir/privilege-mutant-verdict" ||
             fail 'root-first mutant failed for an unexpected reason'
         [[ ! -s "$tmpdir/guard-log" ]] || fail 'root-first mutant reached a mutation guard'
     else
-        /usr/bin/grep -Fq 'ubuntu provisioner must return 1, not 3 (got 99)' "$tmpdir/privilege-mutant-verdict" ||
+        /usr/bin/grep -Fq 'non-root el9 provisioner must return 1 (got 99)' "$tmpdir/privilege-mutant-verdict" ||
             fail 'root-deleted mutant failed for an unexpected reason'
         [[ -s "$tmpdir/guard-log" ]] || fail 'root-deleted mutant did not hit a mutation guard'
     fi
@@ -259,11 +265,11 @@ CLEANUP_RC=7 run_launcher "$BOX_CHECK" ubuntu || fail "cleanup failure changed s
 assert_provisioned ubuntu || exit $?
 echo 'PASS: failing best-effort cleanup SSH preserves successful provision and launcher result'
 
-run_launcher "$BOX_CHECK" el9 3 || fail "unsupported el9 launcher failed: $(cat "$tmpdir/output")"
-assert_provisioned el9 || exit $?
+run_launcher "$BOX_CHECK" ubuntu 3 || fail "reserved unsupported-OS launcher path failed: $(cat "$tmpdir/output")"
+assert_provisioned ubuntu || exit $?
 /usr/bin/grep -Eiq 'unsupported' "$tmpdir/output" ||
-    fail 'unsupported el9 provisioning skip was not announced'
-echo 'PASS: persistent el9 rc=3 announces unsupported-OS skip and reaches build'
+    fail 'reserved unsupported-OS provisioning skip was not announced'
+echo 'PASS: reserved rc=3 announces unsupported-OS skip and reaches build'
 
 # Negative control: remove the persistent provisioner SSH invocation from a
 # copy, keeping staging and status handling intact. Match the command itself,
