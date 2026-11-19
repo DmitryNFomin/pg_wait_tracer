@@ -32,11 +32,38 @@ struct staged {
     pgwt_merge_record record;
     unsigned char *bytes;
 };
+#ifdef PGWT_MERGE_TEST_WORK
+/* Count literal memory moves too: a regression must not supply its own work
+ * hook to be caught. Round bytes up to staged-envelope equivalents and call
+ * the hook before the move can damage indexed slots. Production has neither
+ * the wrapper nor the macro. New traversals still need node-visit hooks. */
+static inline __attribute__((unused)) void *
+queue_work_memmove(void *to, const void *from, size_t bytes)
+{
+    MERGE_WORK(QMOVE, bytes / sizeof(struct staged) + (bytes % sizeof(struct staged) != 0));
+    return memmove(to, from, bytes);
+}
+#undef memmove
+#define memmove(to, from, bytes) queue_work_memmove((to), (from), (bytes))
+#endif
+struct queue_node {
+    size_t left, right, next;
+    unsigned height;
+};
+struct dependency_entry {
+    uint64_t id, epoch;
+};
+struct waiting_entry {
+    uint64_t id;
+    size_t count;
+    bool used;
+};
 struct pgwt_merge {
     pgwt_merge_config config;
     pgwt_merge_report report;
     struct source_state *sources;
     struct staged *queue;
+    struct queue_node *queue_nodes;
     unsigned char *payload_storage;
     struct generation_state *attachments, *prospective;
     size_t *generation_index, *pid_heads, *touched, *planned;
@@ -44,12 +71,22 @@ struct pgwt_merge {
     struct frontier_state *frontiers;
     uint64_t *dependencies;
     size_t count, attachment_count;
+    size_t root, first, free_slot;
     size_t frontier_count, dependency_count;
     pgwt_merge_counters baseline, observed;
     bool identity_repair_needed;
+    bool held_cached;
+    size_t held_tail, held_count, held_transition;
+    struct dependency_entry *dependency_index;
+    struct waiting_entry *waiting_index;
+    size_t *waiting_slots;
+    size_t dependency_index_capacity, waiting_index_capacity;
+    size_t waiting_slot_count, waiting_count;
     bool has_last;
     pgwt_merge_record last;
 };
+
+static void reset_waiting(pgwt_merge *m);
 
 /* Keep accounting tied to the size of the copy, including test mutants that
  * replace a touched-slot copy with a retained-table copy. */
@@ -94,7 +131,9 @@ static struct generation_state *attachment(pgwt_merge *m, const pgwt_merge_recor
 
 /* touched[plan slot] names the retained slot; planned[retained slot] is the
  * one-based reverse map. Only eligible DATA touches prospective state. A held
- * or failed batch starts from published state again on its next evaluation. */
+ * prefix keeps its plan while newly eligible suffixes validate. Once the last
+ * dependency resolves, publication revalidates the complete batch from the
+ * published state. Fault recovery also starts from published state. */
 static void reset_plan(pgwt_merge *m)
 {
     for (size_t i = 0; i < m->touched_count; ++i) {
@@ -163,12 +202,21 @@ static pgwt_merge_status fault(pgwt_merge *m, pgwt_merge_reason reason,
     } else ++m->report.faults[reason];
     /* Discarded lifecycle evidence can never bootstrap a "new" generation
      * in a later epoch (DECISION 25a). Positions already remain consumed. */
-    for (size_t i = 0; i < m->count; ++i) {
-        const struct staged *v = &m->queue[i];
-        if (v->text || v->record.rank == PGWT_MERGE_TRANS) continue;
-        struct generation_state *a = attachment(m, &v->record);
-        if (a) a->lifecycle_seen = true;
+    for (size_t i = m->first; i != SIZE_MAX;) {
+        MERGE_WORK(QVISIT, 1);
+        struct staged *v = &m->queue[i];
+        if (!v->text && v->record.rank != PGWT_MERGE_TRANS) {
+            struct generation_state *a = attachment(m, &v->record);
+            if (a) a->lifecycle_seen = true;
+        }
+        size_t next = m->queue_nodes[i].next;
+        m->queue_nodes[i].next = m->free_slot;
+        m->free_slot = i;
+        i = next;
     }
+    m->root = m->first = SIZE_MAX;
+    m->held_cached = false;
+    reset_waiting(m);
     m->count = 0;
     m->report.status = breach ? PGWT_MERGE_EXIT_REQUIRED : PGWT_MERGE_SUSPENDED;
     if (reason == PGWT_MERGE_COUNTER_CHANGE || reason == PGWT_MERGE_COUNTER_UNKNOWN ||
@@ -213,12 +261,65 @@ static struct generation_state *remember_generation(pgwt_merge *m,
     return a;
 }
 
+/* Resolved metadata lives for the whole epoch, just as dependencies[] does.
+ * Epoch tags clear its index on REARM without visiting unused capacity. */
+static size_t dependency_bucket(const pgwt_merge *m, uint64_t id)
+{
+    size_t slot = (size_t)mix(id) & (m->dependency_index_capacity - 1);
+    while (m->dependency_index[slot].epoch == m->report.epoch) {
+        MERGE_WORK(QCOMPARE, 1);
+        if (m->dependency_index[slot].id == id) return slot;
+        slot = (slot + 1) & (m->dependency_index_capacity - 1);
+    }
+    return slot;
+}
+
 static bool dependency_available(const pgwt_merge *m, uint64_t id)
 {
-    if (!id) return false;
-    for (size_t i = 0; i < m->dependency_count; ++i)
-        if (m->dependencies[i] == id) return true;
-    return false;
+    return id && m->dependency_index[dependency_bucket(m, id)].epoch == m->report.epoch;
+}
+
+static size_t waiting_bucket(const pgwt_merge *m, uint64_t id)
+{
+    size_t slot = (size_t)mix(id) & (m->waiting_index_capacity - 1);
+    while (m->waiting_index[slot].used) {
+        MERGE_WORK(QCOMPARE, 1);
+        if (m->waiting_index[slot].id == id) return slot;
+        slot = (slot + 1) & (m->waiting_index_capacity - 1);
+    }
+    return slot;
+}
+
+static void wait_for_dependency(pgwt_merge *m, uint64_t id)
+{
+    size_t slot = waiting_bucket(m, id);
+    struct waiting_entry *entry = &m->waiting_index[slot];
+    if (!entry->used) {
+        *entry = (struct waiting_entry){.id = id, .used = true};
+        m->waiting_slots[m->waiting_slot_count++] = slot;
+    }
+    ++entry->count;
+    ++m->waiting_count;
+}
+
+static void remember_dependency(pgwt_merge *m, uint64_t id)
+{
+    m->dependency_index[dependency_bucket(m, id)] =
+        (struct dependency_entry){.id = id, .epoch = m->report.epoch};
+    struct waiting_entry *entry = &m->waiting_index[waiting_bucket(m, id)];
+    if (id && entry->used) {
+        m->waiting_count -= entry->count;
+        entry->count = 0;
+    }
+}
+
+static void reset_waiting(pgwt_merge *m)
+{
+    for (size_t i = 0; i < m->waiting_slot_count; ++i) {
+        MERGE_WORK(QVISIT, 1);
+        m->waiting_index[m->waiting_slots[i]].used = false;
+    }
+    m->waiting_slot_count = m->waiting_count = 0;
 }
 
 /* contract §2: exact unsigned lexicographic key; N ties retain source order,
@@ -241,9 +342,97 @@ static int order(const pgwt_merge *m, const pgwt_merge_record *a,
 static int staged_order(const pgwt_merge *m, const struct staged *a,
                          const struct staged *b)
 {
+    MERGE_WORK(QCOMPARE, 1);
     if (a->text != b->text) return a->text ? -1 : 1;
     if (a->text) return a->record.o < b->record.o ? -1 : a->record.o != b->record.o;
     return order(m, &a->record, &b->record);
+}
+
+/* Fixed payload slots form an AVL index and an in-order singly linked list.
+ * Insertion and minimum removal take O(log n), with no envelope/payload moves;
+ * visiting an eligible prefix takes O(k). Equal keys insert after existing
+ * equals, preserving the former stable insertion sort, including TEXT ties. */
+static unsigned queue_height(const pgwt_merge *m, size_t i)
+{
+    return i == SIZE_MAX ? 0 : m->queue_nodes[i].height;
+}
+
+static void queue_height_update(pgwt_merge *m, size_t i)
+{
+    unsigned l = queue_height(m, m->queue_nodes[i].left);
+    unsigned r = queue_height(m, m->queue_nodes[i].right);
+    m->queue_nodes[i].height = 1 + (l > r ? l : r);
+}
+
+static size_t queue_rotate(pgwt_merge *m, size_t i, bool left)
+{
+    size_t j = left ? m->queue_nodes[i].right : m->queue_nodes[i].left;
+    if (left) {
+        m->queue_nodes[i].right = m->queue_nodes[j].left;
+        m->queue_nodes[j].left = i;
+    } else {
+        m->queue_nodes[i].left = m->queue_nodes[j].right;
+        m->queue_nodes[j].right = i;
+    }
+    queue_height_update(m, i);
+    queue_height_update(m, j);
+    return j;
+}
+
+static size_t queue_balance(pgwt_merge *m, size_t i)
+{
+    queue_height_update(m, i);
+    int balance = (int)queue_height(m, m->queue_nodes[i].left) -
+                  (int)queue_height(m, m->queue_nodes[i].right);
+    if (balance > 1) {
+        size_t l = m->queue_nodes[i].left;
+        if (queue_height(m, m->queue_nodes[l].left) < queue_height(m, m->queue_nodes[l].right))
+            m->queue_nodes[i].left = queue_rotate(m, l, true);
+        return queue_rotate(m, i, false);
+    }
+    if (balance < -1) {
+        size_t r = m->queue_nodes[i].right;
+        if (queue_height(m, m->queue_nodes[r].right) < queue_height(m, m->queue_nodes[r].left))
+            m->queue_nodes[i].right = queue_rotate(m, r, false);
+        return queue_rotate(m, i, true);
+    }
+    return i;
+}
+
+static size_t queue_insert(pgwt_merge *m, size_t root, size_t slot,
+                            size_t previous, size_t next)
+{
+    if (root == SIZE_MAX) {
+        m->queue_nodes[slot].left = m->queue_nodes[slot].right = SIZE_MAX;
+        m->queue_nodes[slot].height = 1;
+        m->queue_nodes[slot].next = next;
+        if (previous == SIZE_MAX) m->first = slot;
+        else m->queue_nodes[previous].next = slot;
+        return slot;
+    }
+    if (staged_order(m, &m->queue[slot], &m->queue[root]) < 0)
+        m->queue_nodes[root].left = queue_insert(m, m->queue_nodes[root].left, slot, previous, root);
+    else
+        m->queue_nodes[root].right = queue_insert(m, m->queue_nodes[root].right, slot, root, next);
+    return queue_balance(m, root);
+}
+
+static size_t queue_remove_min(pgwt_merge *m, size_t root)
+{
+    MERGE_WORK(QVISIT, 1);
+    if (m->queue_nodes[root].left == SIZE_MAX) return m->queue_nodes[root].right;
+    m->queue_nodes[root].left = queue_remove_min(m, m->queue_nodes[root].left);
+    return queue_balance(m, root);
+}
+
+static void queue_recycle_min(pgwt_merge *m)
+{
+    size_t slot = m->first;
+    m->root = queue_remove_min(m, m->root);
+    m->first = m->queue_nodes[slot].next;
+    m->queue_nodes[slot].next = m->free_slot;
+    m->free_slot = slot;
+    --m->count;
 }
 
 static bool proofs_valid(const pgwt_merge_attachment *a, size_t n)
@@ -262,7 +451,6 @@ static bool proofs_valid(const pgwt_merge_attachment *a, size_t n)
  * prospective until successful publication; first arrival never sets next_q. */
 static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
 {
-    reset_plan(m);
     if (m->report.status != PGWT_MERGE_OK) return m->report.status;
     uint64_t W = UINT64_MAX;
     for (size_t s = 0; s < m->config.source_count; ++s)
@@ -273,21 +461,47 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
     if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
     if (!same_counters(obs.counters, m->baseline))
         return fault(m, counter_fault(obs.counters, m->observed), obs);
-    /* Fixed in-place insertion sort keeps payload slots paired with envelopes. */
-    for (size_t i = 1; i < m->count; ++i) {
-        struct staged v = m->queue[i];
-        size_t j = i;
-        while (j && staged_order(m, &v, &m->queue[j - 1]) < 0) {
-            m->queue[j] = m->queue[j - 1];
-            --j;
-        }
-        m->queue[j] = v;
+    /* Fixed payload slots already follow the exact stable output order.
+     * Valid DATA has t >= its source cutoff >= the previous W, so it cannot
+     * enter a previously validated prefix. TEXT changes no generation plan.
+     * Resume at the tail's CURRENT successor: later DATA may sort before the
+     * record that used to be the first ineligible one. */
+    size_t begin = m->first, prior_count = 0, tail = SIZE_MAX;
+    size_t previous_slot = SIZE_MAX;
+    if (m->held_cached && m->waiting_count) {
+        begin = m->queue_nodes[m->held_tail].next;
+        prior_count = m->held_count;
+        tail = m->held_tail;
+        previous_slot = m->held_transition;
+        MERGE_WORK(QVISIT, begin == SIZE_MAX ? 0 : 1);
+        MERGE_WORK(QCOMPARE, begin == SIZE_MAX ? 0 : 1);
+        if (begin == SIZE_MAX || m->queue[begin].record.t >= W)
+            return m->report.status;
+    } else {
+        reset_plan(m);
+        reset_waiting(m);
     }
-    size_t eligible = 0;
-    while (eligible < m->count && (m->queue[eligible].text ||
-           m->queue[eligible].record.t < W)) ++eligible; /* contract §3 strict t<W */
-    bool held = false;
-    for (size_t i = 0; i < eligible; ++i) {
+    m->held_cached = false;
+    size_t eligible = begin, eligible_count = prior_count;
+    while (eligible != SIZE_MAX && (m->queue[eligible].text ||
+           m->queue[eligible].record.t < W)) {
+        MERGE_WORK(QVISIT, 1);
+        MERGE_WORK(QCOMPARE, 1);
+        ++eligible_count;
+        tail = eligible;
+        eligible = m->queue_nodes[eligible].next;
+    } /* contract §3 strict t<W */
+    if (eligible != SIZE_MAX) {
+        MERGE_WORK(QVISIT, 1);
+        MERGE_WORK(QCOMPARE, 1);
+    }
+    size_t end = eligible;
+    eligible = eligible_count;
+    bool held = m->waiting_count != 0;
+    const pgwt_merge_record *previous_transition = previous_slot == SIZE_MAX ?
+        NULL : &m->queue[previous_slot].record;
+    for (size_t i = begin; i != end; i = m->queue_nodes[i].next) {
+        MERGE_WORK(QVISIT, 1);
         const struct staged *v = &m->queue[i];
         if (v->text) continue;
         const pgwt_merge_record *r = &v->record;
@@ -347,19 +561,24 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         if (r->dependency == PGWT_MERGE_LOST)
             return fault(m, PGWT_MERGE_DEPENDENCY_LOST, obs);
         if (r->dependency == PGWT_MERGE_WAIT &&
-            !dependency_available(m, r->dependency_id)) held = true;
+            !dependency_available(m, r->dependency_id)) {
+            wait_for_dependency(m, r->dependency_id);
+            held = true;
+        }
         if (m->has_last && order(m, &m->last, r) >= 0)
             return fault(m, PGWT_MERGE_SORT_ORDER_BREACH, obs);
         if (r->rank != PGWT_MERGE_TRANS) continue;
         if (m->config.mode == PGWT_MERGE_N) {
-            /* contract §2: any same-generation cross-source TRANS/MARKER tie. */
-            for (size_t j = 0; j < i; ++j) {
-                const pgwt_merge_record *b = &m->queue[j].record;
-                if (!m->queue[j].text && b->rank == PGWT_MERGE_TRANS &&
-                    r->t == b->t && r->pid == b->pid && r->g == b->g &&
-                    r->source != b->source)
-                    return fault(m, PGWT_MERGE_AMBIGUOUS_TIE, obs);
-            }
+            /* contract §2: any same-generation cross-source TRANS/MARKER tie.
+             * TRANS of one (t,pid,g) group are contiguous and source ordered,
+             * so its first cross-source tie is between adjacent TRANS. */
+            MERGE_WORK(QCOMPARE, previous_transition ? 1 : 0);
+            const pgwt_merge_record *b = previous_transition;
+            if (b && r->t == b->t && r->pid == b->pid && r->g == b->g &&
+                r->source != b->source)
+                return fault(m, PGWT_MERGE_AMBIGUOUS_TIE, obs);
+            previous_transition = r;
+            previous_slot = i;
         } else {
             /* contract §2: only a proved next_q may establish the baseline. */
             if (!r->has_q || !a->sequence_proved)
@@ -371,13 +590,20 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
             ++a->next_q;
         }
     }
-    if (held) return m->report.status;
+    if (held) {
+        m->held_cached = true;
+        m->held_tail = tail;
+        m->held_count = eligible;
+        m->held_transition = previous_slot;
+        return m->report.status;
+    }
     bool new_frontier_epoch = !m->frontier_count ||
         m->frontiers[m->frontier_count - 1].epoch != m->report.epoch;
     if ((!m->report.has_frontier || W - 1 > m->report.frontier) &&
         new_frontier_epoch && m->frontier_count == m->config.frontier_capacity)
         return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
-    for (size_t i = 0; i < eligible; ++i) {
+    for (size_t i = m->first; i != end; i = m->queue_nodes[i].next) {
+        MERGE_WORK(QVISIT, 1);
         struct staged *v = &m->queue[i];
         pgwt_merge_output out = {.kind = v->text ? PGWT_MERGE_OUT_TEXT : PGWT_MERGE_OUT_DATA,
             .record = v->record, .epoch = m->report.epoch};
@@ -410,13 +636,9 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         MERGE_WORK(STATE, 1);
         copy_generations(&m->attachments[slot], &m->prospective[i], 1);
     }
-    /* Recycle slots by rotation; payload ownership stays unique. */
-    for (size_t i = 0; i < eligible; ++i) {
-        struct staged done = m->queue[0];
-        memmove(m->queue, m->queue + 1, (m->count - 1) * sizeof(*m->queue));
-        m->queue[m->count - 1] = done;
-        --m->count;
-    }
+    /* Recycle only after every callback and checkpoint succeeded: fault()
+     * must still see the entire batch if publication stops partway through. */
+    for (size_t i = 0; i < eligible; ++i) queue_recycle_min(m);
     uint64_t F = W - 1; /* contract §3 F=W-1; W>0 was proved above */
     /* contract §3: empty eligible batches also advance, never repeat F. */
     if (!m->report.has_frontier || F > m->report.frontier) {
@@ -513,14 +735,21 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
             if (m->dependency_count == m->config.dependency_capacity)
                 return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
             m->dependencies[m->dependency_count++] = r->dependency_id;
+            remember_dependency(m, m->dependencies[m->dependency_count - 1]);
         }
-        struct staged *v = &m->queue[m->count++];
+        size_t slot = m->free_slot;
+        struct staged *v = &m->queue[slot];
+        m->free_slot = m->queue_nodes[slot].next;
+        ++m->count;
+        MERGE_WORK(QMOVE, 1);
         v->text = in->kind == PGWT_MERGE_TEXT;
         v->record = *r;
         if (m->config.mode == PGWT_MERGE_N || r->rank != PGWT_MERGE_TRANS)
             v->record.q = 0;
         if (r->payload_size) memcpy(v->bytes, r->payload, r->payload_size);
         v->record.payload = v->bytes;
+        m->root = queue_insert(m, m->root, slot, SIZE_MAX, SIZE_MAX);
+        if (m->held_cached && v->text) ++m->held_count;
         if (!v->text && perf) {
             /* contract §3: accepted qualified perf DATA supplies w=t. */
             if (r->t > src->proof.cutoff) src->proof.cutoff = r->t;
@@ -657,14 +886,35 @@ pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *sta
     }
     if (index_capacity > SIZE_MAX / sizeof(size_t))
         return create_fault(c, status, PGWT_MERGE_MALFORMED_ENVELOPE);
+    size_t dependency_index_capacity = 1, waiting_index_capacity = 1;
+    size_t dependency_capacity = c->dependency_capacity ? c->dependency_capacity : c->staged_capacity;
+    while (dependency_index_capacity / 2 < dependency_capacity) {
+        if (dependency_index_capacity > SIZE_MAX / 2)
+            return create_fault(c, status, PGWT_MERGE_ALLOCATION_FAIL);
+        dependency_index_capacity *= 2;
+    }
+    while (waiting_index_capacity / 2 < c->staged_capacity) waiting_index_capacity *= 2;
+    if (dependency_index_capacity > SIZE_MAX / sizeof(struct dependency_entry) ||
+        waiting_index_capacity > SIZE_MAX / sizeof(struct waiting_entry))
+        return create_fault(c, status, PGWT_MERGE_ALLOCATION_FAIL);
     pgwt_merge *m = calloc(1, sizeof(*m));
     if (m) {
         m->config = *c;
+        m->root = m->first = SIZE_MAX;
         m->index_capacity = index_capacity;
+        m->dependency_index_capacity = dependency_index_capacity;
+        m->waiting_index_capacity = waiting_index_capacity;
+        m->dependency_index = calloc(dependency_index_capacity, sizeof(*m->dependency_index));
+        m->waiting_index = calloc(waiting_index_capacity, sizeof(*m->waiting_index));
+        m->waiting_slots = calloc(c->staged_capacity, sizeof(*m->waiting_slots));
         if (!m->config.frontier_capacity) m->config.frontier_capacity = c->staged_capacity;
         if (!m->config.dependency_capacity) m->config.dependency_capacity = c->staged_capacity;
         m->sources = calloc(c->source_count, sizeof(*m->sources));
         m->queue = calloc(c->staged_capacity, sizeof(*m->queue));
+        /* queue_node is smaller than staged: the existing staged arithmetic
+         * guard also proves this allocation's multiplication cannot overflow. */
+        _Static_assert(sizeof(struct queue_node) <= sizeof(struct staged), "queue node size");
+        m->queue_nodes = calloc(c->staged_capacity, sizeof(*m->queue_nodes));
         m->attachments = calloc(c->attachment_capacity ? c->attachment_capacity : 1,
                                 sizeof(*m->attachments));
         size_t plan_capacity = c->attachment_capacity < c->staged_capacity ?
@@ -685,11 +935,14 @@ pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *sta
             m->payload_storage = bytes;
             if (bytes) for (size_t i = 0; i < c->staged_capacity; ++i)
                 m->queue[i].bytes = bytes + i * (c->payload_capacity ? c->payload_capacity : 1);
+            if (m->queue_nodes) for (size_t i = 0; i < c->staged_capacity; ++i)
+                m->queue_nodes[i].next = i + 1 < c->staged_capacity ? i + 1 : SIZE_MAX;
         }
     }
-    if (!m || !m->sources || !m->queue || !m->attachments || !m->prospective ||
+    if (!m || !m->sources || !m->queue || !m->queue_nodes || !m->attachments || !m->prospective ||
         !m->generation_index || !m->pid_heads || !m->planned || !m->touched ||
-        !m->frontiers || !m->dependencies ||
+        !m->frontiers || !m->dependencies || !m->dependency_index ||
+        !m->waiting_index || !m->waiting_slots ||
         !m->queue[0].bytes) {
         pgwt_merge_destroy(m);
         return create_fault(c, status, PGWT_MERGE_ALLOCATION_FAIL);
@@ -726,6 +979,7 @@ void pgwt_merge_destroy(pgwt_merge *m)
     if (!m) return;
     free(m->payload_storage);
     free(m->queue);
+    free(m->queue_nodes);
     free(m->sources);
     free(m->attachments);
     free(m->prospective);
@@ -735,6 +989,9 @@ void pgwt_merge_destroy(pgwt_merge *m)
     free(m->touched);
     free(m->frontiers);
     free(m->dependencies);
+    free(m->dependency_index);
+    free(m->waiting_index);
+    free(m->waiting_slots);
     free(m);
 }
 
