@@ -451,8 +451,8 @@ int pgwt_capture_fault(struct pgwt_merge_capture *c, pgwt_merge_reason reason,
     if (!c || c->finished) return -EINVAL;
     observation(c, d, s);
     retain_snapshot(c);
-    pgwt_merge_input in = {.kind = PGWT_MERGE_FAULT, .reason = reason, .observation = c->observation,
-        .allocation = reason == PGWT_MERGE_ALLOCATION_FAIL ? c->diagnostics.allocation : (pgwt_allocation_failure){0}};
+    pgwt_merge_input in = {.kind = PGWT_MERGE_FAULT, .reason = reason, .observation = c->observation};
+    if (reason == PGWT_MERGE_ALLOCATION_FAIL) in.allocation = c->diagnostics.allocation;
     pgwt_merge_status status = pgwt_merge_feed(c->core, &in);
     return status == PGWT_MERGE_EXIT_REQUIRED || pgwt_merge_get_report(c->core).void_failed ? -EIO : 0;
 }
