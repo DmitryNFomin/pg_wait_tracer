@@ -955,7 +955,7 @@ def prepare_corpus(work, selected=None):
     return cases, refusals, expected, all_cases, paths
 
 
-def differential(binary, work, selected=None, corpus=None):
+def differential(binary, work, selected=None, corpus=None, status_ids=()):
     if corpus is not None and selected is not None:
         raise RuntimeError("a selected case cannot reuse a full corpus")
     cases, refusals, expected, all_cases, paths = corpus if corpus is not None else prepare_corpus(work, selected)
@@ -992,10 +992,11 @@ def differential(binary, work, selected=None, corpus=None):
             print(f"evidence differential {case['id']} MISMATCH {field} "
                   f"actual={json.dumps(actual, ensure_ascii=True, separators=(',', ':'))} "
                   f"expected={json.dumps(want, ensure_ascii=True, separators=(',', ':'))}")
-        elif case["id"].startswith("guard_"):
+        elif case["id"].startswith("guard_") or case["id"] in status_ids:
             outcome = "unsupported" if "error" in want else want["wait_time"]["completeness"]
             print(f"evidence differential {case['id']} PASS "
                   f"reference={outcome} core={outcome}")
+    print("evidence differential seeded_suite " + ("FAIL" if mismatches else "PASS reference=MATCH core=MATCH"))
     print(f"evidence differential comparisons: value differences={values}; "
           f"refusal-only differences={sum(refusal_only.values())}; C answers ambiguity={unsafe}")
     for reason, count in sorted(matched_refusals.items()):

@@ -7,6 +7,8 @@ are errors, never kills. The guard registry targets independent semantic checks;
 allocation/overflow fail-closed guards are preserved, not weakened to provoke UB.
 """
 import argparse
+import hashlib
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -159,8 +161,11 @@ def main():
         baseline = directory / "baseline"
         build(baseline)
         result = run(baseline)
+        print("CODEC BASELINE BEGIN", flush=True)
+        print(result.stdout, end="", flush=True)
+        print("CODEC BASELINE END", flush=True)
         if result.returncode or result.stderr:
-            raise RuntimeError("baseline failed:\n" + result.stdout + result.stderr)
+            raise RuntimeError("baseline failed; see per-id output above\n" + result.stderr)
         for name, before, after, witness in cases:
             witnesses = (witness,) if isinstance(witness, str) else witness
             if original.count(before) != 1:
@@ -180,7 +185,10 @@ def main():
                                    f"required witness {witness}\n{mutated.stdout}\n{mutated.stderr}")
             if any(s in mutated.stderr for s in ("Sanitizer", "runtime error:", "ERROR:")):
                 raise RuntimeError(f"{name}: sanitizer error, not a kill:\n{mutated.stderr}")
-            print(f"codec {name} KILLED by {', '.join(witnesses)} (built; intended assertion failed)", flush=True)
+            dh = hashlib.sha256(json.dumps([name, before, after, witness], separators=(",", ":")).encode()).hexdigest()
+            sh = hashlib.sha256(source.read_bytes()).hexdigest()
+            intended_proof = "case:codec/" + witnesses[0]
+            print(f"codec {name} KILLED by {', '.join(witnesses)} (built; intended assertion failed) definition-sha256={dh} source-sha256={sh} intended-proof={intended_proof}", flush=True)
             binary.unlink()
         driver=directory/"redelivery-baseline";build_redelivery(driver)
         # Each named comparison is reached on the unmutated product before
@@ -192,6 +200,7 @@ def main():
             baseline_probe=subprocess.run(command+[str(driver),witness],cwd=ROOT,capture_output=True,text=True,timeout=60)
             if baseline_probe.returncode or f"codec redelivery_{witness} PASS\n" not in baseline_probe.stdout:
                 raise RuntimeError(f"{name}: baseline did not reach probe: {baseline_probe.stdout} {baseline_probe.stderr}")
+            print(f"codec probe_{name} PASS", flush=True)
             source=directory/"redelivery.c";source.write_text(original.replace(before,after,1))
             binary=directory/name
             try: build_redelivery(binary,source)
@@ -200,7 +209,10 @@ def main():
             mutated=subprocess.run(command+[str(binary),witness],cwd=ROOT,capture_output=True,text=True,timeout=60)
             if mutated.returncode!=1 or f"codec redelivery_{witness} FAIL assertion\n" not in mutated.stdout or mutated.stderr:
                 raise RuntimeError(f"{name}: SURVIVED or harness error ({mutated.returncode}): {mutated.stdout} {mutated.stderr}")
-            print(f"codec {name} KILLED by redelivery_{witness} (built; intended independent assertion failed)",flush=True)
+            dh = hashlib.sha256(json.dumps([name, before, after, witness], separators=(",", ":")).encode()).hexdigest()
+            sh = hashlib.sha256(source.read_bytes()).hexdigest()
+            intended_proof = "case:redelivery/" + witness[5:] if witness.startswith("case_") else "case:probe/" + name
+            print(f"codec {name} KILLED by redelivery_{witness} (built; intended independent assertion failed) definition-sha256={dh} source-sha256={sh} intended-proof={intended_proof}",flush=True)
             binary.unlink()
         label = "guard sweep" if args.guard_sweep else "mutants and guard sweep"
         total=len(cases)+len(REDELIVERY_MUTATIONS)

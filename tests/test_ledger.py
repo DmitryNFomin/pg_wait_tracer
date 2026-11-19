@@ -252,14 +252,77 @@ def real_cli(root, manifest):
     result = subprocess.run(command, cwd=root, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     report = json.loads((root / "ledger.json").read_text())
-    assert len(report["claims"]) == 7
+    claim_count = len(json.loads((ROOT / "ledger/claims.json").read_text())["claims"])
+    assert len(report["claims"]) == claim_count
     assert len(report["columns"]) == 8
     assert report["tree_hash"] == ledger.git("rev-parse", "HEAD^{tree}")
     assert "missing artifact directory" in result.stdout
-    assert len(result.stdout.splitlines()) == 9
+    assert len(result.stdout.splitlines()) == claim_count + 2
     assert report["claims"][0]["claim"] == ledger.contract_claims(
         report["commit"], "wait_time-v1")["C01"]["claim"]
     assert all(c["state"] == "FAIL" for r in report["claims"] for c in r["cells"].values())
+
+
+def new_contracts(root, manifest):
+    for contract, family in (('merge-v1', 'rows'), ('merge-v1', 'index'), ('evidence-v1', 'codec')):
+        if family == 'rows':
+            cases = {'case:row-1/N': 'row 1/N PASS', 'case:row-3/N': 'row 3/N PASS'}
+            mutant = 'mutant:M1'
+            line = 'M1 KILLED: row 3/N MISMATCH output count at output 0'
+            target = 'case:row-3/N'
+        elif family == 'index':
+            cases = {'diff:index/a95a214c': 'core merge differential: 1 inputs, 1 scenarios, 1 outputs, '
+                                            '0 VOIDs, 0 rejections, 0 REARMs; identical to a95a214c',
+                     'case:index/work': 'index work PASS'}
+            mutant = 'mutant:index/linear_scan'
+            line = ('linear_scan KILLED: retained=1000, 0.157s, index work MISMATCH '
+                    'work lookup visits <= 64 at input 0')
+            target = 'case:index/work'
+        else:
+            cases = {'case:codec/golden_646_bytes': 'codec golden_646_bytes PASS',
+                     'case:codec/crc_known_answers': 'codec crc_known_answers PASS'}
+            mutant = 'mutant:codec/C01_crc_polynomial'
+            line = 'codec C01_crc_polynomial KILLED by crc_known_answers (built; intended assertion failed)'
+            target = 'case:codec/crc_known_answers'
+        refs = list(cases) + [mutant]
+        status = {'contract': contract, 'tree_hash': TREE, 'state': 'PASS', 'errors': [],
+                  'claims': [{'id': 'C01', 'state': 'PASS', 'proof_ids': refs}],
+                  'proofs': {ident: {'state': 'PASS', 'lines': [value]} for ident, value in cases.items()}}
+        status['proofs'][mutant] = {'state': 'PASS', 'lines': [line +
+            ' definition-sha256=' + 'd' * 64 + ' source-sha256=' + 'e' * 64 + ' intended-proof=' + target]}
+        record = {'contract': contract}
+        expected = {'proof_ids': refs}
+        def evaluate_new():
+            return ledger.core_status(record, TREE, root, contract + ':C01', expected)
+        def rejects(reason):
+            try:
+                evaluate_new()
+            except ledger.EvidenceError as error:
+                assert reason in str(error), str(error)
+            else:
+                raise AssertionError('ledger accepted missing/malformed proof for ' + contract)
+        for mode in ('plain', 'sanitizers'):
+            write(root / mode / (contract + '.json'), status)
+        assert evaluate_new()
+        bad = copy.deepcopy(status)
+        bad['proofs'][target]['state'] = 'NOT-RUN'
+        write(root / 'sanitizers' / (contract + '.json'), bad)
+        rejects('non-PASS')
+        bad = copy.deepcopy(status)
+        bad['proofs'][target]['lines'] = [cases[target] + ' extra']
+        write(root / 'sanitizers' / (contract + '.json'), bad)
+        rejects('malformed proof')
+        bad = copy.deepcopy(status)
+        bad['proofs'][mutant]['lines'] = ['KILLED']
+        write(root / 'sanitizers' / (contract + '.json'), bad)
+        rejects('malformed mutant')
+        (root / 'sanitizers' / (contract + '.json')).unlink()
+        try:
+            evaluate_new()
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError('ledger accepted a missing sanitizer artifact')
 
 
 control("all-good / existing provenance / same tree, different commit", all_good)
@@ -300,4 +363,24 @@ control("missing link in each attested column", missing_attestations)
 control("no manual producer override", no_producer_override)
 control("previous green status ignored", no_reused_status)
 control("real CLI", real_cli)
+
+def report_mutant_line(root, manifest):
+    # The native report controls name assertions containing a space.
+    target = 'case:report/two_faults'
+    ident = 'mutant:report/first_fault'
+    proofs = {ident: {'state': 'PASS', 'lines': [
+        'report mutant first_fault: KILLED case=two_faults assertion=FAIL final_cutoff '
+        + 'definition-sha256=' + 'd' * 64 + ' source-sha256=' + 'e' * 64
+        + ' intended-proof=' + target]}}
+    assert ledger.passing_proof(proofs, ident, 'evidence-v1') == target
+    try:
+        ledger.passing_proof({'unknown': {'state': 'PASS', 'lines': ['PASS']}}, 'unknown', 'evidence-v1')
+    except ledger.EvidenceError as error:
+        assert 'unknown proof type' in str(error)
+    else:
+        raise AssertionError('unknown proof type accepted')
+
+
+control('report mutant assertion with spaces / unknown proof type', report_mutant_line)
+control("merge/evidence proof validation in both artifact modes", new_contracts)
 print(f"ledger self-test: PASS ({len(CONTROLS)} controls)")
