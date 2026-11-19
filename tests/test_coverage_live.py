@@ -13,8 +13,6 @@ payload/CRC decoder is independent of the C codec. -i 5 tests timer autonomy.
 --self-test exercises the gate itself without Linux, root, PostgreSQL or BPF.
 """
 import argparse
-import ctypes
-import ctypes.util
 from collections import Counter
 import os
 from pathlib import Path
@@ -60,6 +58,49 @@ def crc32c(data):
     return crc ^ 0xFFFFFFFF
 
 
+def decompress_lz4_block(payload, usize):
+    """Decode a raw LZ4 block, bounded by its declared uncompressed size."""
+    assert 0 <= usize <= 10 * 1024 * 1024, ("uncompressed size", usize)
+    assert payload, "empty LZ4 block"
+    out = bytearray()
+    pos = 0
+
+    def length(n):
+        nonlocal pos
+        if n == 15:
+            while True:
+                assert pos < len(payload), "truncated LZ4 length"
+                extra = payload[pos]
+                pos += 1
+                n += extra
+                if extra != 255:
+                    break
+        return n
+
+    while pos < len(payload):
+        token = payload[pos]
+        pos += 1
+        literals = length(token >> 4)
+        assert pos + literals <= len(payload), "truncated LZ4 literals"
+        assert len(out) + literals <= usize, "LZ4 literal output overrun"
+        out.extend(payload[pos:pos + literals])
+        pos += literals
+        if pos == len(payload):
+            break
+        assert pos + 2 <= len(payload), "truncated LZ4 offset"
+        distance = payload[pos] | (payload[pos + 1] << 8)
+        pos += 2
+        assert 0 < distance <= len(out), "invalid LZ4 offset"
+        match = length(token & 15) + 4
+        assert len(out) + match <= usize, "LZ4 match output overrun"
+        # Matches can overlap: newly copied bytes become match input.
+        for _ in range(match):
+            out.append(out[-distance])
+        assert pos < len(payload), "missing LZ4 final literals"
+    assert len(out) == usize, ("LZ4 data block size", len(out), usize)
+    return bytes(out)
+
+
 def data_timestamps(payload, usize, count):
     """v6 TRANSITIONS and SAMPLES share the first delta-varint column.
 
@@ -67,18 +108,8 @@ def data_timestamps(payload, usize, count):
     first/last timestamps cannot count individual late reservations.
     """
     assert 0 < usize <= 10 * 1024 * 1024, ("uncompressed size", usize)
-    if not hasattr(data_timestamps, "lz4"):
-        library = ctypes.util.find_library("lz4")
-        assert library, "liblz4 required for the file-order completeness scan"
-        lz4 = ctypes.CDLL(library)
-        lz4.LZ4_decompress_safe.argtypes = [ctypes.c_char_p, ctypes.c_void_p,
-                                            ctypes.c_int, ctypes.c_int]
-        lz4.LZ4_decompress_safe.restype = ctypes.c_int
-        data_timestamps.lz4 = lz4
-    out = ctypes.create_string_buffer(usize)
-    size = data_timestamps.lz4.LZ4_decompress_safe(payload, out, len(payload), usize)
-    assert size == usize, ("LZ4 data block", size, usize)
-    data, offset, previous = out.raw, 0, 0
+    data = decompress_lz4_block(payload, usize)
+    size, offset, previous = len(data), 0, 0
     for _ in range(count):
         delta = 0
         for shift in range(0, 70, 7):
@@ -380,6 +411,41 @@ def coverage_stats(log):
 
 
 def self_test():
+    # Raw block vectors cover length extensions, little-endian offsets and
+    # overlap, independently of which encodings the writer happens to choose.
+    literals = bytes(range(256)) + bytes(range(14))
+    for payload, expected in [
+            (b"\x00", b""),
+            (b"\x50hello", b"hello"),
+            (b"\xf0\xff\x00" + literals, literals),
+            (b"\x1fA\x01\x00\xff\x00\x50hello", b"A" * 275 + b"hello"),
+            (b"\xf3\xff\x00" + literals + b"\x0e\x01\x50hello",
+             literals + literals[:7] + b"hello")]:
+        assert decompress_lz4_block(payload, len(expected)) == expected
+    corrupt_blocks = [
+        (b"", 0, "empty LZ4 block"),
+        (b"\xf0", 15, "truncated LZ4 length"),
+        (b"\xf0\xff", 270, "truncated LZ4 length"),
+        (b"\x20a", 2, "truncated LZ4 literals"),
+        (b"\x10a\x01", 5, "truncated LZ4 offset"),
+        (b"\x10a\x00\x00", 5, "invalid LZ4 offset"),
+        (b"\x10a\x02\x00", 5, "invalid LZ4 offset"),
+        (b"\x1fa\x01\x00", 20, "truncated LZ4 length"),
+        (b"\x1fa\x01\x00\xff", 275, "truncated LZ4 length"),
+        (b"\x20ab", 1, "LZ4 literal output overrun"),
+        (b"\x10a\x01\x00\x50hello", 4, "LZ4 match output overrun"),
+        (b"\x10a\x01\x00", 5, "missing LZ4 final literals"),
+        (b"\x10a", 2, "LZ4 data block size")]
+    for payload, usize, reason in corrupt_blocks:
+        try:
+            decompress_lz4_block(payload, usize)
+        except AssertionError as exc:
+            assert reason in str(exc), (reason, exc)
+        else:
+            raise AssertionError("corrupt LZ4 block accepted: " + reason)
+    print(f"LZ4 block controls: PASS (literal/match extensions, overlap, offsets; "
+          f"{len(corrupt_blocks)} corrupt blocks rejected)")
+
     import contextlib
     import io
 
@@ -502,11 +568,23 @@ def self_test():
 #include "event_writer.h"
 #include <assert.h>
 #include <string.h>
+/* Only event_writer.c redirects its compressor call. Keep the helper's
+ * call below linked to the same real liblz4 used by the existing self-test. */
+#undef LZ4_compress_default
+#include <lz4.h>
 #define SEC 1000000000ULL
 static struct pgwt_event_writer w;
+static FILE *inputs;
+int record_lz4_input(const char *src, char *dst, int size, int capacity)
+{
+    uint32_t n = (uint32_t)size;
+    assert(fwrite(&n, sizeof(n), 1, inputs) == 1);
+    assert(fwrite(src, 1, n, inputs) == n);
+    return LZ4_compress_default(src, dst, size, capacity);
+}
 static void data(int samples, const unsigned *times, int count)
 {
-    struct pgwt_trace_event events[8] = {0};
+    struct pgwt_trace_event events[PGWT_BLOCK_EVENTS] = {0};
     for (int i = 0; i < count; i++) {
         events[i].timestamp_ns = times[i] * SEC;
         events[i].pid = 42; events[i].old_event = 1; events[i].new_event = 2;
@@ -519,12 +597,23 @@ static void wm(unsigned obs, unsigned mark)
 { assert(pgwt_writer_coverage_watermark(&w, obs * SEC, mark * SEC, 0, 0) == 0); }
 int main(int argc, char **argv)
 {
-    assert(argc == 3);
+    assert(argc == 4);
+    inputs = fopen(argv[3], "wb");
+    assert(inputs);
     assert(pgwt_writer_init(&w, argv[1], 18, 24, NULL) == 0);
     pgwt_writer_coverage_configure(&w, 0, 0, 0);
     data(0, (unsigned[]){1, 2}, 2);
     wm(6, 5);
-    if (!strcmp(argv[2], "late")) {
+    if (!strcmp(argv[2], "lz4")) {
+        unsigned times[PGWT_BLOCK_EVENTS], seed = 947;
+        for (int i = 0; i < PGWT_BLOCK_EVENTS; i++) {
+            seed = seed * 1664525U + 1013904223U;
+            times[i] = seed;
+        }
+        data(0, times, PGWT_BLOCK_EVENTS);
+        for (int i = 0; i < PGWT_BLOCK_EVENTS; i++) times[i] = 10 + i;
+        data(1, times, PGWT_BLOCK_EVENTS);
+    } else if (!strcmp(argv[2], "late")) {
         data(0, (unsigned[]){6, 5, 4, 7}, 4);
         wm(7, 5);
         data(0, (unsigned[]){5}, 1);
@@ -539,6 +628,7 @@ int main(int argc, char **argv)
         data(0, (unsigned[]){8}, 1);
     }
     assert(pgwt_writer_close(&w) == 0);
+    assert(fclose(inputs) == 0);
     return 0;
 }
 '''
@@ -546,6 +636,33 @@ int main(int argc, char **argv)
     def tick_log(records):
         return "\n".join(f"COVERAGE-TICK: obs={obs} W={w} fence=800 consumer=792 "
                          "promotions=1 heartbeats=1" for obs, w, _, _ in watermarks(records))
+
+    def check_writer_blocks(files, inputs):
+        # The C shim saves the exact bytes passed to LZ4_compress_default.
+        # Compare against payloads read from real TRANSITIONS/SAMPLES files.
+        raw, pos, blocks, total = inputs.read_bytes(), 0, 0, 0
+        for _, path, _, _ in files:
+            blob, off = path.read_bytes(), FILE_HDR.size
+            while off + BLOCK_HDR.size <= len(blob):
+                _, _, count, csize, usize, kind = BLOCK_HDR.unpack_from(blob, off)[:6]
+                if not 0 < count <= 4096 or not 0 < csize <= 10 * 1024 * 1024:
+                    break  # Archive footer, as in coverage_records.
+                end = off + BLOCK_HDR.size + csize
+                assert end <= len(blob)
+                if kind in (0, 1):
+                    n, = struct.unpack_from("=I", raw, pos)
+                    pos += 4
+                    assert usize == n and pos + n <= len(raw)
+                    payload = blob[off + BLOCK_HDR.size:end]
+                    assert decompress_lz4_block(payload, usize) == raw[pos:pos + n]
+                    pos += n
+                    blocks += 1
+                    total += n
+                else:
+                    assert kind == 3
+                off = end
+        assert blocks > 0 and pos == len(raw), (blocks, pos, len(raw))
+        return blocks, total
 
     with tempfile.TemporaryDirectory(prefix="pgwt-coverage-order-") as tmp:
         tmp = Path(tmp)
@@ -557,19 +674,28 @@ int main(int argc, char **argv)
             lz4 = ["-I" + prefix + "/include", "-L" + prefix + "/lib", *lz4]
         subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-std=gnu11",
                         "-Wall", "-Wextra", "-Werror", "-DPGWT_SERVER",
+                        "-DLZ4_compress_default=record_lz4_input",
                         *shlex.split(os.environ.get("CFLAGS", "")),
                         "-I" + str(ROOT / "src"), str(source),
                         str(ROOT / "src/event_writer.c"), *lz4, "-o", str(binary)], check=True)
-        for scenario, expected in [("late", {"W": 8 * SEC, "late": 6, "data": 11}),
+        blocks = total = 0
+        for scenario, expected in [("lz4", None),
+                                   ("late", {"W": 8 * SEC, "late": 6, "data": 11}),
                                    ("clean", {"W": 7 * SEC, "late": 0, "data": 5})]:
             directory = tmp / scenario
-            subprocess.run([str(binary), str(directory), scenario], check=True)
+            inputs = tmp / (scenario + "-inputs.bin")
+            subprocess.run([str(binary), str(directory), scenario, str(inputs)], check=True)
             # Deliberately invert lexical order across rotation.
             if scenario == "late":
                 archive, = directory.glob("*.trace.lz4")
                 archive.rename(directory / "z.trace.lz4")
             (directory / "current.trace").rename(directory / "a.trace.lz4")
             records, files = boot_files(directory)
+            nblocks, nbytes = check_writer_blocks(files, inputs)
+            blocks += nblocks
+            total += nbytes
+            if expected is None:
+                continue
             state = {"W": -1, "late": 0, "data": 0}
             for _, path, _, _ in files:
                 coverage_records(path, state)
@@ -622,6 +748,7 @@ int main(int argc, char **argv)
                 assert "one WATERMARK every tick through leg end" in str(exc), exc
             else:
                 raise AssertionError("boot2 accepted stalled ticks")
+    print(f"LZ4 writer byte-for-byte: PASS ({blocks} blocks, {total} bytes; transitions and samples)")
     print("file-order scan: PASS (exact-W boundary, transitions, samples, heartbeat, rotation, inversion)")
 
     print("test_coverage_live --self-test: PASS (witness branches, per-tick pairs, chain, recovery, stats, rotation, CRC)")
