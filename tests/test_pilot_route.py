@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -190,6 +191,8 @@ def baseline(build, tmp, data, expected):
                 assert written.returncode == 0, written.stderr
                 request = wire_request(case)
                 raw, response = route(build.server, directory, request)
+                storage = response['storage']
+                assert not storage['codec_failed'] or storage['codec_stops'], storage
                 if group == 'ambiguous':
                     assert response['code'] == 'pilot_unsupported' and response['storage']['capture_ambiguous'] is True
                     assert 'ambiguous' in response['error']
@@ -262,6 +265,181 @@ def startup_refusals(build, tmp, data, expected):
     print('startup v5 only: info and pilot_wait_metrics PASS', flush=True)
 
 
+def routing_probe(build, name, replacements=None):
+    # Call the same loader/query/serializer without legacy-reader startup:
+    # master's trace reader does not yet admit v6-only directories.
+    source = r'''
+#define main pilot_original_server_main
+#include "SERVER_SOURCE"
+#undef main
+#include <assert.h>
+int main(int argc, char **argv)
+{
+    assert(argc == 2);
+    pgwt_evidence_buffer buffers[PGWT_PILOT_MAX_FILES];
+    size_t count=0;
+    assert(!pilot_buffers(argv[1],buffers,&count));
+    pgwt_evidence_target target={.capture={"A",1},.pid=101,.has_fork=true,.fork=0};
+    pgwt_core_query query={.event={"PgSleep",7},.from=1,.to=15};
+    pgwt_core_result wait_time,completed;
+    pgwt_query_storage storage;
+    const char *reason=NULL;
+    int status=pgwt_evidence_query(buffers,count,&target,&query,&wait_time,&completed,&storage,&reason);
+    cJSON *root=cJSON_CreateObject();
+    cJSON_AddNumberToObject(root,"status",status);
+    if (reason) cJSON_AddStringToObject(root,"reason",reason);
+    pilot_storage(root,&storage);
+    if (!status) {
+        cJSON_AddItemToObject(root,"wait_time",pilot_metric(&wait_time));
+        cJSON_AddItemToObject(root,"completed_waits",pilot_metric(&completed));
+    }
+    emit_json(root);
+    for (size_t i=0;i<count;++i) free((void *)buffers[i].data);
+    return 0;
+}
+'''.replace('SERVER_SOURCE', str(ROOT / 'src/server.c'))
+    return build.link(name, {'src/server.c': source, **(replacements or {})})
+
+
+def trace_bytes(version, coverage=False):
+    # v2/v3's 28-byte header; v4/v6 add the nominal sample period.
+    header = struct.pack('<4sHHIQQ', b'PGWT', version, 0, 17, 0, 0)
+    if version >= 4:
+        header += struct.pack('<Q', 100_000_000)
+    if not coverage:
+        return header
+    assert version == 6
+    # U1 wire format: raw type 3, BOOT payload schema 1, CRC-32C + pad.
+    # Hand-built here so the test needs neither U1's writer nor its headers.
+    payload = struct.pack('<4sHBBQQQQ', b'PGWC', 1, 1, 0, 1, 0, 0, 0)
+    payload += bytes(range(16)) + bytes(range(16, 32))
+    crc = 0xffffffff
+    for byte in payload:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ (0x82f63b78 if crc & 1 else 0)
+    payload += struct.pack('<II', crc ^ 0xffffffff, 0)
+    assert len(payload) == 80
+    block = struct.pack('<QQIIIHHQQ', 1, 1, 1, len(payload), len(payload), 3, 0, 0, 0)
+    return header + block + payload
+
+
+def routing_cases(build, tmp, data, expected, run_mutants=False):
+    binary = routing_probe(build, 'routing-probe')
+    directory = tmp / 'routing-v5-source'
+    assert fixture(build, data[1][0], directory, 1).returncode == 0
+    v5, = directory.iterdir()
+    v5 = v5.read_bytes()
+
+    def invoke(executable, label, files):
+        directory = tmp / label
+        directory.mkdir()
+        for name, payload in files.items():
+            (directory / name).write_bytes(payload)
+        return json.loads(command([executable, directory], timeout=20).stdout)
+
+    def metrics(response):
+        assert response['status'] == 0, response
+        for key in METRICS:
+            assert metric_integer_tree(response[key]) == expected[1][key], (key, response)
+
+    def clean(response, count):
+        storage = response['storage']
+        assert storage['files'] == count, storage
+        assert storage['codec_failed'] is False and storage['codec_stops'] == [], (
+            'storage codec_failed/stops', storage)
+
+    def failure(response, file):
+        storage = response['storage']
+        assert storage['codec_failed'] is True, ('codec failure required', response)
+        assert any(s['file'] == file and s['reason'] == 'IH' for s in storage['codec_stops']), (
+            'failure must name offending file', file, response)
+
+    alone = invoke(binary, 'routing-v5', {'evidence.trace': v5})
+    metrics(alone)
+    clean(alone, 1)
+    print('routing v5 alone: PASS', flush=True)
+    for version, coverage in ((2, False), (3, False), (4, False), (6, False), (6, True)):
+        label = f'v{version}' + ('-coverage' if coverage else '')
+        trace = trace_bytes(version, coverage)
+        response = invoke(binary, 'routing-' + label, {'current.trace': trace})
+        clean(response, 1)
+        assert response['status'] == 0, response
+        for key in METRICS:
+            assert response[key]['value'] is None and 'evidence_invalid' in response[key]['reasons'], response
+        # Put the ignored trace on either side of the evidence file.
+        for position in ('00', '99'):
+            response = invoke(binary, f'routing-mixed-{label}-{position}', {
+                position + '-trace.trace': trace, '50-evidence.trace': v5})
+            metrics(response)
+            clean(response, 2)
+        print(f'routing {label}: alone unavailable; mixed v5 unchanged; files counted PASS', flush=True)
+    for label, payload in (('v7', trace_bytes(7)), ('corrupt-v5', v5[:20])):
+        response = invoke(binary, 'routing-' + label, {'bad.trace': payload})
+        failure(response, 0)
+        assert response['storage']['files'] == 1
+        for position, file in (('00', 0), ('99', 2)):
+            response = invoke(binary, f'routing-mixed-{label}-{position}', {
+                position + '-bad.trace': payload, '50-evidence.trace': v5,
+                '51-trace.trace': trace_bytes(6)})
+            failure(response, file)
+            assert response['storage']['files'] == 3
+        print(f'routing {label}: IH names original file, alone and mixed PASS', flush=True)
+
+    corrupt = bytearray(v5)
+    first_block, = struct.unpack_from('<I', corrupt, 40)
+    corrupt[first_block + 64] ^= 1  # Keep a valid header; break the first block CRC.
+    response = invoke(binary, 'routing-corrupt-block', {
+        '00-trace.trace': trace_bytes(6), '99-bad.trace': corrupt})
+    storage = response['storage']
+    assert storage['codec_failed'] is True and storage['codec_stops'], response
+    assert storage['codec_stops'][0]['file'] == 1, response
+    assert storage['codec_stops'][0]['reason'] == 'CRC', response
+    print('routing corrupt v5 block: CRC names original file PASS', flush=True)
+
+    if not run_mutants:
+        return
+    source = (ROOT / 'src/core/evidence_query.c').read_text()
+    mutants = (
+        ('drop_v6', 'case 2: case 3: case 4: case 6: return true;',
+         'case 2: case 3: case 4: return true;',
+         {'00-trace.trace': trace_bytes(6), '50-evidence.trace': v5}, clean, 2,
+         'storage codec_failed/stops'),
+        ('not_v5', 'switch (b.data[4]) {',
+         'if (b.data[4] != 5) return true;\n    switch (b.data[4]) {',
+         {'bad.trace': trace_bytes(7)}, failure, 0, 'codec failure required'),
+        ('drop_file', '(pgwt_query_stop){.file=file,', '(pgwt_query_stop){.file=0,',
+         {'00-trace.trace': trace_bytes(6), '50-evidence.trace': v5, '99-bad.trace': v5[:20]},
+         failure, 2, 'failure must name offending file'),
+    )
+    for name, old, new, files, assertion, argument, wanted in mutants:
+        assert source.count(old) == 1, (name, 'mutation site count')
+        marker = 'MUTANT_REACHED:' + name
+        changed = '#include <stdio.h>\n' + source.replace(old, new)
+        if name == 'drop_file':
+            changed = changed.replace('.file=0,', f'.file=(fprintf(stderr,"{marker}\\n"),0),')
+        else:
+            entry = '    switch (b.data[4]) {' if name == 'drop_v6' else '    if (b.data[4] != 5)'
+            assert changed.count(entry) == 1
+            changed = changed.replace(entry, f'    fprintf(stderr,"{marker}\\n");\n' + entry)
+        mutant = routing_probe(build, 'routing-' + name, {'src/core/evidence_query.c': changed})
+        directory = tmp / ('routing-mutant-' + name)
+        directory.mkdir()
+        for filename, payload in files.items():
+            (directory / filename).write_bytes(payload)
+        control = json.loads(command([binary, directory], timeout=20).stdout)
+        assertion(control, argument)
+        result = command([mutant, directory], timeout=20)
+        assert marker in result.stderr, (name, 'mutation not reached')
+        try:
+            assertion(json.loads(result.stdout), argument)
+        except AssertionError as error:
+            assert wanted in str(error), (name, 'wrong assertion', error)
+        else:
+            raise AssertionError(name + ' SURVIVED')
+        print(f'routing mutant {name}: BUILT; REACHED; RED {wanted}', flush=True)
+
+
 def gallery_fixtures(build, tmp, data):
     import mock_server
 
@@ -279,6 +457,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mutants', action='store_true')
     browser_mode = parser.add_mutually_exclusive_group()
+    browser_mode.add_argument('--routing-only', action='store_true', help='host-only container routing and failure provenance')
     browser_mode.add_argument('--no-browser', action='store_true', help='route-only diagnostic run; not acceptance')
     browser_mode.add_argument('--require-browser', action='store_true', help='browser gate: missing dependencies fail')
     args = parser.parse_args()
@@ -286,6 +465,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix='pgwt-pilot-route-') as work:
         tmp = Path(work)
         build = Build(tmp)
+        routing_cases(build, tmp, data, expected, args.mutants)
+        if args.routing_only:
+            return
         if args.mutants:
             mutants(build, tmp, data, expected)
             browser_split(tmp)
