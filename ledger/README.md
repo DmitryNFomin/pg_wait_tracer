@@ -108,8 +108,8 @@ The two CI status modes move and upload every top-level output file.
 
 A failing or missing proof prints its id, affected claim ids and runner log
 path on the console, followed by its first failing record when available.
-The gate retains its temporary output directory so those paths can be read
-after failure. If a runner could not start, its log explains that it did not run.
+The gate removes its temporary output directory on green and retains it on red
+so those paths can be read after failure. If a runner could not start, its log explains that it did not run.
 
 Local macOS measurements on 2026-11-14 of the commands in the CI `core-status`
 job: **plain 588.8 s**, **ASan/UBSan 1260.2 s**, **1849.0 s serial total**
