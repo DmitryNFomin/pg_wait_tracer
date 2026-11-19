@@ -372,7 +372,54 @@
     "M17": [
       28,
       "N",
-      "output count"
+      "statuses"
     ]
-  }
+  },
+  "merge_core": [
+    {
+      "runner": "index",
+      "id": "case:index/no_work_hook",
+      "line": "nm: production object has no pgwt_merge_test_work; instrumented object has U pgwt_merge_test_work"
+    },
+    {
+      "runner": "index",
+      "id": "case:index/probe",
+      "line": "index probe PASS"
+    },
+    {
+      "runner": "index",
+      "id": "case:index/insert",
+      "line": "index insert PASS"
+    },
+    {
+      "runner": "index",
+      "id": "case:index/plan_reset",
+      "line": "index plan_reset PASS"
+    },
+    {
+      "runner": "index",
+      "id": "case:index/work",
+      "line": "index work PASS"
+    },
+    {
+      "runner": "index",
+      "id": "diff:index/a95a214c",
+      "line": "core merge differential: 112188 inputs, 262 scenarios, 55639 outputs, 17755 VOIDs, 1814 rejections, 2010 REARMs; identical to a95a214c"
+    },
+    {
+      "runner": "queue-mutants",
+      "id": "case:queue/payload_reuse",
+      "line": "queue payload reuse: seeds=16 modes=2 cycles=4 inputs=13312 time=<seconds>s"
+    },
+    {
+      "runner": "queue-mutants",
+      "id": "diff:queue/a95a214c",
+      "line": "queue differential: 277517 inputs, 54 scenarios, 156592 outputs, 21 VOIDs, 5 rejections, 12 REARMs; identical to a95a214c"
+    },
+    {
+      "runner": "queue-mutants",
+      "id": "case:queue/work",
+      "line": "queue work PASS"
+    }
+  ]
 }

@@ -79,6 +79,9 @@ run python3 -B tests/counter_vector_mutants.py --guard-sweep
 
 step "core wait_time, merge and evidence contract status and mutation checks"
 core_cflags="${CFLAGS:-} -fsanitize=address,undefined -fno-omit-frame-pointer"
+# core-status runs the portable merge/evidence contract, differential, codec,
+# redelivery, report, merge index and merge queue suites (including their
+# mutants) once in this run.
 # A fresh directory binds the self-test's transcripts to this invocation.
 # Remove it on green; retain it on red so the printed runner-log paths remain usable.
 if core_status_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-check-core-status.XXXXXX"); then
@@ -98,6 +101,9 @@ else
     fail=1
 fi
 run python3 -B tests/test_ledger.py
+# core-status ran the merge index and queue proofs; this keeps the queue
+# suite's production/instrumented symbol check and informational timings.
+run env CFLAGS="$core_cflags" python3 -B tests/test_core_merge_queue.py
 
 step "stateless evidence-v1 pilot route, browser, uint64 and mutations"
 run python3 -B tests/check_server_test_links.py --self-test
@@ -105,14 +111,6 @@ run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py --require-bro
 run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py --mutants
 run bash tests/test_consumer_boundary.sh --self-test
 
-step "core merge index and queue differential, work bounds and mutants (Refs #926)"
-run env CFLAGS="$core_cflags" python3 -B tests/test_core_merge_index.py
-run env CFLAGS="$core_cflags" python3 -B tests/core_merge_index_mutants.py
-run env CFLAGS="$core_cflags" python3 -B tests/test_core_merge_queue.py
-run env CFLAGS="$core_cflags" python3 -B tests/core_merge_queue_mutants.py
-
-# core-status runs the portable merge/evidence contract, differential, codec,
-# redelivery and report suites (including their mutants) once in this run.
 step "C11 synthetic merge adapter: wire goldens, contract replay and rule mutants (Refs #871)"
 run env CFLAGS="$core_cflags" bash tests/core_merge_adapter_mutants.sh
 

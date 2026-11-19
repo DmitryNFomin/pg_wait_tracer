@@ -182,7 +182,18 @@ def passing_contract_proof(proofs, ident, line, contract):
         require(match is not None, f"malformed mutant proof: {ident}")
         detail, target = match.groups()
         name = ident[7:]
-        if contract == "merge-v1":
+        if contract == "merge-v1" and name.startswith("index/"):
+            reached = re.fullmatch(re.escape(name[6:]) + r" KILLED: (?:retained=1000, [0-9]+\.[0-9]{3}s, )?"
+                                   r"index (\S+) MISMATCH .+", detail)
+            require(reached and target == "case:index/" + reached[1], f"malformed mutant proof: {ident}")
+        elif contract == "merge-v1" and name.startswith("queue/"):
+            reached = re.fullmatch(re.escape(name[6:]) + r" KILLED in [0-9]+\.[0-9]{3}s: queue (\S+) MISMATCH .+",
+                                   detail)
+            require(reached and target == {"work": "case:queue/work", "corpus": "diff:queue/a95a214c",
+                                           "incremental": "diff:queue/a95a214c",
+                                           "payload_reuse": "case:queue/payload_reuse"}.get(reached[1]),
+                    f"malformed mutant proof: {ident}")
+        elif contract == "merge-v1":
             row = re.fullmatch(re.escape(name) + r" KILLED: row ([0-9]+/[NQ]) MISMATCH .+", detail)
             guard = re.fullmatch(re.escape(name) + r" KILLED: guard (\S+) MISMATCH .+", detail)
             require((row and target == 'case:row-' + row[1]) or
@@ -217,7 +228,22 @@ def passing_contract_proof(proofs, ident, line, contract):
         return None
     require(ident.startswith(('case:', 'diff:')), f'unknown proof type: {ident}')
     name = ident.split(':', 1)[1]
-    if contract == 'merge-v1':
+    if contract == 'merge-v1' and name.startswith(('index/', 'queue/')):
+        family, case = name.split('/', 1)
+        if ident.startswith('diff:'):
+            valid = case == 'a95a214c' and re.fullmatch(
+                ('core merge' if family == 'index' else 'queue') +
+                r' differential: [0-9]+ inputs, [0-9]+ scenarios, [0-9]+ outputs, [0-9]+ VOIDs, '
+                r'[0-9]+ rejections, [0-9]+ REARMs; identical to a95a214c', line)
+        elif name == 'index/no_work_hook':
+            valid = line == ('nm: production object has no pgwt_merge_test_work; '
+                             'instrumented object has U pgwt_merge_test_work')
+        elif name == 'queue/payload_reuse':
+            valid = re.fullmatch(r'queue payload reuse: seeds=[0-9]+ modes=[0-9]+ cycles=[0-9]+ '
+                                 r'inputs=[0-9]+ time=[0-9]+\.[0-9]{3}s', line)
+        else:
+            valid = line == family + ' ' + case + ' PASS'
+    elif contract == 'merge-v1':
         expected = ('row ' + name[4:] + ' PASS' if name.startswith('row-') else
                     'guard ' + name[6:] + ' PASS' if name.startswith('guard/') else
                     'core merge ' + name + ': passed')

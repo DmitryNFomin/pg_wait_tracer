@@ -88,8 +88,11 @@ source hashes and name their intended proof. Equivalent guard deletions are
 reported separately and cannot satisfy the killed-mutant requirement.
 
 `scripts/core-status.sh` runs all portable proof suites once. The regular proof stage in `scripts/check.sh`
-uses these runs instead of repeating the merge, replay, codec, redelivery and
-report commands. Proof suites are never skipped using stored status. Set
+uses these runs instead of repeating the merge, replay, codec, redelivery,
+report, merge index, merge index mutant and merge queue mutant commands
+(the last also prints the queue baseline). It still runs
+`tests/test_core_merge_queue.py` for its symbol check and informational
+timings. Proof suites are never skipped using stored status. Set
 `PGWT_CORE_STATUS_DIR=/absolute/scratch/directory` to redirect this run's JSON
 and logs outside the default `tests/results/core_status/` directory; this is an
 output destination only, never an evidence input to the status producer.

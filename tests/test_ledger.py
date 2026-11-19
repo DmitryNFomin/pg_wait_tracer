@@ -264,12 +264,20 @@ def real_cli(root, manifest):
 
 
 def new_contracts(root, manifest):
-    for contract in ('merge-v1', 'evidence-v1'):
-        if contract == 'merge-v1':
+    for contract, family in (('merge-v1', 'rows'), ('merge-v1', 'index'), ('evidence-v1', 'codec')):
+        if family == 'rows':
             cases = {'case:row-1/N': 'row 1/N PASS', 'case:row-3/N': 'row 3/N PASS'}
             mutant = 'mutant:M1'
             line = 'M1 KILLED: row 3/N MISMATCH output count at output 0'
             target = 'case:row-3/N'
+        elif family == 'index':
+            cases = {'diff:index/a95a214c': 'core merge differential: 1 inputs, 1 scenarios, 1 outputs, '
+                                            '0 VOIDs, 0 rejections, 0 REARMs; identical to a95a214c',
+                     'case:index/work': 'index work PASS'}
+            mutant = 'mutant:index/linear_scan'
+            line = ('linear_scan KILLED: retained=1000, 0.157s, index work MISMATCH '
+                    'work lookup visits <= 64 at input 0')
+            target = 'case:index/work'
         else:
             cases = {'case:codec/golden_646_bytes': 'codec golden_646_bytes PASS',
                      'case:codec/crc_known_answers': 'codec crc_known_answers PASS'}

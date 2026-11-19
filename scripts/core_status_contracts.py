@@ -96,7 +96,10 @@ def registry(root, filename, stop):
 def inventories(root):
     sys.path.insert(0, str(root / 'tests'))
     result = {'merge-v1': {}, 'evidence-v1': {}}
-    commands = {'merge-v1': [('merge', ['bash', 'tests/core_merge_mutants.sh'])],
+    commands = {'merge-v1': [('merge', ['bash', 'tests/core_merge_mutants.sh']),
+                             ('index', ['python3', '-B', 'tests/test_core_merge_index.py']),
+                             ('index-mutants', ['python3', '-B', 'tests/core_merge_index_mutants.py']),
+                             ('queue-mutants', ['python3', '-B', 'tests/core_merge_queue_mutants.py'])],
                 'evidence-v1': [('evidence', ['bash', 'tests/evidence_mutants.sh']),
                                 ('oracle', ['python3', '-B', 'tests/test_evidence_codec_oracle.py']),
                                 ('codec', ['python3', '-B', 'tests/test_evidence_codec_mutants.py']),
@@ -150,6 +153,59 @@ def inventories(root):
         pattern = re.escape(name + ' KILLED: ') + detail + re.escape(suffix + ' intended-proof=')
         pattern += re.escape(target) if target is not None else r'case:row-[0-9]+/[NQ]'
         add('merge-v1', 'mutant:' + name, 'merge', pattern, target)
+
+    # Generation index and staged release queue: the frozen a95a214c
+    # differential, counted-work bounds and their registered mutants.
+    seconds = re.escape('<seconds>')
+    for entry in names['merge_core']:
+        if (not isinstance(entry, dict) or set(entry) != {'runner', 'id', 'line'} or
+                entry['runner'] not in ('index', 'queue-mutants') or
+                not re.fullmatch(r'(case|diff):(index|queue)/[a-z0-9_]+', entry['id'])):
+            raise ValueError('invalid merge_core entry')
+        add('merge-v1', entry['id'], entry['runner'],
+            re.escape(entry['line']).replace(seconds, r'[0-9]+\.[0-9]{3}'))
+    merge_source = (root / 'src/core/merge.c').read_text()
+    index = importlib.import_module('core_merge_index_mutants')
+    for definition in index.MUTATIONS:
+        name, case, old, new = definition
+        if merge_source.count(old) != 1:
+            raise ValueError(f'{name}: mutation anchor must occur once')
+        target = 'case:index/' + case
+        suffix = binding(list(definition), merge_source.replace(old, new, 1)) + ' intended-proof=' + target
+        pattern = (re.escape(f'{name} KILLED: index {case} MISMATCH status at input ') + '[0-9]+' +
+                   re.escape(suffix))
+        add('merge-v1', 'mutant:index/' + name, 'index-mutants', pattern, target)
+    for name, edits, assertion in index.cost_mutations(merge_source):
+        mutated = merge_source
+        for old, new in edits:
+            if mutated.count(old) != 1:
+                raise ValueError(f'{name}: mutation anchor must occur once')
+            mutated = mutated.replace(old, new, 1)
+        target = 'case:index/work'
+        suffix = binding([name, edits, assertion], mutated) + ' intended-proof=' + target
+        pattern = (re.escape(f'{name} KILLED: retained=1000, ') + r'[0-9]+\.[0-9]{3}s' +
+                   re.escape(f', index work MISMATCH {assertion} at input 0' + suffix))
+        add('merge-v1', 'mutant:index/' + name, 'index-mutants', pattern, target)
+    queue = importlib.import_module('core_merge_queue_mutants')
+    reached = {'work': 'case:queue/work', 'corpus': 'diff:queue/a95a214c',
+               'incremental': 'diff:queue/a95a214c', 'payload_reuse': 'case:queue/payload_reuse'}
+    for definition in (list(queue.MUTATIONS) +
+                       [queue.SUFFIX_MUTATION + ('incremental', 'status'),
+                        queue.PAYLOAD_MUTATION + ('payload_reuse', 'payload bytes')]):
+        if isinstance(definition[1], bool):
+            name, instrument, old, new, assertion = definition
+            case = 'work' if instrument else 'corpus'
+            bound = list(definition)
+        else:
+            name, old, new, case, assertion = definition
+            bound = list(definition[:3])
+        if merge_source.count(old) != 1:
+            raise ValueError(f'{name}: mutation anchor must occur once')
+        target = reached[case]
+        suffix = binding(bound, merge_source.replace(old, new, 1)) + ' intended-proof=' + target
+        pattern = (re.escape(name + ' KILLED in ') + r'[0-9]+\.[0-9]{3}s' +
+                   re.escape(f': queue {case} MISMATCH {assertion} at input ') + '[0-9]+' + re.escape(suffix))
+        add('merge-v1', 'mutant:queue/' + name, 'queue-mutants', pattern, target)
 
     e = registry(root, 'tests/evidence_mutants.sh', 'main')
     diff = e['diff']
@@ -280,6 +336,27 @@ def output_id(label, line, known_proofs=()):
         m = re.match(r'^core merge (safety|recovery):', line)
         if m: return 'case:' + m[1]
         if re.match(r'^M\d+(?: |$)', line): return 'mutant:' + line.split()[0]
+    if label == 'index':
+        if line.startswith('nm: '): return 'case:index/no_work_hook'
+        if line.startswith('core merge differential:'): return 'diff:index/a95a214c'
+        m = re.match(r'index (\S+)(?: (\S+))?', line)
+        if m and m[2] != 'REACHED': return 'case:index/' + m[1]
+    if label in ('index-mutants', 'queue-mutants'):
+        family = label.split('-')[0]
+        # A registered mutation's record is evidence even when malformed.
+        token = line.split(' ', 1)[0].rstrip(':')
+        if 'mutant:' + family + '/' + token in known_proofs:
+            return 'mutant:' + family + '/' + token
+        m = re.match(r'(\w+):? (?:KILLED|SURVIVED)', line)
+        if m: return 'mutant:' + family + '/' + m[1]
+    if label == 'queue-mutants':
+        if line.startswith('queue differential:'): return 'diff:queue/a95a214c'
+        if line.startswith('queue payload reuse:'): return 'case:queue/payload_reuse'
+        m = re.match(r'queue (\S+) MISMATCH', line)
+        if m:
+            return {'work': 'case:queue/work', 'payload_reuse': 'case:queue/payload_reuse'}.get(
+                m[1], 'diff:queue/a95a214c')
+        if re.match(r'queue work (?!held=|REACHED)', line): return 'case:queue/work'
     if label == 'evidence':
         if line.startswith('evidence differential '):
             m = re.match(r'evidence differential (\S+)(?: (.*))?$', line)

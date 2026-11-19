@@ -268,6 +268,38 @@
       }
     },
     {
+      "id": "merge-v1:C06",
+      "contract_claim": "merge-v1:C06",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "merge-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "merge-v1:C07",
+      "contract_claim": "merge-v1:C07",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [
+          "merge-v1-core"
+        ],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
       "id": "evidence-v1:C01",
       "contract_claim": "evidence-v1:C01",
       "cells": {

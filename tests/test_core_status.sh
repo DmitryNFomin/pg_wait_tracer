@@ -442,6 +442,42 @@ subprocess.run = _fixture_run
         else:
             raise AssertionError(contract + ' status mutant survived')
 
+    # The merge index and queue runners have no baseline frame. Their per-id
+    # records go through the same derivation; failure records use the runners'
+    # own MISMATCH spelling.
+    for proof_id, failure, mutation_id in (
+            ('case:index/work', 'index work MISMATCH work lookup visits <= 64 at input 0',
+             'mutant:index/linear_scan'),
+            ('diff:queue/a95a214c', 'queue corpus MISMATCH output at input 7',
+             'mutant:queue/skipped_suffix')):
+        line = baseline['merge-v1']['proofs'][proof_id]['lines'][0]
+        affected = {c['id'] for c in baseline['merge-v1']['claims'] if proof_id in c['proof_ids']}
+        for name in ('failed-proof', 'missing-proof', 'duplicate-proof'):
+            responses = json.loads(json.dumps(fixtures))
+            matched = [item for item in responses.values() if line + '\n' in item['stdout']]
+            assert len(matched) == 1
+            replacement = {'failed-proof': failure + '\n', 'missing-proof': '',
+                           'duplicate-proof': line + '\n' + line + '\n'}[name]
+            matched[0]['stdout'] = matched[0]['stdout'].replace(line + '\n', replacement)
+            result, got = fixture_run(complete, responses)
+            report = got['merge-v1']
+            assert result.returncode != 0 and report['state'] != 'PASS', (name, result.stdout)
+            states_from_proofs(report)
+            expected = 'NOT-RUN' if name == 'missing-proof' else 'FAIL'
+            assert report['proofs'][proof_id]['state'] == expected, (name, report['proofs'][proof_id])
+            assert {c['id'] for c in report['claims'] if c['state'] != 'PASS'} == affected
+            assert all(r['state'] == 'PASS' for c, r in got.items() if c != 'merge-v1')
+            print(f'core-status self-test merge-v1 {proof_id} {name}: caught', flush=True)
+        good = baseline['merge-v1']['proofs'][mutation_id]['lines'][0]
+        responses = json.loads(json.dumps(fixtures))
+        for item in responses.values():
+            item['stdout'] = item['stdout'].replace(good, re.sub(
+                r'(source-sha256=)([0-9a-f])', lambda m: m[1] + ('0' if m[2] != '0' else '1'), good))
+        result, got = fixture_run(complete, responses)
+        assert result.returncode != 0 and got['merge-v1']['proofs'][mutation_id]['state'] == 'FAIL'
+        states_from_proofs(got['merge-v1'])
+        print(f'core-status self-test merge-v1 {mutation_id} changed mutation source hash: caught', flush=True)
+
     changed = work / 'changed-during-run'
     shutil.copytree(complete, changed)
     os.environ['PGWT_STATUS_TEST_CHANGE_TREE'] = '1'
