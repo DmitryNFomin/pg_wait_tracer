@@ -19,13 +19,14 @@ LIBBPF_INC ?=
 LIBBPF_LIB ?= -lbpf
 
 TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
-            test_trace_v2 test_sampler test_sample_weight bench_sample_weight test_anomaly test_escalation_budget \
+            test_evidence_capture \
+            test_trace_v2 test_sampler test_sampler_dispatch test_sample_weight bench_sample_weight test_anomaly test_escalation_budget \
             test_wp_attr \
             test_trace_perms \
             test_exact_probe \
             test_effective_cores \
             test_coop test_bucket \
-            test_backend_status_layout \
+            test_backend_status_layout test_sampled_attr_io test_sampled_attr_lifetime \
             test_synthetic_query \
             test_pgss_resolver \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
@@ -83,7 +84,9 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_core_evidence_codec \
             test_core_merge_contract \
             test_core_merge_adapter \
-            test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure
+            test_transport_wire test_transport_producers test_percpu_transport \
+            test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure \
+            test_coverage_verdict
 
 .PHONY: all clean check
 
@@ -110,9 +113,20 @@ test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(
 test_backend_init: test_backend_init.c ../src/backend_init.c ../src/backend_init.h ../src/backend.h ../src/pg_wait_tracer.h
 	$(CC) $(CFLAGS) -o $@ test_backend_init.c ../src/backend_init.c
 
+# Host-only: compile the real fd dispatch, consume, FORK/enrollment and sampler
+# target loop with the existing initialized-backend I/O fixture. No BPF build.
+test_sampler_dispatch: test_sampler_dispatch.c test_sampled_attr_io.c \
+                       build_sampler_dispatch.py test_sampled_attr_io.py \
+                       ../src/daemon.c ../src/backend.c ../src/sampler.c \
+                       ../src/backend_status_layout.c ../src/backend_init.c \
+                       ../src/discovery.c ../src/control.c ../src/cmdline.c \
+                       ../src/spawn.c ../src/anomaly.c ../src/idle_rule.c \
+                       $(wildcard ../src/*.h)
+	CC='$(CC)' CFLAGS='$(CFLAGS)' python3 -B build_sampler_dispatch.py --output $@
+
 # Exercise the production lifecycle functions, replacing only hardware opens
 # and state reads/deletes. Capture objects exist after the parent build.
-LIFECYCLE_OBJS = $(filter-out $(BUILD)/pg_wait_tracer.o $(BUILD)/pg_wait_tracer.bpf.o $(BUILD)/server_%.o,$(wildcard $(BUILD)/*.o))
+LIFECYCLE_OBJS = $(filter-out $(BUILD)/pg_wait_tracer.o $(BUILD)/pg_wait_tracer.bpf.o $(BUILD)/server_%.o,$(wildcard $(BUILD)/*.o) $(wildcard $(BUILD)/core/*.o))
 test_backend_lifecycle: test_backend_lifecycle.c $(LIFECYCLE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=pgwt_watchpoint_enable -Wl,--wrap=bpf_map_delete_elem -Wl,--wrap=bpf_map_lookup_elem -Wl,--wrap=bpf_map_update_elem -Wl,--wrap=ring_buffer__consume $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
@@ -455,6 +469,14 @@ test_effective_cores: test_effective_cores.c ../src/effective_cores.c
 # tables plus the pure coherency/degrade validator.
 test_backend_status_layout: test_backend_status_layout.c \
                             ../src/backend_status_layout.c ../src/spawn.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+# Production I/O is injected by the test's translation-unit include, so this
+# syscall budget runs on macOS as well as Linux without touching /proc.
+test_sampled_attr_io: test_sampled_attr_io.c ../src/backend_status_layout.c ../src/spawn.c
+	$(CC) $(CFLAGS) -o $@ test_sampled_attr_io.c ../src/spawn.c
+
+test_sampled_attr_lifetime: test_sampled_attr_lifetime.c ../src/backend_status_layout.c ../src/spawn.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_synthetic_query: test_synthetic_query.c ../src/synthetic_query.c
@@ -930,14 +952,30 @@ test_block_agg: test_block_agg.c ../src/block_agg.c ../src/compute.c \
 
 # Exercise the actual server gate/loader/response against reader-decoded
 # block aggregates from the same two-block file (command state crosses blocks).
-# backend_span.o is in this list because src/server.c calls pgwt_span_* since
-# #455: EVERY target that includes ../src/server.c links it, so leaving it out
-# breaks test_transitions_loader / test_top_wait_backfill / test_window_overlap
-# / test_semantics_wire / test_backend_span at link time, not at run time.
-TRANSITIONS_LOADER_OBJS = $(addprefix $(BUILD)/server_,compute.o block_agg.o \
-    backend_span.o \
-    event_reader.o event_writer.o summary_writer.o summary_reader.o \
-    wait_event.o idle_rule.o spawn.o cmdline.o backend_meta.o cJSON.o)
+# EVERY target including server.c needs the product's complete link closure.
+# Keep this plain list in sync with SERVER_SRCS, excluding server.c itself
+# (already included in the test). check_server_test_links.py compares every
+# expanded link recipe with the product list in the Mac gate. Parsing this
+# Makefile must also work when it is copied alone, including without Python.
+TRANSITIONS_LOADER_OBJS = $(BUILD)/server_core/evidence_query.o \
+                          $(BUILD)/server_core/evidence_codec.o \
+                          $(BUILD)/server_core/evidence_replay.o \
+                          $(BUILD)/server_core/wait_metrics.o \
+                          $(BUILD)/server_phase_capability.o \
+                          $(BUILD)/server_compute.o \
+                          $(BUILD)/server_backend_span.o \
+                          $(BUILD)/server_open_overlay.o \
+                          $(BUILD)/server_block_agg.o \
+                          $(BUILD)/server_event_reader.o \
+                          $(BUILD)/server_event_writer.o \
+                          $(BUILD)/server_summary_writer.o \
+                          $(BUILD)/server_summary_reader.o \
+                          $(BUILD)/server_wait_event.o \
+                          $(BUILD)/server_idle_rule.o \
+                          $(BUILD)/server_spawn.o \
+                          $(BUILD)/server_cmdline.o \
+                          $(BUILD)/server_backend_meta.o \
+                          $(BUILD)/server_cJSON.o
 test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
@@ -1189,6 +1227,22 @@ test_core_merge_contract: test_core_merge_contract.c ../src/core/merge.c ../src/
 test_core_merge_adapter: test_core_merge_adapter.c test_core_merge_contract.c merge_adapter_goldens.h ../src/core/merge_adapter.c ../src/core/pgwt_merge_adapter.h ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ test_core_merge_adapter.c ../src/core/merge_adapter.c ../src/core/merge.c
 
+# U1b-0: frozen wire bytes, A1 producer placeholder, B transport seams.
+test_transport_wire: test_transport_wire.c ../src/pgwt_transport_wire.h ../src/merge_capture.h ../src/core/pgwt_merge_adapter.h ../src/core/pgwt_merge.h
+	$(CC) $(CFLAGS) -std=c11 -Wextra -Werror -o $@ test_transport_wire.c
+
+# A1's same-file standalone probe loader will use --probe on Linux. Keep
+# portable cases runnable on the Mac without linking or invoking BPF there.
+ifeq ($(shell uname -s),Linux)
+TRANSPORT_PRODUCER_DEPS = ../include/pg_wait_tracer.skel.h
+TRANSPORT_PRODUCER_LIBS = $(LIBBPF_LIB) -lelf -lz -pthread
+endif
+test_transport_producers: test_transport_producers.c ../src/pgwt_transport_wire.h $(TRANSPORT_PRODUCER_DEPS)
+	$(CC) $(CFLAGS) -std=c11 -Wextra -Werror -o $@ test_transport_producers.c $(TRANSPORT_PRODUCER_LIBS)
+
+test_percpu_transport: test_percpu_transport.c ../src/percpu_transport.c ../src/percpu_transport.h ../src/merge_capture.c ../src/merge_capture.h ../src/pgwt_transport_wire.h ../src/core/merge_adapter.c ../src/core/pgwt_merge_adapter.h ../src/core/merge.c ../src/core/pgwt_merge.h $(TRANSPORT_PRODUCER_DEPS)
+	$(CC) $(CFLAGS) -std=c11 -Wextra -Werror -o $@ test_percpu_transport.c ../src/percpu_transport.c ../src/merge_capture.c ../src/core/merge_adapter.c ../src/core/merge.c $(TRANSPORT_PRODUCER_LIBS)
+
 test_ringbuf_metrics: test_ringbuf_metrics.c ../src/counter_vector.c ../src/counter_vector.h ../src/ringbuf_metrics.h ../src/provider.h ../src/pg_wait_tracer.h
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
 
@@ -1197,3 +1251,22 @@ test_counter_vector: test_counter_vector.c ../src/counter_vector.c ../src/counte
 
 test_writer_failure: test_writer_failure.c $(BUILD)/event_writer.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4
+
+# Coverage label U2a (Refs #947, #871): the pure verdict against the frozen
+# answer table. The case table is generated from tests/fixtures/coverage/
+# into $(BUILD), so no build product enters the tree.
+COVERAGE_CASES_DIR = $(BUILD)/coverage
+test_coverage_verdict: test_coverage_verdict.c ../src/coverage.c ../src/coverage.h gen_coverage_cases.py \
+                       fixtures/coverage/coverage-table-inputs.md fixtures/coverage/coverage-answers-final.tsv
+	mkdir -p $(COVERAGE_CASES_DIR)
+	python3 -B gen_coverage_cases.py --output $(COVERAGE_CASES_DIR)/coverage_cases.h
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -I$(COVERAGE_CASES_DIR) -o $@ test_coverage_verdict.c ../src/coverage.c
+
+# Pilot helpers are built in an external temporary directory by the registered
+# Python route test; no generated fixtures or helper binaries enter the tree.
+.PHONY: pilot-route
+pilot-route:
+	python3 -B test_pilot_route.py
+
+test_evidence_capture: test_evidence_capture.c ../src/evidence_capture.c ../src/evidence_capture.h ../src/counter_vector.h ../src/core/evidence_codec.c ../src/core/evidence_codec.h ../src/core/evidence_replay.c ../src/core/evidence_replay.h ../src/core/wait_metrics.c ../src/core/pgwt_core.h
+	$(CC) $(CFLAGS) -I../src -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)

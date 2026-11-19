@@ -1,0 +1,19 @@
+     0.000 ( 0.051 ms): 17815 openat(dfd: CWD, filename: 0x723d0890)                                = 50
+     0.057 ( 0.017 ms): 17815 pread64(fd: 50, buf: 0x7fff723d0888, count: 8, pos: 14138096)         = 8
+     0.079 ( 0.004 ms): 17815 close(fd: 50)                                                         = 0
+     0.092 ( 0.028 ms): 17815 openat(dfd: CWD, filename: 0x723d0890)                                = 50
+     0.125 ( 0.009 ms): 17815 pread64(fd: 50, buf: 0x7fff723d0888, count: 8, pos: 14138096)         = 8
+     0.138 ( 0.003 ms): 17815 close(fd: 50)                                                         = 0
+ Summary of events:
+
+ pg_wait_tracer (17815), 8141 events, 100.0%
+
+   syscall            calls  errors  total       min       avg       max       stddev
+                                     (msec)    (msec)    (msec)    (msec)        (%)
+   --------------- --------  ------ -------- --------- --------- ---------     ------
+   process_vm_readv      684      0   324.029     0.006     0.474     1.272      1.75%
+   openat              1366      0    35.554     0.005     0.026     0.133      2.10%
+   close               1575      0    11.772     0.001     0.007     0.064      2.25%
+   pread64              446      0     5.917     0.005     0.013     0.051      2.45%
+
+

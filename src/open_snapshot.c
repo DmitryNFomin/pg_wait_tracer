@@ -216,10 +216,10 @@ void pgwt_collect_open_intervals(struct pgwt_daemon *d,
      * spinning while a producer keeps refilling the ring. */
     uint64_t publish_from = now_ns();
     const char *degraded = NULL;
-    if (d->event_rb) {
+    if (d->event_rb || d->exact_perf) {
         d->event_drain_callbacks_current = 0;
         d->event_drain_callback_limit = PGWT_OPEN_SNAPSHOT_DRAIN_BUDGET;
-        int rc = ring_buffer__consume(d->event_rb);
+        int rc = pgwt_consume_event_ring(d, true);
         bool yielded = d->event_drain_callbacks_current
                        >= PGWT_OPEN_SNAPSHOT_DRAIN_BUDGET && rc < 0;
         d->event_drain_callback_limit = 0;

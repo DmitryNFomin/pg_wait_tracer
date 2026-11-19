@@ -175,6 +175,12 @@ KNOWN_FAILING=(
     # Exit 79 requires valid captures, tolerance-only under-reads <=15.0 pp;
     # see the measured provenance and regression-tripwire comment in the test.
     'test_cross_validate_tiered|675|el8@4.18|exit=79'
+    # Ubuntu / 6.8: accepts only diagnosed #959 K1/K2/K3 in either recovery arm,
+    # including non-cohort children, within a shared cap of 2 PIDs (exit 93),
+    # after all cohort checks and the skipped-store control pass.
+    # Any other exit stays red.
+    # Owner decision: #933 comment 6984201938; remove in the PR that fixes #959.
+    'test_init_hint_recovery|959|ubuntu@6.8|exit=93'
 )
 
 # Read the runner's host, never a caller's OS/identity environment variables.
@@ -610,7 +616,9 @@ EOF
 # Fifth field (optional): whitespace-separated extra arguments, split into
 # a bash array without eval; shell quoting/expansion inside it is unsupported.
 LIVE_TESTS=(
+    "test_evidence_capture_live|python3|test_evidence_capture_live.py"
     "test_lifecycle|bash|test_lifecycle.sh"
+    "test_sampler_batch_live|python3|test_sampler_batch_live.py"
     "test_init_hint_recovery|python3|test_init_hint_recovery.py"
     "test_counter_vector_live|python3|test_counter_vector_live.py"
     "test_counter_vector_phase_live|python3|test_counter_vector_phase_live.py"
@@ -681,6 +689,7 @@ LIVE_TESTS=(
     # which makes the gate red just like a product failure (exit 1).
     "test_v9_open_cpu_wired|bash|test_v9_open_cpu_wired.sh"
     "test_escalation|bash|test_escalation.sh"
+    "test_preseed_startup_live|python3|test_preseed_startup_live.py"
     # Tiered-capture live tests (were built for A4/A5 but wired into
     # nothing — TST-7). test_cross_validate_tiered is the test that
     # justified tiered as the default mode.
@@ -716,6 +725,17 @@ if [[ $(id -u) -eq 0 ]] && pgrep -x postgres > /dev/null 2>&1; then
         fi
         if [[ -n "$min_pg" && -n "$PG_VERSION" && "$PG_VERSION" -lt "$min_pg" ]]; then
             exclude_test "$name" "needs PostgreSQL >= $min_pg, running PG$PG_VERSION"
+            continue
+        fi
+        # Status batching is qualified on PG13/17/18. Keep the unsupported
+        # PG14-16 cells outside this test's matrix, like the minimum-version
+        # exclusions above; they are not missing required-live coverage.
+        if [[ "$name" == "test_sampler_batch_live" && "$PG_VERSION" =~ ^(14|15|16)$ ]]; then
+            exclude_test "$name" "status batch needs PostgreSQL 13, 17 or 18; running PG$PG_VERSION"
+            continue
+        fi
+        if [[ "$name" == "test_preseed_startup_live" && "$PG_VERSION" != "17" ]]; then
+            exclude_test "$name" "deterministic unpublished startup hold requires PostgreSQL 17; running PG$PG_VERSION"
             continue
         fi
         if [[ "$name" == "test_capture_smoke_full" ]]; then

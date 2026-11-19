@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def function(source, name):
-    match = re.search(r"^(?:static )?(?:int|void) " + name +
+    match = re.search(r"^(?:static )?(?:int|void|bool|uint64_t) " + name +
                       r"\([^;]*?\)\n\{.*?^\}", source, re.M | re.S)
     assert match, f"missing production function {name}"
     return match[0]
@@ -206,14 +206,15 @@ def main():
     assert loop.index("pgwt_sweep_bootstrap_backends(d);", wake) < fd_loop
     assert "pgwt_handle_exit_at(d, ev->pid, ev->timestamp);" in function(
         daemon, "process_lifecycle_event")
-    for name in ("lifecycle_init_lost_total",
+    for name in ("lifecycle_exit_before_attach_total", "lifecycle_init_lost_total",
                  "lifecycle_init_lost_with_opportunity_total",
                  "lifecycle_init_lost_no_opportunity_total",
                  "lifecycle_init_lost_untraced_ns_total"):
         assert f'cjson_add_uint64(root, "{name}",' in (ROOT / "src/control.c").read_text()
-    callback = function(daemon, "handle_lifecycle_event")
+    callback = function(daemon, "pgwt_process_lifecycle_payload")
     functions = "\n".join((function(backend, "pgwt_sweep_bootstrap_backends"),
                             function(daemon, "pgwt_consume_lifecycle_ring"),
+                            function(daemon, "handle_lifecycle_event"),
                             callback, function(backend, "record_init_loss")))
     variants = [("baseline", functions, None)]
     if args.mutants:
@@ -238,7 +239,8 @@ def main():
             cfile.write_text(harness)
             command = [*shlex.split(os.environ.get("CC", "cc")), "-std=c11",
                        "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT / "src"),
-                       "-I" + str(ROOT / "include"), str(cfile),
+                       "-I" + str(ROOT / "include"),
+                       *shlex.split(os.environ.get("CFLAGS", "")), str(cfile),
                        str(ROOT / "src/backend_init.c"), "-o", str(binary)]
             subprocess.run(command, check=True)
             print(f"{name}: portable C build PASS", flush=True)

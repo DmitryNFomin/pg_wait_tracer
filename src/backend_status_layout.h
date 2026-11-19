@@ -53,6 +53,12 @@ enum pgwt_pgbs_fallback {
     PGWT_PGBS_FALLBACK_QUERY_ID     = 1u << 2,
 };
 
+enum pgwt_pgbs_pg13_recovery {
+    PGWT_PGBS_PG13_READY = 0,
+    PGWT_PGBS_PG13_PENDING,
+    PGWT_PGBS_PG13_DEGRADED,
+};
+
 struct PgBackendStatusLayout {
     int major;
     enum pgwt_pgbs_arch arch;
@@ -61,6 +67,21 @@ struct PgBackendStatusLayout {
     uint32_t struct_size;
     uint32_t activity_buffer_size; /* validated track_activity_query_size */
     uint64_t status_anchor; /* validated row in the shared status array */
+    /* PG13 resolver fields. Offsets are header-derived hypotheses; the status
+     * batch remains the sole identity acceptor. The mapping identity/range is
+     * also retained for PG14-17's unpublished proof; all proofs belong to it. */
+    uint64_t my_backend_id_addr;
+    int32_t status_anchor_backend_id; /* retained array offset, only a row-address hint */
+    uint32_t pgproc_pid_offset, pgproc_backend_id_offset;
+    uint64_t status_array_base, shm_generation;
+    uint64_t shm_start, shm_end; /* validated main segment range, retained on rebuild */
+    uint64_t shm_backing; /* stable maps descriptor, used only to refuse relocation */
+    enum pgwt_pgbs_pg13_recovery pg13_recovery;
+    uint64_t pg13_recovery_pending_since_ms; /* monotonic; absent mapping deadline */
+    uint64_t pg13_recovery_degraded_total;
+    pid_t generation_postmaster;
+    bool pg13_computed;
+    size_t pg13_scan_next;
 
     struct pgwt_pgbs_field st_changecount;
     struct pgwt_pgbs_field st_procpid;
@@ -247,6 +268,85 @@ int pgwt_pgbs_derive_cmd_gate(
     const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
     struct pgwt_pgbs_cmd_gate *out);
 
+struct pgwt_pgbs_mapping;
+/* One resolver-loop snapshot. Zero-initialize and reset at the end of each
+ * tick, including failed reads. Never reuse it across ticks or postmasters. */
+struct pgwt_pgbs_maps_cache {
+    struct pgwt_pgbs_mapping *maps;
+    size_t count;
+    pid_t pid;
+    bool attempted;
+};
+void pgwt_pgbs_maps_cache_reset(struct pgwt_pgbs_maps_cache *cache);
+/* Cached candidate/proof, scoped to one registry enrollment. No retained fd.
+ * start_time is captured at enrollment and compared on lifecycle delivery and
+ * when the batch first accepts each resolved candidate (never per attempt).
+ * Only the coherent batch accepts row identity; liveness stays on lifecycle
+ * events. Mapping snapshots are loaded once per enrollment/postmaster pair,
+ * and PG13 additionally discards them on shared-memory generation changes. */
+/* PG13 evidence created only by batch acceptance, never by resolution. */
+struct pgwt_pgbs_acceptance {
+    uint64_t address, start_time, shm_generation;
+    pid_t pid;
+    int exit_observed; /* retirement result, retained after address invalidation */
+};
+struct pgwt_pgbs_reader {
+    pid_t pid;
+    uint64_t start_time;
+    uint64_t status_addr;
+    uint64_t activity_addr; /* PG13 fixed per-slot BackendActivityBuffer */
+    pid_t shared_reader_pid;
+    bool shared;
+    bool candidate; /* not yet accepted by the coherent shared batch */
+    struct pgwt_pgbs_mapping *target_maps, *reader_maps;
+    size_t target_map_count, reader_map_count;
+    uint32_t scan_cursor; /* PG13 fixed-stride candidate scan, across attempts */
+    uint64_t shm_generation;
+    int32_t backend_id_hint;
+    bool computed_hint;
+    struct pgwt_pgbs_acceptance accepted;
+};
+/* Readers must be zero-initialized before first enrollment. */
+int pgwt_pgbs_reader_enroll(struct pgwt_pgbs_reader *reader, pid_t pid);
+void pgwt_pgbs_reader_reset(struct pgwt_pgbs_reader *reader);
+int pgwt_pgbs_reader_resolve(
+    struct pgwt_pgbs_reader *reader, pid_t postmaster_pid,
+    uint64_t my_be_entry_addr, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_maps_cache *maps_cache);
+
+#define PGWT_PGBS_IOV_MAX 1024
+#define PGWT_PGBS_BATCH_MAX 1024
+struct pgwt_pgbs_batch_target {
+    struct pgwt_pgbs_reader *reader; /* NULL excludes non-attribution targets */
+    pid_t pid;                     /* buffer is wired to THIS target */
+    struct pgwt_pgbs_sampled_attr attr;
+    struct pgwt_pgbs_cmd_gate gate;
+    int rc;                        /* 0, NO_CONTEXT, or -1 (unread/invalid) */
+    int error;
+    uint64_t pgproc_addr; /* PG13: resolved wait address minus wait offset */
+};
+/* Exactly two discovery calls at most, through the postmaster, no cadence.
+ * The scan fallback shares this budget and increments scan_total per use. */
+void pgwt_pgbs_resolve_pg13_batch(pid_t postmaster_pid,
+    struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_batch_target *targets, size_t n,
+    struct pgwt_pgbs_maps_cache *maps_cache, uint64_t *scan_total);
+/* Interval-only mapping check. Retain the anchor/layout, retire address proofs.
+ * Missing mappings remain pending; a changed range is latched until restart. */
+const char *pgwt_pgbs_status_name(const struct PgBackendStatusLayout *layout);
+int pgwt_pgbs_pg13_generation(pid_t postmaster_pid,
+    struct PgBackendStatusLayout *layout);
+/* Ordered per-row counter/span/[PG13 text]/counter ranges. Completed ranges
+ * are determined from the returned BYTE count. Only torn rows are retried,
+ * with at most two extra syscalls. gate_only omits PG13 text for the recheck.
+ * Each failed enabled target increments failures_total once, after all retries;
+ * the caller invalidates that target's sample.
+ * This routine never resolves addresses or falls back to own-pid reads. */
+void pgwt_pgbs_read_batch(pid_t postmaster_pid,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_batch_target *targets, size_t n, bool gate_only,
+    uint64_t *failures_total);
+
 /* Re-read the command gate for ONE backend, now. backend_status_addr is the
  * caller's cached PgBackendStatus row when it has one (PG13 path); 0 means
  * resolve it through the backend's own MyBEEntry pointer. Returns 0 only on a
@@ -292,6 +392,50 @@ int pgwt_pgbs_read_sampled_attr_at(
     struct pgwt_pgbs_sampled_attr *out);
 uint64_t pgwt_pgbs_resolve_entry(
     pid_t backend_pid, const struct PgBackendStatusLayout *layout);
+
+/* Failure-path reader: ROW (0), absent MyBEEntry (2), retired row (3),
+ * UNPUBLISHED (4), torn (-2), failed (-1).
+ * TORN: the row address was read, but every bounded back-to-back attempt saw
+ * an odd or changing st_changecount. It proves nothing; only the preseed's
+ * paced re-read may retry it.
+ * ROW includes startup context and passes the usual pid/counter/state checks.
+ * RETIRED is a complete, coherent PG13 pid mismatch, not a proof without an
+ * acceptance record. UNPUBLISHED is an untorn PID-zero own MyBEEntry slot on
+ * the validated PG14-17 shared mapping/stride; the caller must still validate
+ * its pinned process identity and resolved shared wait address. PG13
+ * resolution failure is unknown, never absence. */
+enum pgwt_pgbs_preseed_result {
+    PGWT_PGBS_PRESEED_TORN = -2, /* change counter odd/changing on every try */
+    PGWT_PGBS_PRESEED_FAILED = -1,
+    PGWT_PGBS_PRESEED_ROW = 0,
+    PGWT_PGBS_PRESEED_RETIRED = 3, /* coherent complete row naming another pid */
+    PGWT_PGBS_PRESEED_UNPUBLISHED = 4, /* PG14-17 own validated slot, pid zero */
+    PGWT_PGBS_PRESEED_ABSENT = 2, /* 1 is reserved for ATTR_NO_CONTEXT */
+};
+/* read_snapshot_fd's distinct exhaustion result (a read failure is -1). */
+#define PGWT_PGBS_SNAPSHOT_TORN (-2)
+int pgwt_pgbs_read_preseed(pid_t pid, uint64_t my_be_entry_addr,
+    uint64_t status_addr, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_snapshot *snapshot);
+/* Read start time from the retained /proc identity, never by reopening pid. */
+int pgwt_pgbs_preseed_pin(int stat_fd, uint64_t *start_time);
+
+/* Pure PG13 retirement gate. A retained observation has already passed the
+ * row checks; identity and generation must still pass on every use. */
+enum pgwt_pgbs_retirement {
+    PGWT_PGBS_RETIRED_NONE = 0,
+    PGWT_PGBS_RETIRED_ZERO = 5,
+    PGWT_PGBS_RETIRED_OTHER_PID = 6,
+};
+int pgwt_pgbs_retirement_proof(const struct pgwt_pgbs_acceptance *accepted,
+    pid_t pid, const struct PgBackendStatusLayout *layout,
+    uint64_t current_generation, uint64_t before, uint64_t after,
+    int result, const struct pgwt_pgbs_snapshot *row);
+/* Failure path only: pinned stat before/after the RECORDED row, and a fresh
+ * postmaster maps check. A cached backend address is never consulted. */
+int pgwt_pgbs_read_retirement(pid_t pid, pid_t postmaster_pid, int stat_fd,
+    struct pgwt_pgbs_acceptance *accepted,
+    const struct PgBackendStatusLayout *layout);
 
 void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                                 pid_t postmaster_pid,

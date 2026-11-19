@@ -152,18 +152,26 @@ int pgwt_parse_cmdline(pid_t pid, struct pgwt_metadata *meta)
 int pgwt_backend_target_live(pid_t pid, pid_t parent)
 {
     if (pid <= 0 || parent <= 0) { errno = EINVAL; return -1; }
-    char path[64], line[512];
+    char path[64];
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
-    FILE *file = fopen(path, "r");
-    if (!file)
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int live = pgwt_backend_target_live_fd(fd >= 0 ? fd : -errno, parent);
+    int error = errno;
+    if (fd >= 0) close(fd);
+    errno = error;
+    return live;
+}
+
+int pgwt_backend_target_live_fd(int fd, pid_t parent)
+{
+    if (parent <= 0) { errno = EINVAL; return -1; }
+    char line[512];
+    ssize_t got = fd >= 0 ? pread(fd, line, sizeof(line) - 1, 0) : -1;
+    if (fd < 0) errno = -fd;
+    if (got < 0)
         return errno == ENOENT || errno == ESRCH ? 0 : -1;
-    if (!fgets(line, sizeof(line), file)) {
-        int error = ferror(file) ? errno : EIO;
-        fclose(file);
-        errno = error;
-        return -1;
-    }
-    fclose(file);
+    if (got == 0) { errno = EIO; return -1; }
+    line[got] = '\0';
     char *end = strrchr(line, ')');
     char state;
     long ppid;
@@ -176,4 +184,38 @@ int pgwt_backend_target_live(pid_t pid, pid_t parent)
         return 0;
     if (!strchr("RSDTtWIP", state)) { errno = EINVAL; return -1; }
     return 1;
+}
+
+int pgwt_backend_no_command_fd(int fd, pid_t parent)
+{
+    char line[1024];
+    ssize_t got = fd >= 0 ? pread(fd, line, sizeof(line) - 1, 0) : -1;
+    if (fd < 0) errno = -fd;
+    if (got < 0) return errno == ENOENT || errno == ESRCH ? 1 : -1;
+    if (got == 0 || got == (ssize_t)sizeof(line) - 1) return -1;
+    line[got] = '\0';
+    char *end = strrchr(line, ')');
+    char state;
+    long ppid;
+    if (!end || sscanf(end + 1, " %c %ld", &state, &ppid) != 2)
+        return -1;
+    if (state == 'Z' || state == 'X' || state == 'x') return 1;
+    if (parent <= 0 || ppid != parent || !strchr("RSDTtWIP", state))
+        return -1;
+    /* stat fields 9 and 23. Skip signed intermediate fields (e.g. nice)
+     * as tokens; parse only the two unsigned proof fields. */
+    char *cursor = end + 1, *save = NULL;
+    unsigned long long flags = 0, vsize = 1;
+    for (int field = 3; field <= 23; field++) {
+        char *token = strtok_r(field == 3 ? cursor : NULL, " \t\n", &save);
+        if (!token) return -1;
+        if (field != 9 && field != 23) continue;
+        char *tail;
+        errno = 0;
+        unsigned long long value = strtoull(token, &tail, 10);
+        if (errno || *tail || *token == '-') return -1;
+        if (field == 9) flags = value;
+        else vsize = value;
+    }
+    return (flags & 0x4ULL) && vsize == 0 ? 2 : 0;
 }

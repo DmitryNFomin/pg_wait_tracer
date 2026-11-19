@@ -14,6 +14,8 @@ import tempfile
 
 RUNNER = Path(__file__).with_name("run_all.sh").read_text()
 ENTRY = "test_cross_validate_tiered|675|el8@4.18|exit=79"
+CHURN_ENTRY = "test_init_hint_recovery|959|ubuntu@6.8|exit=93"
+CHURN_TEST = "test_init_hint_recovery"
 TIERED = Path(__file__).with_name("test_cross_validate_tiered.sh").read_text()
 TEST = "test_cross_validate_tiered"
 BASH = os.environ.get("PGWT_SELFTEST_BASH", "bash")  # harness only
@@ -36,20 +38,21 @@ fi
 REQUIRE_LIVE=0
 tier_report() { :; }
 tier_ok() { return 0; }
-run_test test_cross_validate_tiered bash -c 'echo KF_EXECUTED; [[ -z "$2" ]] || echo "TIERED_DEVIATIONS $2"; exit "$1"' fixture "$3" "$5"
+run_test "$6" bash -c 'echo KF_EXECUTED; [[ -z "$2" ]] || echo "TIERED_DEVIATIONS $2"; exit "$1"' fixture "$3" "$5"
 ''' + extra + "\n" + summary
 
 
-def run(root, os_name, release, rc, source=RUNNER, production=False, env=None, extra="", deviations=""):
+def run(root, os_name, release, rc, source=RUNNER, production=False, env=None, extra="", deviations="", test=TEST):
     return subprocess.run(
         [BASH, "-c", harness(source, extra), "known-failing-selftest",
          str(root / os_name), release, str(rc),
-         "production" if production else "fixture", deviations],
+         "production" if production else "fixture", deviations, test],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=dict(os.environ, **(env or {})), check=False)
 
 
-def check_result(result, passed=0, failed=0, known=0, xpass=0, executed=1, deviations=None):
+def check_result(result, passed=0, failed=0, known=0, xpass=0, executed=1, deviations=None,
+                 test=TEST, issue=675, expected_exit=79):
     lines = result.stdout.splitlines()
     records = [line[len("RUN_ALL_SUMMARY "):] for line in lines
                if line.startswith("RUN_ALL_SUMMARY ")]
@@ -62,8 +65,8 @@ def check_result(result, passed=0, failed=0, known=0, xpass=0, executed=1, devia
             summary["xpass"]) == (passed, failed, known, xpass), summary
     assert summary["executed"] == summary["total"] == executed, summary
     assert summary["refused"] == summary["skipped"] == summary["excluded"] == 0
-    assert summary["issues"] == ([675] if known else []), summary
-    expected = ([dict(test=TEST, issue=675, exit=0 if xpass else 79,
+    assert summary["issues"] == ([issue] if known else []), summary
+    expected = ([dict(test=test, issue=issue, exit=0 if xpass else expected_exit,
                       xpass=bool(xpass))] if known else [])
     if known and deviations is not None:
         expected[0]["deviations_pp"] = deviations
@@ -72,14 +75,14 @@ def check_result(result, passed=0, failed=0, known=0, xpass=0, executed=1, devia
     assert summary["known_failing"] == expected, summary
     assert lines.count("KF_EXECUTED") == 1, "listed tests must execute exactly once"
     verdict = ("FAIL" if failed else
-               "PASS with 1 known-failing (issues: #675)" if known else "PASS")
+               f"PASS with 1 known-failing (issues: #{issue})" if known else "PASS")
     if known and not failed and deviations is not None:
-        verdict += f"; deviations (pp): {TEST}[{rendered}]"
+        verdict += f"; deviations (pp): {test}[{rendered}]"
     assert lines[-1] == verdict, result.stdout
     if known:
         diagnostic = "UNEXPECTED PASS" if xpass else "KNOWN-FAILING"
-        assert f"{diagnostic} (issue #675)" in result.stdout, result.stdout
-        assert f"Known-failing: {TEST} (issue #675," in result.stdout
+        assert f"{diagnostic} (issue #{issue})" in result.stdout, result.stdout
+        assert f"Known-failing: {test} (issue #{issue}," in result.stdout
     else:
         assert "UNEXPECTED PASS" not in result.stdout, result.stdout
         assert "KNOWN-FAILING (" not in result.stdout, result.stdout
@@ -121,9 +124,37 @@ with tempfile.TemporaryDirectory(prefix="pgwt-known-failing-") as temp:
     table = RUNNER.split("KNOWN_FAILING=(", 1)[1].split("\n)", 1)[0]
     entries = [line.strip().strip("'\"") for line in table.splitlines()
                if line.strip() and not line.lstrip().startswith("#")]
-    assert entries == [ENTRY], entries
+    assert entries == [ENTRY, CHURN_ENTRY], entries
     assert "\nknown_failing_detect_platform\n" in RUNNER
-    print(f"  PASS production table: {ENTRY}; detector called without arguments")
+    print(f"  PASS production table: {entries}; detector called without arguments")
+
+    churn_cases = [
+        ("Ubuntu 6.8 exit 93", "ubuntu", "6.8.0-139-generic", 93,
+         dict(known=1), mutate(CHURN_ENTRY, CHURN_ENTRY.replace("6.8", "6.9"))),
+        ("Ubuntu 6.8 exit 1", "ubuntu", "6.8.0-139-generic", 1,
+         dict(failed=1), mutate('"$rc" -eq "$expected"', '"$rc" -ne 0')),
+        ("EL8 4.18 exit 93", "el8", "4.18.0-553.el8.x86_64", 93,
+         dict(failed=1), mutate(CHURN_ENTRY, CHURN_ENTRY.replace("ubuntu@6.8", "el8@4.18"))),
+        ("Ubuntu 6.8 exit 0", "ubuntu", "6.8.0-139-generic", 0,
+         dict(known=1, xpass=1), mutate("xpass=$((xpass + 1))", "xpass=$xpass")),
+        ("Ubuntu 6.9 exit 93", "ubuntu", "6.9.0-generic", 93,
+         dict(failed=1), mutate(CHURN_ENTRY, CHURN_ENTRY.replace("@6.8", ""))),
+    ]
+    for label, os_name, release, rc, expected, mutant in churn_cases:
+        def check_churn(result):
+            summary = check_result(result, test=CHURN_TEST, issue=959, expected_exit=93, **expected)
+            assert summary["os"] == os_name
+            assert summary["kernel"] == ".".join(release.split(".")[:2])
+            if rc == 1:
+                assert "exit 1, expected exit 93" in result.stdout, result.stdout
+            return summary
+        result = run(root, os_name, release, rc, test=CHURN_TEST)
+        summary = check_churn(result)
+        print(f"  PASS churn {label}: known-failing={summary['known_failing_count']}, "
+              f"xpass={summary['xpass']}; {result.stdout.splitlines()[-1]}; exit={result.returncode}")
+        negative("churn " + label, check_churn,
+                 run(root, os_name, release, rc, test=CHURN_TEST, source=mutant))
+    print("  PASS churn runner: 5 cases; 5/5 mutants rejected (including dropped @6.8)")
 
     unscoped = mutate(ENTRY, "test_cross_validate_tiered|675")
     cases = [
@@ -244,7 +275,7 @@ with tempfile.TemporaryDirectory(prefix="pgwt-known-failing-") as temp:
     # arguments, under opposite identities.
     # Empty table also exercises Bash 3.2's set -u array edge case, and makes
     # this detector check independent of the actual OS running the self-test.
-    empty_table = mutate("    '" + ENTRY + "'\n", "")
+    empty_table = mutate("    '" + ENTRY + "'\n", "").replace("    '" + CHURN_ENTRY + "'\n", "")
     native = check_result(run(root, "missing", "ignored", 0,
                               source=empty_table, production=True), passed=1)
 

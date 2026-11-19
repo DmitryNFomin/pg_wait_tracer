@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -687,4 +688,41 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.w.Write(p)
+}
+
+// Pilot uint64 leaves are strings through BOTH bridge rewrite paths.
+func TestPilotEvidenceWireStrings(t *testing.T) {
+	const max = `"18446744073709551615"`
+	for _, request := range []string{
+		`{"id":7,"cmd":"pilot_wait_metrics","target":{"capture":"A","pid":101,"fork":` + max + `},"query":{"event":"PgSleep","from":"9223372036854775809","to":` + max + `}}`,
+		`{"cmd":"pilot_wait_metrics","target":{"capture":"A","pid":101,"fork":` + max + `},"query":{"event":"PgSleep","from":"9223372036854775809","to":` + max + `},"id":7}`,
+	} {
+		out, err := rewriteRequestID([]byte(request), 42)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var before, after map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(request), &before); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(out, &after); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"target", "query"} {
+			var a, b interface{}
+			json.Unmarshal(before[key], &a)
+			json.Unmarshal(after[key], &b)
+			if !reflect.DeepEqual(a, b) {
+				t.Fatalf("%s changed: %s", key, out)
+			}
+		}
+		if !strings.Contains(string(out), max) {
+			t.Fatalf("uint64 string lost: %s", out)
+		}
+	}
+	response := []byte(`{"id":42,"pilot":true,"wait_time":{"value":` + max + `},"completed_waits":{"value":null},"storage":{"capture_ambiguous":false}}`)
+	out := rewriteResponseID(response, 7)
+	if !strings.HasPrefix(string(out), `{"id":7,`) || !strings.Contains(string(out), `"value":`+max) || !strings.Contains(string(out), `"value":null`) {
+		t.Fatalf("pilot response changed: %s", out)
+	}
 }

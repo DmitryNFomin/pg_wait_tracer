@@ -231,7 +231,9 @@ print('PASS: Git hash roundtrip covers executable modes, symlinks, nested paths 
 PYHASH
 
 # Invoke the WHOLE launcher with local transport shims. The shim runs the
-# actual local build helper, never the remote command. Two launchers are
+# actual local build helper, never the remote build command. Launch saves a
+# completed worker's log and status for the fake transport's poll replies.
+# Two launchers are
 # interleaved at barriers: X sync -> Y sync -> X build. All simulated remote
 # operations are explicit Python operations confined to this test's temp dir.
 real_rsync=$(command -v rsync)
@@ -295,7 +297,7 @@ elif name == 'rsync':
         (temp / (label + '.synced')).touch()
 elif name == 'ssh':
     command = args[-1]
-    if 'tests/run_all.sh --require-live' in command:
+    if 'bash scripts/box-tier.sh' in command:
         directory = scratch(re.search(r"^cd '([^']+)'", command).group(1))
         (temp / (label + '.directory')).write_text(str(directory))
         if os.environ.get('INTERLEAVE') == '1' and label == 'X':
@@ -304,14 +306,39 @@ elif name == 'ssh':
                 if time.monotonic() > deadline:
                     sys.exit('FAIL: Y never synced before X build')
                 time.sleep(0.01)
-        build = re.search(r'bash scripts/box-build.sh ([0-9a-f]+) ([0-9a-f]+)', command)
-        rc = subprocess.run(['bash', 'scripts/box-build.sh', *build.groups()], cwd=directory, timeout=10).returncode
+        build = re.search(r'bash scripts/box-tier.sh ([0-9a-f]+) ([0-9a-f]+)', command)
+        with (directory / '.box-check.log').open('wb') as log:
+            rc = subprocess.run(['bash', 'scripts/box-build.sh', *build.groups()],
+                                cwd=directory, stdout=log, stderr=subprocess.STDOUT,
+                                timeout=10).returncode
         if rc == 0:
             shutil.copyfile(Path(directory, 'pgwt-server'), temp / (label + '.binary'))
-        sys.exit(rc)
-    elif command.startswith('sudo rm -rf -- '):
+        (directory / '.box-check.pid').write_text(str(os.getpid()) + '\n')
+        (directory / '.box-check.exit').write_text(str(rc) + '\n')
+        # Keep each completed reply in transport state. In the fixed-directory
+        # mutant, one launcher may prune before the other's first poll; it must
+        # still reach the existing shared-source-directory assertion promptly.
+        shutil.copyfile(directory / '.box-check.log', temp / (label + '.worker-log'))
+        (temp / (label + '.worker-status')).write_text(f'{rc} {os.getpid()} dead')
+        print(os.getpid())
+    elif "&& python3 - '" in command:
+        words = shlex.split(command)
+        assert words[:1] == ['cd'] and words[2:5] == ['&&', 'python3', '-'], 'unexpected poll command'
+        scratch(words[1])
+        data = (temp / (label + '.worker-log')).read_bytes()
+        offset = int(words[5])
+        assert 0 <= offset <= len(data), 'unexpected poll offset'
+        print(len(data), (temp / (label + '.worker-status')).read_text(), flush=True)
+        sys.stdout.buffer.write(data[offset:])
+    elif 'sudo rm -rf -- ' in command:
         # Apply EVERY prune operand so deleting the root cannot escape the test.
-        for directory in shlex.split(command)[4:]:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=';')
+        lexer.whitespace_split = True
+        words = list(lexer)
+        start = words.index('sudo')
+        assert words[start:start + 4] == ['sudo', 'rm', '-rf', '--'], 'unexpected prune command'
+        end = words.index(';', start)
+        for directory in words[start + 4:end]:
             shutil.rmtree(scratch(directory), ignore_errors=True)
     elif re.fullmatch(r"mkdir -p '[^']+' && mktemp -d '[^']+\.XXXXXXXXXX'", command):
         template = scratch(shlex.split(command)[-1])
@@ -367,10 +394,14 @@ assert_launcher() {
     grep -Fq -- "-> $tmp/destination/cccc." "$tmp/launcher-single.log" || { fail 'detached HEAD directory must be short SHA'; return 1; }
     python3 - "$tmp/calls-single" <<'PY' || return 1
 import sys
-commands = [s for s in open(sys.argv[1]) if 'tests/run_all.sh --require-live' in s]
+import shlex
+commands = [s for s in open(sys.argv[1]) if 'bash scripts/box-tier.sh' in s]
 assert len(commands) == 1, 'missing/ambiguous build SSH'
-line = commands[0]
-assert line.index('flock 9 || exit') < line.index('bash scripts/box-build.sh') < line.index('tests/run_all.sh --require-live'), 'build provenance must run under the existing flock'
+words = shlex.split(commands[0])
+start = words.index('setsid')
+assert words[start:start + 3] == ['setsid', 'bash', '-c'], 'missing detached worker shell'
+worker = words[start + 3]
+assert worker.index('flock 9 || exit') < worker.index('bash scripts/box-tier.sh'), 'shared build/live tier must run under the existing flock'
 PY
     [[ ! -d "$(cat "$tmp/single.directory")" ]] || { fail 'private directory not pruned'; return 1; }
     echo 'PASS: detached HEAD uses/logs SHA plus unique suffix; helper inside existing lock; private directory pruned'

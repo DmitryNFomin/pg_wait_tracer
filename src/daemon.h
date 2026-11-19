@@ -19,6 +19,8 @@
 #include "exact_probe.h"
 #include "phase_capability.h"
 #include "pgss_resolver.h"
+#include "merge_capture.h"
+#include "percpu_transport.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -29,6 +31,7 @@ struct pg_wait_tracer_bpf;
 struct ring_buffer;
 struct pgwt_control;
 struct pgwt_sampler;
+struct pgwt_percpu_transport;
 
 /* Self-observability counters (D6). Plain uint64 increments on the
  * single-threaded event path — exposed via the control socket
@@ -36,7 +39,24 @@ struct pgwt_sampler;
 struct pgwt_counters {
     uint64_t events_total;             /* trace events consumed from event_ringbuf */
     uint64_t lifecycle_events_total;   /* fork/init/exit/query_text events */
-    uint64_t wp_attach_failures_total; /* watchpoint attach failures (incl. bootstrap) */
+    uint64_t wp_attach_failures_total; /* operation failure without ESRCH + exit proof;
+                                      * includes bootstrap and validation refusals */
+    uint64_t wp_attach_exit_race_total; /* ESRCH with pinned gone/Z/X or PF_EXITING + zero vsize proof */
+    /* Live/gone/unknown subsets of failed hardware operations, excluding lifecycle
+     * eligibility refusals and proven ESRCH exit races. */
+    uint64_t wp_attach_failures_live_total;
+    uint64_t wp_attach_failures_unknown_total;
+    uint64_t wp_attach_failures_gone_total; /* non-ESRCH failure on a gone target */
+    uint64_t exact_preseed_no_command_total;
+    uint64_t exact_preseed_gone_total, exact_preseed_exiting_total;
+    uint64_t exact_preseed_null_entry_total, exact_preseed_startup_total;
+    uint64_t exact_preseed_unpublished_total, exact_preseed_reread_total;
+    uint64_t exact_preseed_wait_addr_refreshed_total;
+    uint64_t exact_preseed_torn_exhausted_total;
+    uint64_t exact_preseed_retired_zero_total, exact_preseed_retired_other_pid_total;
+    uint64_t exact_preseed_failures_total;
+    uint64_t exact_preseed_overwrite_refusals_total;
+    uint64_t exact_preseed_late_attach_failures_total;
     uint64_t prev_events_total;        /* events_total at previous timer tick */
     double   events_per_sec;           /* recent rate, refreshed each tick */
 
@@ -51,6 +71,9 @@ struct pgwt_counters {
      * short, foreign pid, out-of-range state). Not the command gate and not
      * comparable with noncmd_cpu_samples_total (#693). */
     uint64_t sampled_attr_tick_read_failures_total;
+    uint64_t sampled_attr_pg13_scan_fallbacks_total; /* counted scan attempts */
+    /* Idle CLIENT samples with successful status + wait reads and db/user. */
+    uint64_t sampled_attr_tick_idle_samples_total;
     /* Coherent, identity-confirmed at-tick reads whose attribution context is
      * absent (st_databaseid OR st_userid InvalidOid — see
      * PGWT_PGBS_ATTR_NO_CONTEXT). Expected to equal (backends without a full
@@ -100,6 +123,10 @@ struct pgwt_counters {
     uint64_t writer_push_fail_total; /* every rejected event/sample push call */
     uint64_t init_state_read_fail_total; /* sticky unknown INIT accounting */
     uint64_t state_map_full_total;     /* userspace state_map inserts failed (map full, CAP-1) */
+    uint64_t lifecycle_exit_before_attach_total; /* sum of the three retirement classes */
+    uint64_t lifecycle_exit_before_attach_with_opportunity_total; /* entry observed; gated */
+    uint64_t lifecycle_exit_before_attach_no_opportunity_total; /* first handling found gone; reported */
+    uint64_t lifecycle_exit_before_attach_unknown_total; /* no entry/proof; gated */
     uint64_t lifecycle_init_lost_total; /* INIT evidence/missing state, never attached */
     uint64_t lifecycle_init_lost_with_opportunity_total; /* lost minus no-opportunity; gates integrity */
     uint64_t lifecycle_init_lost_no_opportunity_total; /* init_ts > last sweep start */
@@ -256,10 +283,24 @@ enum pgwt_format {
 };
 
 struct pgwt_daemon {
+    pid_t lifecycle_first_gone_pid; /* positive first-handling exclusion, only during cleanup */
+    /* Failed enrollment can leave no registry entry. Keep that evidence until
+     * EXIT so a later gone check cannot masquerade as first handling. */
+    pid_t lifecycle_refused_pids[MAX_BACKENDS];
+    int lifecycle_refused_count;
+    bool lifecycle_refused_overflow; /* sticky: never claim no opportunity after overflow */
     /* BPF */
     struct pg_wait_tracer_bpf *skel;
     struct ring_buffer *rb;          /* lifecycle ringbuf consumer */
     struct ring_buffer *event_rb;    /* trace event ringbuf consumer */
+    /* U1b: B owns the opaque state; calloc keeps the route off by default. */
+    bool exact_perf;                /* --exact-perf, experimental opt-in */
+    struct pgwt_percpu_transport *percpu_transport;
+    struct pgwt_transport_callbacks transport;
+    struct pgwt_merge_capture *merge_capture;
+    pgwt_attach_report_fn attach_report;
+    void *attach_report_ctx;
+    struct pgwt_merge_capture_sink merge_sink;
 
     /* epoll */
     int epoll_fd;
@@ -398,6 +439,7 @@ struct pgwt_daemon {
      * left every trace root-only on a host without that group. */
     const char *trace_group;
     struct pgwt_event_writer *event_writer;     /* NULL if disabled */
+    struct pgwt_evidence_capture *evidence_capture; /* NULL unless pilot opted in */
     struct pgwt_summary_writer *summary_writer; /* NULL if disabled */
     struct pgwt_query_text_capture *query_text_capture; /* NULL if disabled */
     struct pgwt_pgss_resolver *pgss_resolver;            /* PG14+ async text */
@@ -438,6 +480,8 @@ struct pgwt_daemon {
      * from tick: tick advances only after handle_timer completes, so it cannot
      * tell "never entered" from "entered and stalled before completion". */
     bool        debug_dump_state;
+    /* Opt-in overrun control, cached at init; zero adds no delay. */
+    uint32_t    debug_sample_tick_delay_us;
     uint64_t    debug_loop_iterations;
     uint64_t    debug_timer_entries;
     uint64_t    debug_timer_expirations;
@@ -539,6 +583,14 @@ int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin);
  * called a narrower seam could not have seen it. */
 void pgwt_handle_timer(struct pgwt_daemon *d);
 int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d);
+/* Process one decoded L payload (FORK/INIT/EXIT or QUERY_TEXT), after wire
+ * validation. Shared by the default ring callback and B; never dispatches
+ * back into transport. Includes exit bookkeeping and the per-record sweep. */
+int pgwt_process_lifecycle_payload(struct pgwt_daemon *d,
+                                  void *data, size_t data_sz);
+/* Single dispatch for every raw event-ring drain (including provider,
+ * escalation and open-snapshot callers). Keeps B out of those files. */
+int pgwt_consume_event_ring(struct pgwt_daemon *d, bool bounded);
 
 /* Run the main event loop. Returns on signal or duration timeout. */
 int pgwt_daemon_run(struct pgwt_daemon *d);

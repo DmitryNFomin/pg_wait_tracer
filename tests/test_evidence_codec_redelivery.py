@@ -345,6 +345,26 @@ def supplemental(catalog):
     cuts retain original identities. Counts/spans are declared before decode.
     """
     D=catalog
+    # Clauses 13-15: keep the predecessor digest intact while changing one
+    # static field. Header changes also change every block's CRC chain.
+    nq=copy.deepcopy(D['N']);nq['header']['qualified']=False
+    nq['header']['content_id']+=':unqualified'
+    for b in nq['blocks']: b['content_id']+=':unqualified'
+    yield 'link_qualification_mismatch',[D['A'],nq]
+    nm=copy.deepcopy(D['N']);nm['header']['mapping']=[[1,1,'w']]
+    nm['header']['H']+=8;nm['header']['content_id']+=':mapping-mismatch'
+    for b in nm['blocks']:
+        b['start']+=8;b['end']+=8;b['content_id']+=':mapping-mismatch'
+    yield 'link_mapping_mismatch',[D['A'],nm]
+    # An authenticated extension cannot prove SC when qualification differs.
+    yield 'link_seal_static_mismatch',[D['A+'],nq]
+    # RF cuts admission at Au's record, but its clean storage end still
+    # witnesses N locally. Authenticate Au's repaired bytes, not A's bytes.
+    nau=copy.deepcopy(D['N']);nau['header']['content_id']+=':record-fault-witness'
+    nau['header']['previous']['digest']['blocks']=[
+        [b['start'],b['end'],b['content_id']] for b in D['Au']['blocks']]
+    for b in nau['blocks']: b['content_id']+=':record-fault-witness'
+    yield 'link_record_fault_clean_witness',[D['Au'],nau]
     flag=copy.deepcopy(D['A+']);flag['header']['flags']=1
     nflag=copy.deepcopy(D['N']);nflag['header']['flags']=1
     short=copy.deepcopy(D['N']);short['header']['previous'].update(D=747,digest=dict(kind='prefix',header=D['A']['header']['content_id'],D=747,
@@ -535,6 +555,7 @@ def run(binary, table_only=False):
                     m.catalog.setdefault(canonical(d),d)
                     m.header_recipes.setdefault(d['header']['content_id'],d)
                 exercise(ds,tag)
+                if tag.startswith('link_'): counts[tag]+=1
                 if tag=='every_byte_cut': counts['every_cut']+=1
             print('codec redelivery_generated PASS', flush=True)
             print('codec redelivery differential '+json.dumps(dict(counts),sort_keys=True)+'; 0 disagreements',flush=True)

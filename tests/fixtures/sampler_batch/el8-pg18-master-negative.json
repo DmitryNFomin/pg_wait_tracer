@@ -1,0 +1,31 @@
+{
+ "calls": {
+  "close": 114370,
+  "open": 0,
+  "openat": 114257,
+  "pread64": 903533,
+  "process_vm_readv": 221,
+  "threads": 1
+ },
+ "errors": [
+  "openat/tick=512.4 > 64 (per-backend file I/O must be absent in steady state)",
+  "pread64/tick=4051.7 > 64 (per-backend file I/O must be absent in steady state)",
+  "close/tick=512.9 > 64 (per-backend file I/O must be absent in steady state)",
+  "vm/tick=1.052 < 3",
+  "idle attributed samples=0 (required positive)"
+ ],
+ "idle_cohort_samples_lower_bound": 0,
+ "label": "master-negative",
+ "major": 18,
+ "per_tick": {
+  "close": 512.8699551569507,
+  "openat": 512.3632286995515,
+  "pread64": 4051.7174887892374,
+  "process_vm_readv_max": 0.9910313901345291,
+  "process_vm_readv_min": 1.0523809523809524
+ },
+ "population": 512,
+ "read_failures": 0,
+ "ticks": 210,
+ "ticks_spanning": 223
+}

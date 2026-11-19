@@ -52,7 +52,9 @@
  * see the U2a notes inline in the echarts-only sections below.
  */
 
-import { buildAasOption } from '../lib/builders/aas.js';
+import {
+    buildAasOption, aasPeakText, aasEmptyText, aasEmptyStatusText,
+} from '../lib/builders/aas.js';
 import {
     buildUplotSpec, overlayGeometry, overlayHooks, hitTest,
     compareHooks, drawDiffStrip,
@@ -62,7 +64,9 @@ import { fullyCoversStrip } from '../lib/stripcache.js';
 import { CancelledError } from '../lib/transport.js';
 import {
     SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
+    fidelityBandStyle, IN_FLIGHT_EXCLUDED_LABEL,
 } from '../lib/builders/fidelity.js';
+import { coverageRangeText } from '../lib/panels.js';
 import { attachSelection } from '../lib/selection.js';
 import { esc, fmtDuration, fmtTime, classFilterName } from '../lib/format.js';
 
@@ -331,15 +335,14 @@ export function createActiveView() {
     function setStatusLine(ctx, model) {
         if (!ctx.setStatus) return;
         const dur = fmtDuration(ctx.timeRange.span());
-        const peak = (model.maxAas || 0).toFixed(1);
         ctx.setStatus(ctx.server.numCpus + ' CPUs · ' + dur +
-            ' window · peak ' + peak + ' AAS', 'connected');
+            ' window · ' + aasPeakText(model), 'connected');
     }
 
-    function setEmptyStatus(ctx) {
+    function setEmptyStatus(ctx, model) {
         if (!ctx.setStatus) return;
         ctx.setStatus(ctx.server.numCpus + ' CPUs · ' +
-            fmtDuration(ctx.timeRange.span()) + ' window · no data',
+            fmtDuration(ctx.timeRange.span()) + ' window · ' + aasEmptyStatusText(model),
             'connected');
     }
 
@@ -537,7 +540,7 @@ export function createActiveView() {
         paintDiff(ctx, { compare: null, xWindow: { min: 0, max: 1 } });
         if (uHost) {
             uHost.innerHTML =
-                '<div class="aas-empty">No data in selected range</div>';
+                '<div class="aas-empty">' + esc(aasEmptyText(model)) + '</div>';
         }
         clearLegendAndChip();
         if (ctx.setCompareEvidence) {
@@ -546,7 +549,7 @@ export function createActiveView() {
                 !!(model && model.baselinePredates),
                 !!(model && model.baselineUnavailable));
         }
-        setEmptyStatus(ctx);
+        setEmptyStatus(ctx, model);
     }
 
     function mountUplot(model, ctx) {
@@ -838,7 +841,7 @@ export function createActiveView() {
                 backgroundColor: 'transparent',
                 graphic: [{
                     type: 'text', left: 'center', top: 'middle',
-                    style: { text: 'No data in selected range',
+                    style: { text: aasEmptyText(model),
                              fill: '#666', fontSize: 13 },
                 }],
             }, true);
@@ -848,7 +851,7 @@ export function createActiveView() {
                     model.compareData || null, !!model.baselinePredates,
                     !!model.baselineUnavailable);
             }
-            setEmptyStatus(ctx);
+            setEmptyStatus(ctx, model);
             return;
         }
         // P7 view-level hysteresis, ECharts form: decide BOTH the axis top and
@@ -1040,6 +1043,7 @@ export function createActiveView() {
                     isCompare: !!pair, opts, spec,
                     hasData: spec.hasData,
                     maxAas: spec.maxAas,
+                    coverage: spec.coverage,
                     seriesNames: spec.seriesNames,
                 };
             }
@@ -1170,10 +1174,8 @@ function renderFidelityChip(model, ctx) {
     if (!host || !host.parentNode) return;
 
     let chip = document.getElementById('aas-fidelity-chip');
-    const fid = model.fidelity;
-    const showBand = model.shading && model.shading.showLegend;
-
-    if (!showBand) {
+    const html = aasFidelityChipHtml(model);
+    if (html === null) {
         if (chip) chip.remove();
         return;
     }
@@ -1187,6 +1189,20 @@ function renderFidelityChip(model, ctx) {
         if (legDiv && legDiv.parentNode) legDiv.parentNode.insertBefore(chip, legDiv.nextSibling);
         else host.parentNode.insertBefore(chip, host.nextSibling);
     }
+    chip.innerHTML = html;
+}
+
+/* PURE: the chip's content for a built AAS model (either renderer), or null
+ * when the chip is hidden. Exported so the coverage marks ("up to HH:MM:SS",
+ * in-flight time excluded) are unit-tested on what the view paints. */
+export function aasFidelityChipHtml(model) {
+    const fid = model.fidelity;
+    const showBand = model.shading && model.shading.showLegend;
+    // U3: the server's coverage verdict (lib/builders/fidelity.js coverageOf).
+    const cov = model.coverage || null;
+    const inFlight = !!(cov && cov.excludesInFlight);
+    const liveEdge = (cov && cov.liveEdge) || null;
+    if (!showBand && !inFlight && !liveEdge) return null;
 
     const sampledSwatch =
         '<span style="width:14px;height:10px;display:inline-block;border-radius:2px;' +
@@ -1195,7 +1211,21 @@ function renderFidelityChip(model, ctx) {
         '<span style="width:14px;height:10px;display:inline-block;border-radius:2px;' +
         'background:' + MIXED_BAND_COLOR + ';border:1px dashed ' + MIXED_BORDER + '"></span>';
 
-    let html = '<span>' + esc(model.fidelityLabel) + '</span>';
+    let html = '';
+    if (cov && cov.withheld) {
+        html += '<span class="coverage-label">' + esc(cov.label) + '</span>';
+        for (const r of cov.uncovered) {
+            html += '<span class="coverage-range">' + esc(coverageRangeText(r)) + '</span>';
+        }
+    } else if (liveEdge) {
+        // A3 item 1: the numbers end at covered_to; the clipped range is named.
+        html += '<span class="coverage-mark">' + esc(cov.upTo) + '</span>';
+        html += '<span class="coverage-range">' + esc(coverageRangeText(liveEdge)) + '</span>';
+        if (fid !== 'exact') html += '<span>' + esc(model.fidelityLabel) + '</span>';
+    } else if (showBand) {
+        html += '<span>' + esc(model.fidelityLabel) + '</span>';
+    }
+    if (inFlight) html += '<span class="coverage-mark">' + esc(IN_FLIGHT_EXCLUDED_LABEL) + '</span>';
     if (fid === 'sampled') {
         html += '<span style="display:inline-flex;align-items:center;gap:5px">' +
             sampledSwatch + 'shaded = sampled (estimated, not exact)</span>';
@@ -1205,15 +1235,22 @@ function renderFidelityChip(model, ctx) {
             '<span style="display:inline-flex;align-items:center;gap:5px">' +
             mixedSwatch + 'mixed window</span>';
     }
+    for (const kind of new Set(((model.shading && model.shading.bands) || []).map(b => b.kind))) {
+        if (kind === 'sampled' || kind === 'mixed') continue;
+        const style = fidelityBandStyle(kind);
+        html += '<span style="display:inline-flex;align-items:center;gap:5px">' +
+            '<span style="width:14px;height:10px;background:' + style.fill +
+            ';border:1px dashed ' + style.border + '"></span>' + esc(style.label) + '</span>';
+    }
     if (model.escalation) {
         html += '<span style="color:' +
             (model.escalation.isAnomaly ? '#E53935' : '#4fc3f7') + '">● ' +
             esc(model.escalation.label) + '</span>';
     }
-    if (model.shading.disclaimer != null) {
+    if (model.shading && model.shading.disclaimer != null) {
         html += '<span>' + esc(model.shading.disclaimer) + '</span>';
     }
-    chip.innerHTML = html;
+    return html;
 }
 
 /* External HTML legend with solo / multi-select / hover — kept out of the chart

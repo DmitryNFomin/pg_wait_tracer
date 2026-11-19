@@ -1,6 +1,7 @@
 /* backend.c — Backend lifecycle: scan, fork, init, exit handling */
 #include "backend.h"
 #include "backend_init.h"
+#include "capture_counters.h"
 #include "daemon.h"
 #include "perf_event.h"
 #include "discovery.h"
@@ -46,6 +47,7 @@ static struct pgwt_backend *alloc_backend(struct pgwt_backend_table *bt,
     /* Reuse dead slot */
     for (int i = 0; i < bt->count; i++) {
         if (!bt->entries[i].is_alive && bt->entries[i].pid == 0) {
+            pgwt_pgbs_reader_reset(&bt->entries[i].sampled_reader);
             free(bt->entries[i].pg13_synthetic_cache);
             memset(&bt->entries[i], 0, sizeof(bt->entries[i]));
             bt->entries[i].wp_fd = -1;
@@ -85,6 +87,24 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+int pgwt_sampler_enroll_backend(struct pgwt_backend *be, uint64_t tick_ts)
+{
+    if (be->pid <= 0) return -1;
+    if (be->sampled_reader.pid == 0) {
+        if (tick_ts < be->pgbs_resolve_retry_ns) return -1;
+        if (!be->pgbs_resolve_fast_until_ns)
+            be->pgbs_resolve_fast_until_ns = tick_ts + UINT64_C(1000000000);
+        if (pgwt_pgbs_reader_enroll(&be->sampled_reader, be->pid) != 0) {
+            unsigned shift = tick_ts <= be->pgbs_resolve_fast_until_ns ? 0 :
+                (be->pgbs_resolve_attempts < 5 ? be->pgbs_resolve_attempts++ : 5);
+            be->pgbs_resolve_retry_ns = tick_ts + (UINT64_C(100000000) << shift);
+            return -1;
+        }
+    }
+    return be->sampled_reader.pid == be->pid &&
+           be->sampled_reader.start_time != 0 ? 0 : -1;
+}
+
 /* Resolve a backend's wait_event_info address using the version-appropriate
  * path. PG17+: my_wait_ptr_addr is the my_wait_event_info global (a uint32*
  * that already points at the field). PG<17 (use_myproc): my_wait_ptr_addr is
@@ -99,7 +119,9 @@ uint64_t pgwt_resolve_backend_wait_addr(struct pgwt_daemon *d, pid_t pid)
                                                  d->pgproc_wait_offset);
     else
         addr = pgwt_read_pointer(pid, d->my_wait_ptr_addr);
+    int error = errno;
     pgwt_debug_block_end(d, "backend_wait_addr_resolve", pid, started_ns);
+    errno = error;
     return addr;
 }
 
@@ -146,6 +168,14 @@ static void report_state_map_full(struct pgwt_daemon *d, pid_t pid)
 static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
                              uint64_t attach_ts, bool sweep_reseed)
 {
+    if (!sweep_reseed && getenv("PGWT_TEST_SKIP_UNPUBLISHED_WAIT_SEED")) {
+        struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+        if (be && be->exact_unpublished_generation &&
+            be->exact_unpublished_generation == d->escalation.generation) {
+            fprintf(stderr, "WARN: TEST ONLY skip unpublished wait seed PID %d\n", pid);
+            return 0;
+        }
+    }
     char mem_path[64];
     snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
     int mem_fd = open(mem_path, O_RDONLY);
@@ -298,9 +328,56 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
     return rc;
 }
 
+/* Pin proc identity before opening hardware. Reopening by PID after a
+ * failure could inspect a replacement child of the same postmaster. */
+static int open_watchpoint_target(pid_t pid)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    return fd >= 0 ? fd : -errno;
+}
+
+/* ESRCH is excused only with positive proof from the original pinned task. */
+static void record_watchpoint_failure(struct pgwt_daemon *d, int target_fd,
+                                      pid_t pid, const char *site,
+                                      int error, int resolve_error)
+{
+    int live = pgwt_backend_target_live_fd(target_fd, d->postmaster_pid);
+    int live_error = live < 0 ? errno : 0;
+    int proof = error == ESRCH
+              ? pgwt_backend_no_command_fd(target_fd, d->postmaster_pid) : 0;
+    bool exit_race = error == ESRCH && proof > 0;
+    if (exit_race) {
+        d->counters.wp_attach_exit_race_total++;
+        struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+        if (be) be->wp_attach_exit_race = true;
+    } else {
+        d->counters.wp_attach_failures_total++;
+        struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+        if (be) be->wp_attach_failed = true;
+        if (live > 0)
+            d->counters.wp_attach_failures_live_total++;
+        else if (live == 0)
+            d->counters.wp_attach_failures_gone_total++;
+        else
+            d->counters.wp_attach_failures_unknown_total++;
+    }
+    fprintf(stderr,
+            "WP-ATTACH-FAIL: pid=%d site=%s errno=%d "
+            "resolve_errno=%d liveness=%s liveness_result=%d liveness_errno=%d exit_proof=%d\n",
+            pid, site, error, resolve_error,
+            proof == 2 ? "exiting" : proof == 1 ? "gone" :
+            live > 0 ? "live" : live == 0 ? "gone" : "unknown",
+            live, live_error, proof);
+    if (target_fd >= 0) close(target_fd);
+    errno = error;
+}
+
 int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
                                    struct pgwt_backend *be)
 {
+    if (be->wp_attach_exit_race) { errno = ESRCH; return -1; }
     if (be->wp_addr == 0 || be->wp_fd >= 0)
         return be->wp_fd >= 0 ? 0 : -1;
 
@@ -309,16 +386,18 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
      * an unseeded (or stale, on re-escalation) state entry and the opening
      * interval was mis-timed. */
     int wp_prog_fd = bpf_program__fd(d->skel->progs.on_watchpoint);
+    int target_fd = open_watchpoint_target(be->pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
     be->wp_fd = pgwt_open_watchpoint_disabled(be->pid, be->wp_addr, wp_prog_fd);
-    pgwt_debug_block_end(d, be->wp_fd < 0 ? "watchpoint_open_failed"
-                                          : "watchpoint_open",
-                         be->pid, started_ns);
     if (be->wp_fd < 0) {
-        /* Process likely exited before attach — caller decides on cleanup. */
-        d->counters.wp_attach_failures_total++;
+        int error = errno;
+        pgwt_debug_block_end(d, "watchpoint_open_failed", be->pid, started_ns);
+        /* Caller decides on cleanup; only a confirmed exit is a race. */
+        record_watchpoint_failure(d, target_fd, be->pid,
+                                  "watchpoint_open", error, 0);
         return -1;
     }
+    pgwt_debug_block_end(d, "watchpoint_open", be->pid, started_ns);
 
     if (be->attach_ts == 0)
         be->attach_ts = now_ns();
@@ -327,28 +406,35 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
      * the all-backend snapshot. Seed it now before its watchpoint is armed.
      * Post-boundary query/activity edges already captured by the BPF fork
      * enrollment win over this separate seed during resolution. */
-    if (d->exact_probes.core.generation != 0)
+    if (d->exact_probes.core.generation != 0 &&
         pgwt_exact_seed_backend(d, be->pid,
-                                d->exact_probes.core.generation, false);
+                                d->exact_probes.core.generation, false) != 0)
+        d->counters.exact_preseed_late_attach_failures_total++;
     started_ns = pgwt_debug_block_begin(d);
     preseed_state_map(d, be->pid, be->wp_addr, be->attach_ts, false);
     pgwt_debug_block_end(d, "watchpoint_preseed", be->pid, started_ns);
 
     started_ns = pgwt_debug_block_begin(d);
     int enable_rc = pgwt_watchpoint_enable(be->wp_fd);
-    pgwt_debug_block_end(d, enable_rc != 0 ? "watchpoint_enable_failed"
-                                           : "watchpoint_enable",
-                         be->pid, started_ns);
     if (enable_rc != 0) {
+        int error = errno;
+        pgwt_debug_block_end(d, "watchpoint_enable_failed", be->pid, started_ns);
+        record_watchpoint_failure(d, target_fd, be->pid,
+                                  "watchpoint_enable", error, 0);
         started_ns = pgwt_debug_block_begin(d);
         pgwt_close_watchpoint(be->wp_fd);
         pgwt_debug_block_end(d, "watchpoint_close", be->pid, started_ns);
         be->wp_fd = -1;
-        d->counters.wp_attach_failures_total++;
+        errno = error;
         return -1;
     }
+    be->init_attached = true; /* retained proof of a completed real attachment */
+    pgwt_debug_block_end(d, "watchpoint_enable", be->pid, started_ns);
+    if (target_fd >= 0) close(target_fd);
     return 0;
 }
+
+static void remember_enrollment_refusal(struct pgwt_daemon *d, pid_t pid);
 
 int pgwt_scan_existing_backends(struct pgwt_daemon *d)
 {
@@ -480,9 +566,14 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
         /* Already initialized — record the address. */
         struct pgwt_backend *be = alloc_backend(&d->backends, pid,
                                                 d->pg_major_version == 13);
-        if (!be) continue;
+        if (!be) {
+            d->counters.wp_attach_failures_total++;
+            remember_enrollment_refusal(d, pid);
+            continue;
+        }
 
         be->wp_addr = ptr;
+        pgwt_sampler_enroll_backend(be, now_ns());
 
         /* Sampled mode: register the backend (address + metadata) but arm
          * NO watchpoint. The sampler reads wp_addr directly each tick. Keep a
@@ -522,9 +613,7 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
          * time is not lost). The same helper is reused on escalation. */
         be->attach_ts = now_ns();
         if (pgwt_attach_backend_watchpoint(d, be) != 0) {
-            /* Silently skip — process likely exited before attach */
-            be->is_alive = false;
-            be->pid = 0;
+            /* Retain identity and any counted exit proof until EXIT cleanup. */
             continue;
         }
 
@@ -590,7 +679,7 @@ int pgwt_recover_unattached_backends(struct pgwt_daemon *d)
         /* Already attached with a live watchpoint — nothing to recover. This
          * is the common case (every healthy backend), kept cheap. */
         struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
-        if (be && be->wp_fd >= 0)
+        if (be && (be->wp_fd >= 0 || be->wp_attach_exit_race))
             continue;
 
         /* Postmaster child? (ppid == postmaster, field 4 of /proc/pid/stat). */
@@ -851,19 +940,55 @@ int pgwt_confirm_wait_offset(struct pgwt_daemon *d)
     return 0;
 }
 
+static bool enrollment_failure_counted(const struct pgwt_daemon *d, pid_t pid)
+{
+    for (int i = 0; i < d->lifecycle_refused_count; ++i)
+        if (d->lifecycle_refused_pids[i] == pid) return true;
+    return false;
+}
+
+static bool enrollment_was_refused(const struct pgwt_daemon *d, pid_t pid)
+{
+    return d->lifecycle_refused_overflow || enrollment_failure_counted(d, pid);
+}
+
+static void remember_enrollment_refusal(struct pgwt_daemon *d, pid_t pid)
+{
+    if (enrollment_was_refused(d, pid)) return;
+    if (d->lifecycle_refused_count == MAX_BACKENDS) {
+        d->lifecycle_refused_overflow = true;
+        return;
+    }
+    d->lifecycle_refused_pids[d->lifecycle_refused_count++] = pid;
+}
+
+static void forget_enrollment_refusal(struct pgwt_daemon *d, pid_t pid)
+{
+    for (int i = 0; i < d->lifecycle_refused_count; ++i) {
+        if (d->lifecycle_refused_pids[i] != pid) continue;
+        d->lifecycle_refused_pids[i] = d->lifecycle_refused_pids[--d->lifecycle_refused_count];
+        return;
+    }
+}
+
 /* A queued FORK/INIT can outlive its process. Do not allocate or attach a
  * stale target. Unknown eligibility is a refusal, not an expired target.
- * Failed hardware attempts after this check remain counted without exception. */
+ * Hardware failures are classified separately after the attempted operation. */
 static int lifecycle_target(struct pgwt_daemon *d, pid_t pid)
 {
     int live = pgwt_backend_target_live(pid, d->postmaster_pid);
     if (live == 0) {
         if (d->verbose)
             fprintf(stderr, "INFO: queued lifecycle target PID %d retired before enrollment; no watchpoint attempted\n", pid);
+        pid_t previous = d->lifecycle_first_gone_pid;
+        if (!pgwt_find_backend(&d->backends, pid) && !enrollment_was_refused(d, pid))
+            d->lifecycle_first_gone_pid = pid;
         pgwt_handle_exit(d, pid);
+        d->lifecycle_first_gone_pid = previous;
     } else if (live < 0) {
         int error = errno;
         d->counters.wp_attach_failures_total++;
+        remember_enrollment_refusal(d, pid);
         fprintf(stderr, "ERROR: cannot validate lifecycle target PID %d: %s; refusing enrollment\n", pid, strerror(error));
     }
     return live;
@@ -882,13 +1007,53 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     int live = lifecycle_target(d, child_pid);
     if (live <= 0) return live < 0 ? -1 : 0;
 
-    /* Check for duplicate */
-    if (pgwt_find_backend(&d->backends, child_pid))
-        return 0;
+    /* A startup exit-race entry may outlive its PID (no seeded state means
+     * no EXIT). A live FORK for that PID must never disappear as a duplicate.
+     * We cannot distinguish reuse from a queued duplicate of the dying task
+     * here. Count the refusal conservatively; do not retry a proven exit. */
+    struct pgwt_backend *existing = pgwt_find_backend(&d->backends, child_pid);
+    if (existing) {
+        if (existing->wp_attach_exit_race) {
+            d->counters.wp_attach_failures_total++;
+            existing->wp_attach_failed = true;
+            fprintf(stderr, "ERROR: live FORK PID %d conflicts with retained attach exit race; enrollment refused and counted\n", child_pid);
+            return -1;
+        }
+        /* A lost EXIT must not make a replacement PID inherit a stale row.
+         * Identity checks happen on lifecycle delivery, never per steady tick. */
+        if (existing->sampled_reader.pid != 0 &&
+            !pgwt_pgbs_pid_is_original(child_pid,
+                                       existing->sampled_reader.start_time)) {
+            if (d->mode == PGWT_MODE_FULL || d->escalation.active) {
+                /* Preserve the exact tier's duplicate-fork behavior and the
+                 * NEW child's fork-seeded BPF state. Only retire the stale
+                 * sampled proof before sampling can resume. */
+                pgwt_pgbs_reader_reset(&existing->sampled_reader);
+                existing->sampled_cache_stale = true;
+                existing->pgbs_addr = 0;
+                existing->pgbs_resolve_retry_ns = 0;
+                existing->pgbs_resolve_fast_until_ns = 0;
+                existing->pgbs_resolve_attempts = 0;
+                pgwt_sampler_enroll_backend(existing, now_ns());
+                return 0;
+            }
+            pgwt_handle_exit(d, child_pid);
+        }
+        else
+            return 0;
+    }
 
     struct pgwt_backend *be = alloc_backend(&d->backends, child_pid,
                                             d->pg_major_version == 13);
-    if (!be) return -1;
+    if (!be) {
+        /* Even without state_map evidence for a later EXIT, allocation refusal
+         * is a real enrollment failure and must gate this capture. */
+        d->counters.wp_attach_failures_total++;
+        remember_enrollment_refusal(d, child_pid);
+        return -1;
+    }
+
+    pgwt_sampler_enroll_backend(be, now_ns());
 
     /* Sampled mode: no bootstrap watchpoint. Register the backend now; the
      * sampler lazily resolves wp_addr once the backend sets the pointer. */
@@ -899,30 +1064,43 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
         return 0;
     }
 
+    struct pgwt_counter_value no_state = pgwt_read_bpf_fail_counter(d, PGWT_BPF_FAIL_INIT_NO_STATE);
+    struct pgwt_counter_value wait_read = pgwt_read_bpf_fail_counter(d, PGWT_BPF_FAIL_WAIT_READ);
+    be->enroll_init_no_state = no_state.value;
+    be->enroll_wait_read_fail = wait_read.value;
+    be->enroll_counters_valid = no_state.valid && wait_read.valid;
+
     /* Attach bootstrap watchpoint on my_wait_event_info pointer address */
     int bootstrap_prog_fd = bpf_program__fd(d->skel->progs.on_bootstrap);
+    int target_fd = open_watchpoint_target(child_pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
     be->bootstrap_fd = pgwt_open_watchpoint(child_pid, d->my_wait_ptr_addr,
                                              bootstrap_prog_fd);
-    pgwt_debug_block_end(d,
-                         be->bootstrap_fd < 0
-                             ? "bootstrap_watchpoint_open_failed"
-                             : "bootstrap_watchpoint_open",
-                         child_pid, started_ns);
     if (be->bootstrap_fd < 0) {
+        int error = errno;
+        pgwt_debug_block_end(d, "bootstrap_watchpoint_open_failed", child_pid, started_ns);
         /* Race: child may have already exited or initialized.
          * Try direct init path (version-aware address resolution). */
+        /* Zero with errno=0 also covers a pointer not yet assigned: the
+         * resolver's zero result is not necessarily a syscall failure. */
+        errno = 0;
         uint64_t ptr = pgwt_resolve_backend_wait_addr(d, child_pid);
+        int resolve_error = errno;
         if (ptr != 0) {
+            if (target_fd >= 0) close(target_fd);
             return pgwt_handle_init(d, child_pid, ptr, 0);
         }
-        /* Silently skip — process exited before bootstrap attach */
-        d->counters.wp_attach_failures_total++;
-        be->is_alive = false;
-        be->pid = 0;
+        /* Resolution alone cannot distinguish exit from a live failure. */
+        record_watchpoint_failure(d, target_fd, child_pid,
+                                  "bootstrap_watchpoint_open/backend_wait_addr_resolve",
+                                  error, resolve_error);
+        /* Retain identity and the counted exit proof until final EXIT cleanup. */
         return -1;
     }
+    pgwt_debug_block_end(d, "bootstrap_watchpoint_open", child_pid, started_ns);
+    if (target_fd >= 0) close(target_fd);
 
+    be->bootstrap_armed = true;
     pgwt_pending_init_add(&d->backends, be);
 
     /* fork→attach race (T4/CAP-8, observed live by the T0 CI smoke job):
@@ -944,9 +1122,16 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
      * init has not switched the pointer yet — the armed bootstrap
      * watchpoint will catch that write. (PG<17: MyProc starts NULL, and a
      * non-NULL PGPROC is in shm, so the same predicate holds.) */
+    errno = 0;
     uint64_t ptr = pgwt_resolve_backend_wait_addr(d, child_pid);
+    be->post_arm_resolve_errno = errno;
     started_ns = pgwt_debug_block_begin(d);
+    errno = 0;
     int addr_shared = ptr != 0 ? pgwt_addr_is_shared(child_pid, ptr) : 0;
+    be->post_arm_shared_errno = errno;
+    be->post_arm_ptr = ptr;
+    be->post_arm_addr_shared = addr_shared;
+    be->post_arm_checked = true;
     pgwt_debug_block_end(d, "backend_addr_shared", child_pid, started_ns);
     if (ptr != 0 && addr_shared == 1) {
         if (d->verbose)
@@ -1016,11 +1201,30 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
     if (live <= 0) return live < 0 ? -1 : 0;
 
     struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+    if (be && be->sampled_reader.pid &&
+        !pgwt_pgbs_pid_is_original(pid, be->sampled_reader.start_time)) {
+        /* INIT can be the only delivered event for a reused pid. Preserve
+         * exact-tier resources, but retire every predecessor sampled proof
+         * before either the already-attached return or new enrollment. */
+        pgwt_pgbs_reader_reset(&be->sampled_reader);
+        be->sampled_cache_stale = true;
+        be->pgbs_addr = 0;
+        be->pgbs_resolve_retry_ns = 0;
+        be->pgbs_resolve_fast_until_ns = 0;
+        be->pgbs_resolve_attempts = 0;
+    }
     if (!be) {
         /* Unknown PID — might have been forked before daemon started */
         be = alloc_backend(&d->backends, pid, d->pg_major_version == 13);
-        if (!be) return -1;
+        if (!be) {
+            d->counters.wp_attach_failures_total++;
+            remember_enrollment_refusal(d, pid);
+            return -1;
+        }
     }
+    pgwt_sampler_enroll_backend(be, now_ns());
+
+    if (be->wp_attach_exit_race) { errno = ESRCH; return -1; }
 
     /* Close bootstrap watchpoint if any */
     pgwt_pending_init_remove(&d->backends, be);
@@ -1158,8 +1362,41 @@ int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
      * INIT evidence even if enrollment/attach failed before registry entry.
      * Deleting the entry below makes repeated EXIT cleanup idempotent. */
     uint64_t init_ts;
-    if (pgwt_exit_init_lost(be, pid, d, read_init_state, &init_ts))
+    bool before_attach;
+    if (pgwt_exit_init_lost(be, pid, d, read_init_state, &init_ts, &before_attach))
         record_init_loss(d, pid, init_ts, exit_ts);
+    else if (before_attach && pgwt_mode_uses_watchpoints(d) &&
+             !enrollment_failure_counted(d, pid)) {
+        /* Exact refusal evidence already has a failure class. Overflow only
+         * denies the no-opportunity exclusion; it cannot prove a counted
+         * failure for this PID. */
+        d->counters.lifecycle_exit_before_attach_total++;
+        const char *opportunity;
+        if (be && be->bootstrap_armed && be->post_arm_checked) {
+            d->counters.lifecycle_exit_before_attach_with_opportunity_total++;
+            opportunity = "with";
+        } else if (!be && d->lifecycle_first_gone_pid == pid) {
+            d->counters.lifecycle_exit_before_attach_no_opportunity_total++;
+            opportunity = "no";
+        } else {
+            d->counters.lifecycle_exit_before_attach_unknown_total++;
+            opportunity = "unknown";
+        }
+        struct pgwt_counter_value no_state = pgwt_read_bpf_fail_counter(d, PGWT_BPF_FAIL_INIT_NO_STATE);
+        struct pgwt_counter_value wait_read = pgwt_read_bpf_fail_counter(d, PGWT_BPF_FAIL_WAIT_READ);
+        bool valid = be && be->enroll_counters_valid && no_state.valid && wait_read.valid &&
+                     no_state.value >= be->enroll_init_no_state && wait_read.value >= be->enroll_wait_read_fail;
+        fprintf(stderr, "EXIT-BEFORE-ATTACH: pid=%d opportunity=%s entry_present=%d "
+                "bootstrap_armed=%d post_arm_checked=%d post_arm_ptr=0x%llx "
+                "addr_shared=%d resolve_errno=%d shared_errno=%d "
+                "counter_deltas_valid=%d lifecycle_init_no_state_delta=%llu wait_read_fail_delta=%llu\n",
+                pid, opportunity, be != NULL, be && be->bootstrap_armed,
+                be && be->post_arm_checked, (unsigned long long)(be ? be->post_arm_ptr : 0),
+                be ? be->post_arm_addr_shared : -1, be ? be->post_arm_resolve_errno : 0,
+                be ? be->post_arm_shared_errno : 0, valid,
+                (unsigned long long)(valid ? no_state.value - be->enroll_init_no_state : 0),
+                (unsigned long long)(valid ? wait_read.value - be->enroll_wait_read_fail : 0));
+    }
     if (be)
         be->bootstrap_fd = -1;
 
@@ -1202,7 +1439,9 @@ int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
 
     /* BPF enrolls at fork, before a userspace registry entry exists. Even
      * a retired-before-enrollment target must have those maps cleaned. */
+    forget_enrollment_refusal(d, pid);
     if (!be) return 0;
+    pgwt_pgbs_reader_reset(&be->sampled_reader);
     be->is_alive = false;
 
     if (d->verbose)
@@ -1224,6 +1463,7 @@ void pgwt_close_all_backends(struct pgwt_backend_table *bt)
         bt->entries[i].wp_fd = -1;
         pgwt_close_watchpoint(bt->entries[i].bootstrap_fd);
         bt->entries[i].bootstrap_fd = -1;
+        pgwt_pgbs_reader_reset(&bt->entries[i].sampled_reader);
         free(bt->entries[i].pg13_synthetic_cache);
         bt->entries[i].pg13_synthetic_cache = NULL;
     }

@@ -15,6 +15,7 @@ test_event_writer
 test_event_reader
 test_trace_v2
 test_sampler
+test_sampler_dispatch
 # #863: portable integer tick-weight conservation and trace round-trip.
 test_sample_weight
 test_sample_weight_controls.py
@@ -25,6 +26,9 @@ test_wp_attr
 test_exact_probe
 test_effective_cores
 test_backend_status_layout
+test_sampled_attr_io
+test_sampled_attr_lifetime
+test_sampled_attr_io.py
 test_synthetic_query
 test_pgss_resolver
 test_coop
@@ -1066,6 +1070,9 @@ test_phase_capability
 test_phase_probe
 
 # Core wait_time v1: independent contract answers, no server dependency.
+test_evidence_capture
+test_evidence_capture_kinds.sh
+test_evidence_capture_portable.py
 test_core_wait_time_contract
 test_core_wait_time_differential.py
 
@@ -1079,7 +1086,12 @@ test_evidence_codec_redelivery.py
 test_evidence_codec_mutants.py
 test_core_evidence_differential.py
 test_core_merge_contract
+test_core_merge_index.py
+core_merge_index_mutants.py
 test_core_merge_adapter
+test_transport_wire
+test_transport_producers
+test_percpu_transport
 core_merge_adapter_mutants.sh
 test_core_evidence_fuzz.py
 
@@ -1087,9 +1099,21 @@ test_core_evidence_fuzz.py
 test_ringbuf_metrics
 test_backend_init
 test_backend_init_order.py
+test_backend_attach_race.py
+test_backend_exit_accounting.py
 
 # Refs #871: explicit loss-vector validity and sticky writer rejection.
 test_counter_vector
 test_writer_failure
 test_counter_failures.py
 test_counter_vector_portable.py
+test_core_merge_queue.py
+core_merge_queue_mutants.py
+
+# Refs #947, #871: coverage label U2a, pure verdict vs the frozen answer table.
+test_coverage_verdict
+coverage_verdict_mutants.py
+
+# Stateless evidence-v1 fixture-to-screen pilot and consumer boundary.
+test_pilot_route.py
+test_consumer_boundary.sh

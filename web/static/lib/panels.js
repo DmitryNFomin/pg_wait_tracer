@@ -23,12 +23,13 @@
 import {
     buildUnavailablePanel, buildEscalateControl, buildMetricsPanel,
     buildEscalateResult, fidelityOf, fidelityLabel, buildCompareFidelity,
-    SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
+    INCOMPLETE_FIDELITY, INCOMPLETE_CAPTURE_MESSAGE, fidelityBandStyle,
+    coverageOf, IN_FLIGHT_EXCLUDED_LABEL, IDLE_UNVERIFIED_LABEL,
 } from './builders/fidelity.js';
 import {
     controlEscalate, controlDeescalate, ControlUnavailable,
 } from './control.js';
-import { esc, fmtCount } from './format.js';
+import { esc, fmtCount, fmtTime } from './format.js';
 
 /* ── Per-pane fidelity badge (U2, review P10) ────────────────────────────────
  *
@@ -38,38 +39,134 @@ import { esc, fmtCount } from './format.js';
  * carries a compact chip that reuses the AAS chip's model surface
  * (fidelityOf/fidelityLabel) and its exact colors (the SAMPLED/MIXED band
  * fills + dashed borders from builders/fidelity.js), so "amber-dash =
- * sampled estimate" reads the same everywhere. Hidden for exact windows —
+ * sampled estimate" reads the same everywhere. Incomplete captures get a
+ * visible disclosure with the shared uncaptured style. Hidden for exact windows —
  * the common case stays noise-free, matching the AAS chip.
  *
  * buildPaneFidelity(data) -> null | { fidelity, label, fill, border, title }
  * (pure, Node-tested); paneFidelityBadgeHtml(model) -> HTML string (inline
  * styles: pane chrome ships with the component, no stylesheet dependency). */
-export function buildPaneFidelity(data) {
+export function buildPaneFidelity(data, opts) {
+    // U3: an incomplete coverage verdict names itself with the spec's label
+    // and the server's uncovered ranges; otherwise its marks ride along
+    // (opts.idle: the pane has Idle rows, so it carries that mark too).
+    const covBadge = buildCoverageBadge(data, opts);
+    if (covBadge && covBadge.coverage.withheld) return covBadge;
+    const cov = covBadge ? covBadge.coverage : coverageOf(data);
+    const marks = covBadge ? covBadge.marks : [];
     const fid = fidelityOf(data);
-    if (fid !== 'sampled' && fid !== 'mixed') return null;
+    if (fid === 'exact' || fid === 'none') return covBadge;
     const sampled = fid === 'sampled';
+    const style = fidelityBandStyle(fid);
     return {
         fidelity: fid,
-        label: fidelityLabel(fid),
-        fill: sampled ? SAMPLED_BAND_COLOR : MIXED_BAND_COLOR,
-        border: sampled ? SAMPLED_BORDER : MIXED_BORDER,
-        title: sampled
+        coverage: cov,
+        label: fid === INCOMPLETE_FIDELITY ? INCOMPLETE_CAPTURE_MESSAGE : fidelityLabel(fid),
+        fill: style.fill,
+        border: style.border,
+        title: fid === INCOMPLETE_FIDELITY ? INCOMPLETE_CAPTURE_MESSAGE : sampled
             ? 'This window is sampled-tier: counts and times in this pane ' +
               'are scaled estimates, not exact measurements.'
             : 'This window mixes sampled and exact capture: numbers in this ' +
               'pane may combine scaled estimates with exact measurements.',
+        marks,
+        ranges: covBadge ? covBadge.ranges : [],
     };
+}
+
+/* The coverage part of a pane badge alone, for record-level views (label
+ * only: their records stay). opts.idle adds the Idle-unverified mark, which
+ * only the views with Idle rows carry. null when there is nothing to say. */
+export function buildCoverageBadge(data, opts) {
+    const cov = coverageOf(data);
+    if (!cov) return null;
+    const style = fidelityBandStyle(INCOMPLETE_FIDELITY);
+    if (cov.withheld) {
+        return { fidelity: INCOMPLETE_FIDELITY, coverage: cov,
+            label: cov.label, title: cov.label,
+            fill: style.fill, border: style.border,
+            marks: [], ranges: cov.uncovered };
+    }
+    const marks = [];
+    // A3 item 1: a live_edge window's numbers end at covered_to.
+    if (cov.upTo) marks.push(cov.upTo);
+    if (cov.excludesInFlight) marks.push(IN_FLIGHT_EXCLUDED_LABEL);
+    if (opts && opts.idle && cov.idleUnverified) marks.push(IDLE_UNVERIFIED_LABEL);
+    if (!marks.length) return null;
+    const ranges = cov.liveEdge ? [cov.liveEdge] : [];
+    return { fidelity: fidelityOf(data), coverage: cov, label: null,
+        title: marks.concat(ranges.map(r => r.text)).join('; '),
+        fill: style.fill, border: style.border, marks, ranges };
+}
+
+/* One uncovered range as display text: UTC wall times, plus the spec's
+ * parenthetical for its reason where the spec names one. The live_edge
+ * clipped range has no end yet; its text names its start (A3 item 1). */
+export function coverageRangeText(r) {
+    if (r.live) return r.text;
+    const sub = (r.to - r.from) < 1e9;
+    const t = (ns) => fmtTime(ns, sub ? 1e6 : 0);
+    return t(r.from) + '–' + t(r.to) + (r.text ? ' ' + r.text : '');
+}
+
+function coverageRangesHtml(ranges) {
+    if (!ranges || !ranges.length) return '';
+    return '<ul class="coverage-ranges" style="margin:4px 0 0 16px;padding:0">' +
+        ranges.map(r => '<li>' + esc(coverageRangeText(r)) + '</li>').join('') +
+        '</ul>';
 }
 
 export function paneFidelityBadgeHtml(model) {
     if (!model) return '';
+    const marks = (model.marks || []).map(m =>
+        '<span class="coverage-mark">' + esc(m) + '</span>').join(' · ');
     return '<div class="pane-fidelity-badge" title="' + esc(model.title) +
-        '" style="display:inline-flex;align-items:center;gap:6px;' +
+        '" style="display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px;' +
         'margin:0 0 6px 2px;padding:2px 8px;border:1px dashed ' + model.border +
         ';border-radius:3px;background:' + model.fill +
         ';font-size:11px;color:#aaa">' +
         '<span style="width:8px;height:8px;border-radius:50%;background:' +
-        model.border + '"></span>' + esc(model.label) + '</div>';
+        model.border + '"></span>' +
+        (model.label ? esc(model.label) : '') +
+        (model.label && marks ? ' · ' : '') + marks +
+        coverageRangesHtml(model.ranges) + '</div>';
+}
+
+/* ── Coverage-withheld state (U3) ────────────────────────────────────────────
+ *
+ * A whole-window view whose server verdict is incomplete shows this instead
+ * of numbers: never exact, never zero. buildCoverageNotice(data) → null (the
+ * view may render) | { label, ranges, coverage }; coverageNoticeHtml(model)
+ * is the one rendering every withheld pane uses. */
+export function buildCoverageNotice(data) {
+    const cov = coverageOf(data);
+    if (!cov || !cov.withheld) return null;
+    return { label: cov.label, ranges: cov.uncovered, coverage: cov };
+}
+
+/* An empty-state placeholder ("No data …", "No events …") under an
+ * incomplete verdict would claim that nothing happened in time the capture
+ * never covered. Every view's empty state goes through this: the coverage
+ * notice takes the placeholder's place (and carries the label itself, so a
+ * view drops its own coverage badge alongside). `notice` is
+ * buildCoverageNotice(data) of the response the placeholder speaks for. */
+export function coverageEmptyStateHtml(notice, placeholderHtml) {
+    return notice ? coverageNoticeHtml(notice) : placeholderHtml;
+}
+
+/* Compare: either side withheld withholds every derived difference. */
+export function buildCompareCoverageNotice(dataA, dataB) {
+    return buildCoverageNotice(dataA) || buildCoverageNotice(dataB);
+}
+
+export function coverageNoticeHtml(model) {
+    if (!model) return '';
+    const style = fidelityBandStyle(INCOMPLETE_FIDELITY);
+    return '<div class="coverage-unavailable" role="status" style="margin:8px 2px;' +
+        'padding:10px 12px;border:1px dashed ' + style.border + ';border-radius:3px;' +
+        'background:' + style.fill + ';font-size:12px;color:#ccc">' +
+        '<div class="coverage-label">' + esc(model.label) + '</div>' +
+        coverageRangesHtml(model.ranges) + '</div>';
 }
 
 export function compareFidelityHtml(model) {
@@ -115,7 +212,8 @@ export function baselineUnavailableHtml(unavailable) {
  * the exact "N of M". Never fabricated client-side. */
 export function buildPercentileBasis(data) {
     const fid = fidelityOf(data);
-    if (fid === 'exact' || fid === 'none') return null;
+    // Incomplete capture is already disclosed by the pane badge.
+    if (fid === INCOMPLETE_FIDELITY || fid === 'exact' || fid === 'none') return null;
     const rows = (data && data.rows) || [];
     if (!rows.length) return null;
 

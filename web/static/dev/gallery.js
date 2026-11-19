@@ -47,7 +47,10 @@ import {
     buildFidelityShading, buildEscalationAnnotation, buildUnavailablePanel,
     buildMetricsPanel, buildEscalateControl, buildCompareFidelity,
 } from '../lib/builders/fidelity.js';
-import { compareFidelityHtml } from '../lib/panels.js';
+import {
+    compareFidelityHtml, buildPaneFidelity, paneFidelityBadgeHtml,
+    buildCoverageNotice, coverageNoticeHtml, coverageEmptyStateHtml,
+} from '../lib/panels.js';
 import { buildTableModel, mountTable } from '../lib/table.js';
 import { buildDeltaComparison } from '../lib/builders/compare.js';
 import {
@@ -274,6 +277,14 @@ function renderFidelity(body, foot, state) {
         hint.textContent = model.budgetText +
             ' · canEscalate=' + model.canEscalate +
             ' · canDeescalate=' + model.canDeescalate;
+    } else if (state.fn === 'pane') {
+        const card = div('panel-card', body);
+        card.innerHTML = paneFidelityBadgeHtml(buildPaneFidelity(...args));
+    } else if (state.fn === 'coverage') {
+        const model = buildCoverageNotice(...args);
+        const card = div('panel-card', body);
+        card.innerHTML = coverageNoticeHtml(model);
+        factLine(foot, 'verdict: ' + (model ? model.coverage.verdict : 'none'));
     } else if (state.fn === 'compare') {
         const model = buildCompareFidelity(...args);
         const card = div('panel-card', body);
@@ -484,7 +495,14 @@ function renderTimeline(body, foot, state) {
 
 function renderHistogram(body, foot, state) {
     const m = buildHeatmapOption(state.data, state.opts);
-    if (!m.hasData) { emptyCard(body, 'No data for selected event/range'); return; }
+    if (!m.hasData) {
+        // U3: the view's own empty-state rule (views/histogram.js): under an
+        // incomplete verdict the coverage notice replaces "No data".
+        const notice = coverageEmptyStateHtml(buildCoverageNotice(state.data), null);
+        if (notice) div('panel-card', body).innerHTML = notice;
+        else emptyCard(body, 'No data for selected event/range');
+        return;
+    }
     makeChart(div('chart', body), m.option, 340);
     // #105: not-captured count deliberately NOT appended here — a longer
     // fact line wraps to a 2nd line, growing the cell's height and reflowing

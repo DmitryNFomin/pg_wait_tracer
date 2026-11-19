@@ -24,6 +24,7 @@
  */
 
 import { BASE_NS, SEC_NS, MIN_NS, r4, tri } from './base.mjs';
+import { aasWindow, COV_FROM, COV_TO } from './coverage.mjs';
 
 const CLASS_KEYS = ['cpu', 'io', 'lock', 'lwlock', 'ipc', 'client', 'timeout',
     'bufferpin', 'activity', 'extension', 'unknown',
@@ -374,6 +375,46 @@ export const states = {
         data: allZeroData(),
         opts: { numCpus: 4, win: WIN_60 },
     },
+    'missing-bucket-zero': {
+        description: 'A missing bucket leaves a gap beside an observed zero; the partial bucket keeps IO and Lock visible despite missing offcpu.',
+        tags: ['CONTINUITY', 'SEMANTICS', 'fidelity'],
+        data: {
+            bucket_ns: B60, max_aas: 2.5,
+            buckets: [
+                classBucket(BASE_NS, { cpu: 1.5, io: 0.75, lock: 0.25 }),
+                { t: BASE_NS + B60, cpu: 1.5, io: 0.75, lock: 0.25 },
+                { t: BASE_NS + 2 * B60 },
+                classBucket(BASE_NS + 3 * B60, {}),
+                classBucket(BASE_NS + 4 * B60, { cpu: 1.5, io: 0.75, lock: 0.25 }),
+                classBucket(BASE_NS + 5 * B60, { cpu: 1.5, io: 0.75, lock: 0.25 }),
+            ],
+        },
+        opts: { numCpus: 0, win: { from: BASE_NS, to: BASE_NS + 5 * B60 } },
+    },
+    'not-captured-range': {
+        description: 'An uncaptured range is shaded and labelled Not captured beside exact data.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
+        data: {
+            bucket_ns: B60, max_aas: 1.5,
+            buckets: [
+                { t: BASE_NS }, { t: BASE_NS + B60 },
+                classBucket(BASE_NS + 2 * B60, { cpu: 1, io: 0.5 }),
+                classBucket(BASE_NS + 3 * B60, { cpu: 1, io: 0.5 }),
+            ],
+            fidelity: 'exact',
+            fidelity_ranges: [
+                { from: BASE_NS, to: BASE_NS + 2 * B60, fidelity: 'none' },
+                { from: BASE_NS + 2 * B60, to: BASE_NS + 4 * B60, fidelity: 'exact' },
+            ],
+        },
+        opts: { numCpus: 0, win: { from: BASE_NS, to: BASE_NS + 4 * B60 } },
+    },
+    'coverage-capture-loss': {
+        description: 'Incomplete coverage: the buckets over the uncovered range are missing (never zero) and shaded; the series either side stays.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'CONTINUITY', 'fidelity'],
+        data: aasWindow('capture_loss'),
+        opts: { numCpus: 4, win: { from: COV_FROM, to: COV_TO } },
+    },
     'one-huge-value': {
         description: 'Lock spikes to 480 in one bucket on a 64-vCPU host — worst case for y-axis flattening (P7).',
         tags: ['HIERARCHY'],
@@ -455,4 +496,7 @@ export const uplotStates = {
     'escalated-live-edge': states['escalated-live-edge'],
     'live-ticks': states['live-ticks'],
     'compare-ghostdiff': COMPARE_STATE,
+    'missing-bucket-zero': states['missing-bucket-zero'],
+    'not-captured-range': states['not-captured-range'],
+    'coverage-capture-loss': states['coverage-capture-loss'],
 };

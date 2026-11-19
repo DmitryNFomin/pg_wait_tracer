@@ -47,6 +47,27 @@ run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
 need node; need go; need python3
 
+# Sampled attribution: deterministic syscall budget and caught regressions.
+step "sampled attribution I/O budget and mutants"
+run python3 -B tests/test_sampled_attr_io.py
+# The live status-batch test's pure parts (perf summary parser, bounds) on outputs
+# recorded on the Ubuntu and EL8 gate images; the recorded master must assess RED.
+run python3 -B tests/test_sampler_batch_summary.py
+# Same portable C dispatch test as the box C tier, built outside the tree.
+if dispatch_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-sampler-dispatch-check.XXXXXX"); then
+    run python3 -B tests/build_sampler_dispatch.py --output "$dispatch_check_dir/test_sampler_dispatch"
+    run "$dispatch_check_dir/test_sampler_dispatch"
+    rm -rf "$dispatch_check_dir"
+else
+    echo "FAIL: cannot create sampler dispatch test directory"
+    fail=1
+fi
+
+step "watchpoint attach exit races (portable backend C harness)"
+run python3 -B tests/test_backend_attach_race.py --mutants
+run python3 -B tests/test_backend_exit_accounting.py
+run python3 -B tests/test_init_hint_known_class.py
+
 # Portable C core: this script builds/runs the contract C test in a temporary
 # directory. The differential compares against the independent reference;
 # every numerical mutant must then fail its intended distinguishing case.
@@ -78,10 +99,46 @@ else
 fi
 run python3 -B tests/test_ledger.py
 
+step "stateless evidence-v1 pilot route, browser, uint64 and mutations"
+run python3 -B tests/check_server_test_links.py --self-test
+run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py --require-browser
+run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py --mutants
+run bash tests/test_consumer_boundary.sh --self-test
+
+step "core merge index and queue differential, work bounds and mutants (Refs #926)"
+run env CFLAGS="$core_cflags" python3 -B tests/test_core_merge_index.py
+run env CFLAGS="$core_cflags" python3 -B tests/core_merge_index_mutants.py
+run env CFLAGS="$core_cflags" python3 -B tests/test_core_merge_queue.py
+run env CFLAGS="$core_cflags" python3 -B tests/core_merge_queue_mutants.py
+
 # core-status runs the portable merge/evidence contract, differential, codec,
 # redelivery and report suites (including their mutants) once in this run.
 step "C11 synthetic merge adapter: wire goldens, contract replay and rule mutants (Refs #871)"
 run env CFLAGS="$core_cflags" bash tests/core_merge_adapter_mutants.sh
+
+step "U1b transport wire golden bytes and registered A1/B seams (host C)"
+if transport_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-transport-check.XXXXXX"); then
+    for suite in transport_wire transport_producers percpu_transport; do
+        transport_sources=("tests/test_${suite}.c")
+        if [[ $suite == percpu_transport ]]; then
+            transport_sources+=(src/percpu_transport.c src/merge_capture.c
+                               src/core/merge_adapter.c src/core/merge.c)
+        fi
+        if "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+            -DPGWT_TRANSPORT_HOST_TEST \
+            -fno-omit-frame-pointer "${transport_sources[@]}" \
+            -o "$transport_check_dir/$suite"; then
+            run "$transport_check_dir/$suite"
+        else
+            echo "FAIL: transport $suite compilation"
+            fail=1
+        fi
+    done
+    rm -rf "$transport_check_dir"
+else
+    echo "FAIL: transport temporary directory"
+    fail=1
+fi
 
 # Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv
 # pin mismatch is reported clearly instead of the UI suite silently skipping
@@ -146,6 +203,9 @@ run python3 scripts/lead/selftest-pr-state.py
 
 step "box build provenance offline self-test (#861)"
 run bash tests/test_box_check_build_provenance.sh
+
+step "detached box-check transport recovery offline self-test"
+run bash tests/test_box_check_detached.sh
 
 step "lead hooks and box evidence offline self-test (#861)"
 run bash scripts/lead/selftest.sh
@@ -423,6 +483,9 @@ step "cross-validate tolerance derivation + bypass suite (issues #294/#306/#321)
 run bash tests/test_xval_tolerance_derivation.sh
 
 if [[ $FAST -eq 0 ]]; then
+    step "overhead gate liveness and stall evidence controls (#951)"
+    run python3 -B tests/test_overhead_harness.py
+
     # ── Port allocation (so two `make check` runs on this Mac don't collide) ─
     # One free base per run, laid out at FIXED OFFSETS below so every mock
     # server this run spawns gets a run-private port; no lock (that would

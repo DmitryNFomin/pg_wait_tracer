@@ -1,0 +1,56 @@
+row	window	verdict	reasons	mark	note
+1	a [10,50)	complete	[]		detail: S=0 E=100
+1	b [10,100)	complete	[]		
+1	c [90,110)	incomplete	[not_captured]		detail: u[100,110) not_captured (sealed, single boot: rules 1-8 do not apply)
+2	a [50,150)	incomplete	[restart]		detail: u[100,130) restart; restart_cause daemon (same postmaster start)
+2	b [100,130)	incomplete	[restart]		detail: u(100,130) restart (point 100 is inside closed [0,100]); restart_cause daemon
+2	c [130,200)	complete	[]		
+3	[50,150)	incomplete	[restart]		detail: no uncovered point; window-level rule (meets B1 and B2); restart_cause daemon
+4	[90,140)	incomplete	[restart]		detail: u[100,130) restart; restart_cause postgresql
+5	a [10,90)	complete	[]		detail: unsealed non-live, E=floor_db=95
+5	b [90,96)	incomplete	[unclean_end]		detail: u[95,96) unclean_end (no next boot, read as unbounded)
+6	a [50,100)	complete	[]		detail: E=100
+6	b [50,101)	incomplete	[unclean_end]		detail: u[100,101) unclean_end
+7	a [50,100)	complete	[]	xf	detail: live, E=W=100; fd 40 < 100
+7	b [40,101)	live_edge	[]	xf	detail: covered_to 100; to-W=1; fd 40 < 101
+7	c [50,105)	incomplete	[not_yet_covered]		detail: u[100,105) not_yet_covered (to-W=5 > L). NOTE: §2 Output formula (b live AND fd 40 < 105) gives xf=true on an incomplete window; §0 C3 scopes the mark to complete/live_edge, so the mark here is formula-only and moot
+8	[50,100)	incomplete	[unclean_end]		detail: not live (now-obs=9.5 > L), E=floor_db=40; u[50,100) unclean_end
+9	a [10,50)	complete	[]		detail: live, E=60; taint_from=55 (wm 60/55, W<=60), T=[55,inf); no xf since fd 55 >= to 50
+9	b [50,58)	incomplete	[capture_loss]		detail: u[55,58) capture_loss. NOTE: xf from §2 formula (live, 55 < 58) on an incomplete window; C3 scopes it to complete/live_edge
+9	c [70,80)	incomplete	[capture_loss]		detail: u[70,80) capture_loss (rule 1 precedes not_yet_covered). NOTE: xf from §2 formula (live, 55 < 80) on an incomplete window; C3 scopes it to complete/live_edge
+10	a [70,100)	complete	[]		detail: taint_from=55 (wm 58/55), T=[55,70)
+10	b [20,55)	complete	[]		
+10	c [20,56)	incomplete	[capture_loss]		detail: u[55,56) capture_loss
+11	[90,100)	incomplete	[capture_loss]		detail: taint_from=75 (last wm with W<=80 is 78/75, file order irrelevant), T=[75,160); u[90,100) capture_loss
+12	[100,150)	incomplete	[capture_loss]		detail: taint_from=55, T=[55,inf); u[100,150) capture_loss
+13	a [300,500)	incomplete	[retention]		"detail: S=max(0,400)=400; u[300,400) retention. NOTE: §2 Holes defines ""a missing file_no k"" as a hole with no exclusion for leading files removed by retention; if they counted, missing_file (rule 2) would precede retention, but the hole start floor(last valid W before it) is undefined (no earlier W), so I applied rule 4 per the §2 retention-cut sentence"
+13	b [400,500)	complete	[]		
+14	a [50,150)	incomplete	[missing_file]		detail: hole [90,200) (floor of last valid W in f0 = 90, BOOT obs f2 = 200); E=W_final=300; u[90,150) missing_file
+14	b [210,250)	complete	[]		
+14	c [50,90)	complete	[]		
+15	[10,20)	incomplete	[not_recorded]		detail: u[10,20) not_recorded
+16	[90,130)	incomplete	[not_recorded, not_captured]		detail: u[90,100) not_recorded, u[100,120) not_captured; legacy data is not a recorded boot, so no window-level restart and rule 5 does not apply
+17	a [1050,1080)	complete	[]		detail: B1 wall [1000,1100], B2 wall [5010,5050]
+17	b [1090,5020)	incomplete	[restart]		detail: u[1100,5010) restart (rule 5 precedes clock_step); restart_cause daemon
+18	[80,95)	incomplete	[unclean_end]		detail: SEAL + UNCLEAN = unsealed; not live; E=floor_db=90; u[90,95) unclean_end
+19	[90,100)	incomplete	[capture_loss]		detail: live, E=100; taint_from=97 (wm 97.5/97), T=[97,99); not live_edge (to-W=0); u[97,99) capture_loss; no xf (fd 100 not < 100)
+20	a [46,48)	incomplete	[capture_loss]		detail: taint_from=45, T=[45,50); u[46,48) capture_loss
+20	b [40,44)	complete	[]		
+21	[0,0.4)	incomplete	[capture_loss]		detail: no wm with W<=0.5, taint_from=boot_start=0, T=[0,inf); u[0,0.4) capture_loss
+22	[50,50)	error	[invalid_window]		detail: from >= to
+23	[50,150)	incomplete	[not_captured]		detail: S=boot_start=100 so retention range empty; one boot; u[50,100) not_captured
+24	a [140,170)	complete	[]		detail: B2 live, E2=200; no xf (fd 180 not < 170)
+24	b [140,190)	complete	[]	xf	detail: fd 180 < 190
+24	c [90,150)	incomplete	[restart]		detail: meets two boots; u[100,130) restart; restart_cause daemon; xf formula false (180 not < 150)
+24	d [150,203)	live_edge	[]	xf	detail: covered_to 200; to-W=3 <= L
+25	a [70,100)	incomplete	[missing_file]		detail: hole [75,150) (floor of last valid W 80/75, BOOT obs f1 = 150); u[75,100) missing_file
+25	b [160,190)	complete	[]		
+25	c [10,75)	complete	[]		
+26	a [10,50)	complete	[]		detail: live (now-obs=0.5), E=W=60; no xf (fd 58 not < 50)
+26	b [55,62)	live_edge	[]	xf	detail: covered_to 60; to-W=2
+26	c [50,70)	incomplete	[not_yet_covered]		detail: u[60,70) not_yet_covered. NOTE: xf from §2 formula (live, 58 < 70) on an incomplete window; C3 scopes it to complete/live_edge
+27	[50,100)	complete	[]		detail: not live, E=floor_db=100
+28	a [20,70)	complete	[]		detail: E=floor_db=70
+28	b [20,80)	incomplete	[unclean_end]		detail: u[70,80) unclean_end
+29	[50,90)	complete	[]		"detail: DB E=95 complete; idle verdict (E=floor_idle=20) incomplete [unclean_end] u[50,90) => Idle rows null, ""Idle time unverified"""
+30	[50,100)	complete	[]		detail: live, E=100; no xf (fd 100 not < 100)

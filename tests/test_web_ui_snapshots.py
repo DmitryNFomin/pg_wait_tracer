@@ -49,12 +49,14 @@ No root, no PG, no SSH — uses mock_server.py, exactly like test_web_ui.py.
 """
 import collections
 import fnmatch
+import json
 import os
 import socket
 import sys
 import subprocess
 import time
 import signal
+import urllib.parse
 
 try:
     from playwright.sync_api import sync_playwright
@@ -105,6 +107,11 @@ SAMPLED_URL = app_url(SAMPLED_PORT)
 # the fixtures are fully deterministic, see web/static/dev/fixtures/).
 GALLERY_URL = f"http://127.0.0.1:{MOCK_PORT}/dev/gallery.html"
 
+# App-panel gallery cells use the real Events mount and mock WebSocket route.
+# These registrations share request/response fixtures with mock_server.py.
+with open(os.path.join(os.path.dirname(__file__), "fixtures", "pilot-responses.json")) as _pilot_file:
+    PILOT_CELLS = json.load(_pilot_file)
+
 # Gallery cells snapshotted at the tight GALLERY_* tolerance. Cell DOM ids are
 # the manifest's stable 'gallery-<builder>-<state>' contract
 # (web/static/dev/fixtures/manifest.mjs); baseline name = gallery/<builder>-<state>.
@@ -118,6 +125,9 @@ GALLERY_STATIC_CELLS = [
     "gallery-aas-escalated-live-edge",          # fidelity: escalation edge line
     "gallery-aas-unicode-names",                # i18n event names
     "gallery-aas-empty",                        # empty state (placeholder card)
+    "gallery-aas-missing-bucket-zero",          # missing bucket beside real zero
+    "gallery-aas-not-captured-range",           # explicit uncaptured shading
+    "gallery-aas-coverage-capture-loss",        # U3: uncovered buckets missing + shaded
     # U2b renderer-swap twins: the SAME aas fixture states (shared by
     # reference in dev/fixtures/aas.mjs) through buildUplotSpec + a real
     # uPlot mount — one data source, two renderers. The echarts aas-* cells
@@ -129,12 +139,25 @@ GALLERY_STATIC_CELLS = [
     "gallery-uplot-aas-mixed-escalation",       # uPlot: mixed + escalation band
     "gallery-uplot-aas-escalated-live-edge",    # uPlot: edge vline (drop-never-move)
     "gallery-uplot-aas-compare-ghostdiff",      # U4: B total ghost + signed diff lane
+    "gallery-uplot-aas-missing-bucket-zero",    # same payload through uPlot
+    "gallery-uplot-aas-not-captured-range",     # grey band with Not captured text inside plot
+    "gallery-uplot-aas-coverage-capture-loss",  # U3: same coverage payload through uPlot
     "gallery-fidelity-compare-mismatch",         # U4: exact-vs-sampled warning chip
     "gallery-fidelity-compare-predates",         # U4: quiet retention-edge note
+    "gallery-fidelity-pane-unknown",             # incomplete pane badge
+    "gallery-fidelity-compare-unknown",          # incomplete compare header
+    "gallery-fidelity-compare-unknown-unavailable", # no delta with unavailable B
+    "gallery-fidelity-coverage-capture-loss",    # U3: withheld pane, cause + range
+    "gallery-fidelity-coverage-restart-postgres", # U3: withheld pane, restart cause
+    "gallery-fidelity-pane-in-flight-excluded",  # U3: in-flight time excluded mark
+    "gallery-fidelity-pane-idle-unverified",     # U3: Idle time unverified mark
+    "gallery-fidelity-pane-live-edge",           # U3 r2: up-to label + live-edge range text
     "gallery-timeline-dense-50pids",            # dense timeline (480px cap)
     "gallery-timeline-dense-one-row",           # #106 per-pixel class stacks
     "gallery-timeline-single-point",            # degenerate timeline
     "gallery-histogram-dense",                  # dense heatmap
+    "gallery-histogram-coverage-capture-loss",  # U3: uncovered buckets shaded, cells absent
+    "gallery-histogram-coverage-not-recorded",  # U3 r3: notice in place of "No data", never both
     "gallery-concurrency-dense-bursts",         # overlay chart + burst tables
     "gallery-waterfall-dense-plan-3lanes",      # leader/workers + plan band
     "gallery-exec-scatter-dense-downsampled",   # log latency modes + count note
@@ -180,18 +203,34 @@ GALLERY_EVIDENCE = {
     "gallery-aas-escalated-live-edge": [".chart"],
     "gallery-aas-unicode-names": [".chart"],
     "gallery-aas-empty": [("text", "^No data in selected range$")],
+    "gallery-aas-missing-bucket-zero": [".chart"],
+    "gallery-aas-not-captured-range": [".chart"],
+    "gallery-aas-coverage-capture-loss": [".chart"],
     "gallery-uplot-aas-dense": [".chart"],
     "gallery-uplot-aas-dense-events": [".chart"],
     "gallery-uplot-aas-sampled": [".chart"],
     "gallery-uplot-aas-mixed-escalation": [".chart"],
     "gallery-uplot-aas-escalated-live-edge": [".chart"],
     "gallery-uplot-aas-compare-ghostdiff": [".chart"],
+    "gallery-uplot-aas-missing-bucket-zero": [".chart"],
+    "gallery-uplot-aas-not-captured-range": [".chart"],
+    "gallery-uplot-aas-coverage-capture-loss": [".chart"],
     "gallery-fidelity-compare-mismatch": [".cell-body"],
     "gallery-fidelity-compare-predates": [".cell-body"],
+    "gallery-fidelity-pane-unknown": [".pane-fidelity-badge"],
+    "gallery-fidelity-compare-unknown": [".compare-evidence", ("text", "Incomplete capture")],
+    "gallery-fidelity-compare-unknown-unavailable": [".compare-evidence", ("text", "No comparison:")],
+    "gallery-fidelity-coverage-capture-loss": [".coverage-unavailable", ("text", "Coverage unverified")],
+    "gallery-fidelity-coverage-restart-postgres": [".coverage-unavailable", ("text", "PostgreSQL restart")],
+    "gallery-fidelity-pane-in-flight-excluded": [".pane-fidelity-badge", ("text", "in-flight time excluded")],
+    "gallery-fidelity-pane-idle-unverified": [".pane-fidelity-badge", ("text", "Idle time unverified")],
+    "gallery-fidelity-pane-live-edge": [".pane-fidelity-badge", ("text", "Live — not yet confirmed after")],
     "gallery-timeline-dense-50pids": [".cell-body"],
     "gallery-timeline-dense-one-row": [".chart"],
     "gallery-timeline-single-point": [".chart"],
     "gallery-histogram-dense": [".chart"],
+    "gallery-histogram-coverage-capture-loss": [".chart"],
+    "gallery-histogram-coverage-not-recorded": [".coverage-unavailable", ("text", "coverage not recorded")],
     "gallery-concurrency-dense-bursts": [".chart"],
     "gallery-waterfall-dense-plan-3lanes": [".chart"],
     "gallery-exec-scatter-dense-downsampled": [".chart"],
@@ -606,6 +645,33 @@ def snap_exact_suite(page):
         capture_failure(page, "session_timeline", "no session row to drill")
 
 
+def snap_pilot_suite(page):
+    """Opt-in Events pilot cells, using frozen scenarios 01 and 05."""
+    for cell in PILOT_CELLS:
+        if not selected(cell["name"]):
+            continue
+        params = {"pilot": "1"}
+        for fields in cell["request"].values():
+            params.update({"pilot_" + key: "" if value is None else str(value)
+                           for key, value in fields.items()})
+        page.goto(MOCK_URL + "&" + urllib.parse.urlencode(params))
+        page.locator('[data-tab="events"]').click()
+        panel = page.locator('#events-pilot')
+        panel.locator('[data-metric="wait_time"] [data-value]').wait_for()
+        for name in ("wait_time", "completed_waits"):
+            metric = panel.locator(f'[data-metric="{name}"]')
+            expected = cell["response"][name]
+            assert metric.locator('[data-value]').inner_text() == (
+                'unavailable' if expected['value'] is None else expected['value'])
+            assert metric.locator('[data-completeness]').inner_text() == expected['completeness']
+            assert metric.locator('[data-reason-token]').all_inner_texts() == expected['reasons']
+        rendered = panel.locator('.pilot-result').inner_text()
+        assert [line for line in rendered.splitlines() if line] == cell['rendered_result_lines'], repr(rendered)
+        snapshot(page, cell["name"], "#events-pilot",
+                 pixel_threshold=GALLERY_PIXEL_THRESHOLD,
+                 max_diff_ratio=GALLERY_MAX_DIFF_RATIO)
+
+
 def snap_fidelity_suite(page):
     """B5 fidelity-state snapshots against the sampled + daemon mock."""
     print("--- Snapshots: sampled/daemon mock (B5 fidelity states) ---")
@@ -897,6 +963,7 @@ def main():
             exact_page = exact_ctx.new_page()
             attach_console_tail(exact_page)
             snap_exact_suite(exact_page)
+            snap_pilot_suite(exact_page)
             exact_ctx.close()
 
             sampled_ctx = browser.new_context(**ctx_kw)

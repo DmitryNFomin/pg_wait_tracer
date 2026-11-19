@@ -125,11 +125,14 @@ static cJSON *build_status(const struct pgwt_daemon *d)
                             pgwt_pgbs_source_name(
                                 d->backend_status_layout.source));
     cJSON_AddStringToObject(root, "pgbackend_layout_validation",
-                            pgwt_pgbs_validation_name(
-                                d->backend_status_layout.validation));
+                            pgwt_pgbs_status_name(&d->backend_status_layout));
+    cJSON_AddStringToObject(root, "pgbackend_layout_reason", d->backend_status_layout.detail);
     cJSON_AddNumberToObject(root, "pgbackend_layout_fallback_fields",
                             pgwt_pgbs_fallback_count(
                                 &d->backend_status_layout));
+    if (d->backend_status_layout.major == 13)
+        cJSON_AddStringToObject(root, "sampled_attr_pg13_route",
+            d->backend_status_layout.pg13_computed ? "computed" : "scan");
     cJSON_AddStringToObject(root, "sampled_attr_source",
                             pgwt_pgbs_sampled_attr_enabled(
                                 &d->backend_status_layout)
@@ -145,6 +148,10 @@ static cJSON *build_status(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "exact_probe_generation",
                      d->escalation.generation);
     pgwt_exact_probe_add_attach_status(root, &d->exact_probes.core);
+    cjson_add_uint64(root, "exact_preseed_unpublished_total", d->counters.exact_preseed_unpublished_total);
+    cjson_add_uint64(root, "exact_preseed_wait_addr_refreshed_total", d->counters.exact_preseed_wait_addr_refreshed_total);
+    cjson_add_uint64(root, "exact_preseed_reread_total", d->counters.exact_preseed_reread_total);
+    cjson_add_uint64(root, "exact_preseed_torn_exhausted_total", d->counters.exact_preseed_torn_exhausted_total);
     cJSON_AddBoolToObject(root, "exact_probe_warmup_reconciled",
                           d->exact_probes.sampled_warmup_reconciled);
     cJSON_AddBoolToObject(root, "exact_cpu_active", d->exact_cpu_active);
@@ -241,9 +248,17 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "lifecycle_events_total",
                      ctr->lifecycle_events_total);
 
-    /* Watchpoint attach failures (incremented in backend.c) */
+    /* Watchpoint failures partitioned by target liveness (backend.c). */
     cjson_add_uint64(root, "wp_attach_failures_total",
                      ctr->wp_attach_failures_total);
+    cjson_add_uint64(root, "wp_attach_exit_race_total",
+                     ctr->wp_attach_exit_race_total);
+    cjson_add_uint64(root, "wp_attach_failures_live_total",
+                     ctr->wp_attach_failures_live_total);
+    cjson_add_uint64(root, "wp_attach_failures_unknown_total",
+                     ctr->wp_attach_failures_unknown_total);
+    cjson_add_uint64(root, "wp_attach_failures_gone_total",
+                     ctr->wp_attach_failures_gone_total);
 
     cJSON_AddNumberToObject(root, "backends_tracked", count_backends(d));
 
@@ -254,8 +269,14 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->sample_read_faults_total);
     cjson_add_uint64(root, "pgbackend_layout_fallbacks_total",
                      ctr->pgbackend_layout_fallbacks_total);
+    cjson_add_uint64(root, "sampled_attr_pg13_recovery_degraded_total",
+                     d->backend_status_layout.pg13_recovery_degraded_total);
+    cjson_add_uint64(root, "sampled_attr_pg13_scan_fallbacks_total",
+                     ctr->sampled_attr_pg13_scan_fallbacks_total);
     cjson_add_uint64(root, "sampled_attr_tick_read_failures_total",
                      ctr->sampled_attr_tick_read_failures_total);
+    cjson_add_uint64(root, "sampled_attr_tick_idle_samples_total",
+                     ctr->sampled_attr_tick_idle_samples_total);
     cjson_add_uint64(root, "sampled_attr_tick_no_context_total",
                      ctr->sampled_attr_tick_no_context_total);
     /* SCOPE (#294), repeated here because a metrics scrape sees these keys and
@@ -320,6 +341,23 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cJSON_AddNumberToObject(root, "exact_preseed_entries",
                             pgwt_exact_seed_count((struct pgwt_daemon *)d,
                                                   d->escalation.generation));
+    cJSON_AddNumberToObject(root, "exact_preseed_no_command_entries",
+        d->exact_probes.preseed_generation == d->escalation.generation
+            ? d->exact_probes.preseed_no_command : 0);
+    cjson_add_uint64(root, "exact_preseed_no_command_total", ctr->exact_preseed_no_command_total);
+    cjson_add_uint64(root, "exact_preseed_gone_total", ctr->exact_preseed_gone_total);
+    cjson_add_uint64(root, "exact_preseed_exiting_total", ctr->exact_preseed_exiting_total);
+    cjson_add_uint64(root, "exact_preseed_null_entry_total", ctr->exact_preseed_null_entry_total);
+    cjson_add_uint64(root, "exact_preseed_startup_total", ctr->exact_preseed_startup_total);
+    cjson_add_uint64(root, "exact_preseed_unpublished_total", ctr->exact_preseed_unpublished_total);
+    cjson_add_uint64(root, "exact_preseed_wait_addr_refreshed_total", ctr->exact_preseed_wait_addr_refreshed_total);
+    cjson_add_uint64(root, "exact_preseed_reread_total", ctr->exact_preseed_reread_total);
+    cjson_add_uint64(root, "exact_preseed_torn_exhausted_total", ctr->exact_preseed_torn_exhausted_total);
+    cjson_add_uint64(root, "exact_preseed_retired_zero_total", ctr->exact_preseed_retired_zero_total);
+    cjson_add_uint64(root, "exact_preseed_retired_other_pid_total", ctr->exact_preseed_retired_other_pid_total);
+    cjson_add_uint64(root, "exact_preseed_failures_total", ctr->exact_preseed_failures_total);
+    cjson_add_uint64(root, "exact_preseed_overwrite_refusals_total", ctr->exact_preseed_overwrite_refusals_total);
+    cjson_add_uint64(root, "exact_preseed_late_attach_failures_total", ctr->exact_preseed_late_attach_failures_total);
     cjson_add_uint64(root, "sample_read_failures_total",
                      pm.sample_read_failures_total);
     cJSON_AddNumberToObject(root, "sample_read_targets",
@@ -374,6 +412,14 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     for (unsigned i = 0; i < sizeof(new_counters) / sizeof(*new_counters); ++i)
         cjson_add_counter(root, new_counters[i].name, cv.components[new_counters[i].component]);
     cjson_add_uint64(root, "init_state_read_fail_total", ctr->init_state_read_fail_total);
+    cjson_add_uint64(root, "lifecycle_exit_before_attach_total",
+                     ctr->lifecycle_exit_before_attach_total);
+    cjson_add_uint64(root, "lifecycle_exit_before_attach_with_opportunity_total",
+                     ctr->lifecycle_exit_before_attach_with_opportunity_total);
+    cjson_add_uint64(root, "lifecycle_exit_before_attach_no_opportunity_total",
+                     ctr->lifecycle_exit_before_attach_no_opportunity_total);
+    cjson_add_uint64(root, "lifecycle_exit_before_attach_unknown_total",
+                     ctr->lifecycle_exit_before_attach_unknown_total);
     cjson_add_uint64(root, "lifecycle_init_lost_total",
                      ctr->lifecycle_init_lost_total);
     cjson_add_uint64(root, "lifecycle_init_lost_with_opportunity_total",

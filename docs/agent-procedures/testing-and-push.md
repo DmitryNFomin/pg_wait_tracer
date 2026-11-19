@@ -32,6 +32,13 @@
   require the expected nonzero exit code and any other failure fails the gate;
   outside that scope the test must pass normally.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#known-failing-invocations`)
+
+  Temporary entry `test_init_hint_recovery|959|ubuntu@6.8|exit=93` accepts only
+  the diagnosed K1/K2/K3 classes by exact signature, in either recovery arm and
+  including postmaster children the test did not create, within a shared cap of
+  `KNOWN_CLASS_CAP = 2` PIDs per run, after the remaining checks and the
+  skipped-store control pass. Every other failure stays red. Remove the entry
+  and exception in the PR that fixes #959 (owner, #933 comment 6984201938).
 - Never commit locally generated PNGs to `tests/web_snapshots/`; baselines are
   regenerated only by CI's `snapshots` job.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#snapshot-provenance`)

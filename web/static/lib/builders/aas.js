@@ -31,6 +31,7 @@ import {
 } from '../format.js';
 import {
     buildFidelityShading, buildEscalationAnnotation, fidelityOf, fidelityLabel,
+    coverageOf, aasScaleMax,
 } from './fidelity.js';
 
 /* Name of the dedicated silent annotation series that carries EVERY mark
@@ -117,7 +118,8 @@ export function buildAasOption(data, opts) {
         });
         seriesDefs = order.map(o => ({
             name: o.name,
-            data: buckets.map(b => [nsToMs(b.t), +(b.aas[o.idx] || 0).toFixed(4)]),
+            data: buckets.map(b => [b?.t == null ? null : nsToMs(b.t),
+                b?.aas?.[o.idx] == null ? null : +b.aas[o.idx].toFixed(4)]),
         }));
         // Identity-keyed color: a deterministic tint of the class hue (U1
         // color service) — same event, same color, in every view, every tick.
@@ -136,24 +138,25 @@ export function buildAasOption(data, opts) {
         // classes. Conservation (T8, #187): a bucket's 'offcpu' key is 0 (not
         // absent) wherever no measured cpu_ns exists — sampled windows and a
         // tier switch mid-window both fall out of this same per-bucket sum
-        // with no special-casing, so the stack never silently under-totals.
+        // with no special-casing. Missing keys remain gaps, never measured zero.
         seriesDefs = AAS_CLASS_ORDER.map(wc => ({
             name: wc.label,
-            data: buckets.map(b => [nsToMs(b.t), +(b[wc.key] || 0).toFixed(4)]),
+            data: buckets.map(b => [b?.t == null ? null : nsToMs(b.t),
+                b?.[wc.key] == null ? null : +b[wc.key].toFixed(4)]),
         }));
         seriesColors = AAS_CLASS_ORDER.map(c => c.color);
         seriesIds = AAS_CLASS_ORDER.map(() => null);   // class drills go by name
     }
 
-    const maxAas = (data && data.max_aas) || 0;
+    const maxAas = aasScaleMax(data);
     const policyMax = policyYMax(maxAas, numCpus);
     const yMax = opts.appliedYMax != null ? opts.appliedYMax : policyMax;
 
     // Fallback extent when no window is supplied (Node tests, degenerate
     // callers): the bucket span, or a 1 ms placeholder for empty data (the
     // empty state is never mounted — views clear the chart instead).
-    const xMinNs = buckets.length ? buckets[0].t : 0;
-    const xMaxNs = buckets.length ? buckets[buckets.length - 1].t : NS_PER_MS;
+    const xMinNs = buckets.find(b => b?.t != null)?.t ?? 0;
+    const xMaxNs = buckets.findLast(b => b?.t != null)?.t ?? NS_PER_MS;
     const win = opts.win || { from: xMinNs, to: xMaxNs };
 
     // Pinned axis extent = (opts.axis ∪ win). U0's clamp-to-last-bucket-start
@@ -173,6 +176,7 @@ export function buildAasOption(data, opts) {
         areaStyle: { opacity: 0.85 },
         lineStyle: { width: 1 },
         symbol: 'none',
+        connectNulls: false,
         emphasis: { disabled: true },
         color: seriesColors[i],
         // U2 (P3 wire 1): since ECharts 5.2.2 triggerLineEvent packs event
@@ -381,6 +385,7 @@ export function buildAasOption(data, opts) {
         // Fidelity surface (B5): drives the sampled/exact legend chip + tooltip.
         fidelity: fidelityOf(data),
         fidelityLabel: fidelityLabel(fidelityOf(data)),
+        coverage: coverageOf(data),
         shading,
         escalation: escAnno,
         // U2a camera geometry (ns): the pinned axis extent and the visible
@@ -390,6 +395,32 @@ export function buildAasOption(data, opts) {
         axisRange: { from: axisFromNs, to: axisToNs },
         window: { from: win.from, to: win.to },
     };
+}
+
+/* Status-line peak text shared by both renderers (views/active.js). A
+ * window whose coverage verdict is incomplete shows the coverage label in
+ * place of its whole-window peak: never a number, never zero; a live_edge
+ * peak says where its data ends. */
+export function aasPeakText(model) {
+    const cov = model && model.coverage;
+    if (cov && cov.withheld) return cov.label;
+    // A3 item 1: a live_edge peak covers [from, covered_to) only.
+    const upTo = cov && cov.upTo ? ' (' + cov.upTo + ')' : '';
+    return 'peak ' + ((model && model.maxAas) || 0).toFixed(1) + ' AAS' + upTo;
+}
+
+/* Empty-window text shared by both renderers (views/active.js): the chart
+ * card and the status line. An empty window under an incomplete verdict is
+ * time the capture never covered, so it reads as the coverage label, never
+ * "No data". */
+export const AAS_EMPTY_TEXT = 'No data in selected range';
+export function aasEmptyText(model) {
+    const cov = model && model.coverage;
+    return cov && cov.withheld ? cov.label : AAS_EMPTY_TEXT;
+}
+export function aasEmptyStatusText(model) {
+    const cov = model && model.coverage;
+    return cov && cov.withheld ? cov.label : 'no data';
 }
 
 /* Label of the 'offcpu' WAIT_CLASSES entry — used to spot it among tooltip

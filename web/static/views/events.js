@@ -21,14 +21,17 @@
  *     'histogram-event' pivot intent via ctx.onDrill; row-click unchanged).
  */
 
+import { mountEventsPilot, unmountEventsPilot } from './events-pilot.js';
+
 import {
     buildTableModel, buildTruncationRow, createStableOrder, applyDefaultOrder,
     createOrderResetGate, orderResetKey,
 } from '../lib/table.js';
 import {
     eventsConfig, compareEventsConfig, buildOverflowNote, overflowNoteHtml,
-    addCpuWaitingRow,
+    addCpuWaitingRow, maskUnverifiedIdleEvents,
 } from '../lib/builders/table-configs.js';
+import { coverageOf } from '../lib/builders/fidelity.js';
 import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
 import { shiftWindow } from '../lib/camera.js';
 import { settleBaseline } from '../lib/compare-request.js';
@@ -37,7 +40,14 @@ import {
     buildPercentileBasis, percentileBasisHtml,
     buildComparePaneFidelity, compareFidelityHtml,
     baselineUnavailableHtml,
+    buildCoverageNotice, buildCompareCoverageNotice, coverageNoticeHtml,
 } from '../lib/panels.js';
+
+/* U3: idle rows follow the server's idle verdict (coverageOf). */
+function eventRows(data) {
+    const cov = coverageOf(data);
+    return maskUnverifiedIdleEvents(addCpuWaitingRow(data), !!(cov && cov.idleUnverified));
+}
 
 /* PURE: top_events response + sort -> render model. Exported for testing.
  * #440 (contract item 6): `orderTracker` (lib/table.js createStableOrder,
@@ -47,14 +57,21 @@ import {
  * caller/test that does not pass one keeps today's plain order -- a REAL
  * production call always passes one (createEventsView() below). */
 export function buildEventsModel(data, sort, orderTracker) {
+    // U3: an incomplete coverage verdict withholds the whole table; in
+    // compare mode either side withholds every delta.
+    const notice = (data && data.compare)
+        ? (data.baselineUnavailable ? buildCoverageNotice(data.a)
+            : buildCompareCoverageNotice(data.a, data.b))
+        : buildCoverageNotice(data);
+    if (notice) return { coverageNotice: notice, hasRows: false, compare: !!(data && data.compare) };
     if (data && data.compare && data.baselineUnavailable) {
         const primary = data.a;
-        const rows = addCpuWaitingRow(primary);
+        const rows = eventRows(primary);
         const ordered = orderTracker ? applyDefaultOrder(orderTracker, rows, sort) : rows;
         return {
             hasRows: rows.length > 0,
             table: buildTableModel(eventsConfig, ordered, sort),
-            paneFidelity: buildPaneFidelity(primary),
+            paneFidelity: buildPaneFidelity(primary, { idle: true }),
             percentileBasis: buildPercentileBasis(primary),
             overflowNote: buildOverflowNote(rows),
             truncation: buildTruncationRow(primary),
@@ -72,8 +89,8 @@ export function buildEventsModel(data, sort, orderTracker) {
         // the extra row. Scoped to 'events': this file is the only caller
         // passing augmented inputs into buildDeltaComparison, so 'overview'
         // and 'queries' compares (sessions has none) are unaffected.
-        const a = Object.assign({}, data.a, { rows: addCpuWaitingRow(data.a) });
-        const b = Object.assign({}, data.b, { rows: addCpuWaitingRow(data.b) });
+        const a = Object.assign({}, data.a, { rows: eventRows(data.a) });
+        const b = Object.assign({}, data.b, { rows: eventRows(data.b) });
         const delta = buildDeltaComparison('events', a, b,
             { baselineUnavailable: data.baselinePredates });
         const appliedSort = defaultDeltaSort(sort);
@@ -88,12 +105,12 @@ export function buildEventsModel(data, sort, orderTracker) {
             baselinePredates: delta.baselineUnavailable,
         };
     }
-    const rows = addCpuWaitingRow(data);
+    const rows = eventRows(data);
     const ordered = orderTracker ? applyDefaultOrder(orderTracker, rows, sort) : rows;
     return {
         hasRows: rows.length > 0,
         table: buildTableModel(eventsConfig, ordered, sort),
-        paneFidelity: buildPaneFidelity(data),
+        paneFidelity: buildPaneFidelity(data, { idle: true }),
         percentileBasis: buildPercentileBasis(data),
         overflowNote: buildOverflowNote(rows),
         truncation: buildTruncationRow(data),
@@ -144,6 +161,10 @@ export function createEventsView() {
 
         mount(el, model, ctx) {
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
+            if (model.coverageNotice) {
+                el.innerHTML = coverageNoticeHtml(model.coverageNotice);
+                return;
+            }
             if (!model.hasRows) {
                 el.innerHTML = baselineUnavailableHtml(model.baselineUnavailable) +
                     (model.compare
@@ -188,7 +209,7 @@ export function createEventsView() {
             });
         },
 
-        enter() { /* no chart */ },
-        leave() { /* no chart */ },
+        enter(ctx) { mountEventsPilot(ctx); },
+        leave() { unmountEventsPilot(); },
     };
 }

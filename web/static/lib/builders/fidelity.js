@@ -15,6 +15,8 @@
  * unavailable panel) consume them. Everything here is Node-unit-tested.
  */
 
+import { fmtTime } from '../format.js';
+
 /* Subtle shading colors, kept here so a snapshot test pins them and a color
  * regression is caught without a browser. */
 export const SAMPLED_BAND_COLOR = 'rgba(255, 193, 7, 0.10)';   // amber wash
@@ -22,6 +24,10 @@ export const MIXED_BAND_COLOR   = 'rgba(120, 144, 255, 0.10)'; // indigo wash
 export const SAMPLED_BORDER     = 'rgba(255, 193, 7, 0.45)';
 export const MIXED_BORDER       = 'rgba(120, 144, 255, 0.45)';
 export const MIXED_DISCLAIMER = 'totals may not fully reconcile across the switch';
+export const INCOMPLETE_FIDELITY = 'incomplete';
+export const INCOMPLETE_CAPTURE_MESSAGE = 'Incomplete capture: some of this window was not captured.';
+export const NOT_CAPTURED_BAND_COLOR = 'rgba(136, 136, 136, 0.10)';
+export const NOT_CAPTURED_BORDER = 'rgba(136, 136, 136, 0.45)';
 
 /* Escalation annotation colors: manual vs anomaly are visually distinct. */
 export const ESC_MANUAL_COLOR  = 'rgba(79, 195, 247, 0.14)';   // cyan
@@ -40,22 +46,171 @@ export function isUnavailable(data) {
         typeof data.unavailable === 'string'));
 }
 
-/* Normalize a response's fidelity token to one of exact|sampled|mixed|none.
- * Defaults to "exact" when absent so legacy/transition-only responses (and the
- * protocol-drift fixture) keep their current, unshaded look. */
+/* Only an absent token gets the legacy exact presentation. A new or malformed
+ * verdict cannot establish complete capture. */
 export function fidelityOf(data) {
+    if (!data || !Object.prototype.hasOwnProperty.call(data, 'fidelity')) return 'exact';
     const f = data && data.fidelity;
     if (f === 'sampled' || f === 'mixed' || f === 'none' || f === 'exact') return f;
-    return 'exact';
+    return INCOMPLETE_FIDELITY;
+}
+
+/* ── Coverage verdict (#947, #871 U3) ────────────────────────────────────────
+ *
+ * The server computes ONE coverage verdict per window (src/coverage.c) and
+ * sends it as `coverage` = { verdict, reasons[], covered_to,
+ * uncovered[{from,to,reason}], restart_cause, excludes_in_flight,
+ * idle:{verdict, uncovered[]} } next to `fidelity`; a whole-window view whose
+ * verdict is incomplete is withheld as { code:"coverage_unverified",
+ * coverage }. This reader is the only place the web UI interprets that
+ * object: every view asks coverageOf() and never derives a verdict itself.
+ * Label texts are the spec's (spec-coverage-label r2 §2 Output, A1, A3): no
+ * raw reason or verdict token ever reaches the DOM; a reason the spec does
+ * not name contributes no text at all. */
+export const COVERAGE_UNVERIFIED_CODE = 'coverage_unverified';
+export const COVERAGE_UNVERIFIED_LABEL =
+    'Coverage unverified — whole-window metrics unavailable';
+export const IN_FLIGHT_EXCLUDED_LABEL = 'in-flight time excluded';
+export const IDLE_UNVERIFIED_LABEL = 'Idle time unverified';
+const COVERAGE_VERDICTS = new Set(['complete', 'live_edge', 'incomplete']);
+const RESTART_CAUSE_TEXT = {
+    postgres: '(PostgreSQL restart)',
+    daemon: '(daemon restart)',
+};
+const REASON_TEXT = {
+    capture_loss: '(capture loss)',
+    unclean_end: '(daemon stopped uncleanly)',
+    // Amendment A3 item 2.
+    missing_file: '(trace file missing)',
+    retention: '(older than the retained data)',
+    clock_step: '(system clock stepped back)',
+    not_yet_covered: '(not yet confirmed — live)',
+    not_recorded: '(coverage not recorded — capture predates coverage tracking)',
+    not_captured: '(not captured)',
+};
+/* Amendment A3 item 1: a live_edge window's numbers cover [from, covered_to);
+ * the clipped range [covered_to, to) is named, never drawn. */
+export const LIVE_EDGE_RANGE_PREFIX = 'Live — not yet confirmed after ';
+export const UP_TO_PREFIX = 'up to ';
+
+/* HH:MM:SS (UTC, like every other wall time in the UI). */
+function coverageClock(ns) {
+    return fmtTime(ns, 0);
+}
+
+/* The spec's parenthetical for a reason, or null where it names none. */
+export function coverageReasonText(reason, restartCause) {
+    if (reason === 'restart') return RESTART_CAUSE_TEXT[restartCause] || '(restart)';
+    return REASON_TEXT[reason] || null;
+}
+
+function coverageRanges(list, restartCause) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const r of list) {
+        if (!r || !Number.isFinite(r.from) || !Number.isFinite(r.to)) continue;
+        const reason = typeof r.reason === 'string' ? r.reason : null;
+        out.push({ from: r.from, to: r.to, reason,
+            text: reason ? coverageReasonText(reason, restartCause) : null });
+    }
+    return out;
+}
+
+/* coverageOf(data) → null (no coverage object: legacy presentation) | {
+ *   verdict,            // 'complete' | 'live_edge' | 'incomplete'
+ *   withheld,           // whole-window metrics must not be shown
+ *   label,              // incomplete: the label plus its known causes
+ *   reasons, uncovered, coveredTo, restartCause,
+ *   excludesInFlight,   // A1 item 1: complete/live_edge only
+ *   upTo,               // live_edge: 'up to HH:MM:SS' for whole-window numbers
+ *   liveEdge,           // live_edge: { from: covered_to, to: null, live: true,
+ *                       //   text: 'Live — not yet confirmed after HH:MM:SS' }
+ *   idleUnverified,     // Idle rows unavailable while DB time is not
+ *   idleUncovered,
+ * }
+ * A present but malformed or unknown verdict fails closed to incomplete,
+ * like fidelityOf(), and so does a live_edge verdict without covered_to (its
+ * numbers would have no stated end). A withheld response with no object is
+ * incomplete. */
+export function coverageOf(data) {
+    if (!data || typeof data !== 'object') return null;
+    const has = Object.prototype.hasOwnProperty.call(data, 'coverage');
+    const withheldCode = data.code === COVERAGE_UNVERIFIED_CODE;
+    if (!has && !withheldCode) return null;
+    const c = (data.coverage && typeof data.coverage === 'object') ? data.coverage : {};
+    let verdict = COVERAGE_VERDICTS.has(c.verdict) ? c.verdict : 'incomplete';
+    if (withheldCode) verdict = 'incomplete';
+    const coveredTo = Number.isFinite(c.covered_to) ? c.covered_to : null;
+    if (verdict === 'live_edge' && coveredTo === null) verdict = 'incomplete';
+    const restartCause = typeof c.restart_cause === 'string' ? c.restart_cause : null;
+    const reasons = Array.isArray(c.reasons)
+        ? c.reasons.filter(r => typeof r === 'string') : [];
+    const incomplete = verdict === 'incomplete';
+    let label = null;
+    if (incomplete) {
+        const texts = [];
+        for (const r of reasons) {
+            const t = coverageReasonText(r, restartCause);
+            if (t && !texts.includes(t)) texts.push(t);
+        }
+        label = [COVERAGE_UNVERIFIED_LABEL].concat(texts).join(' ');
+    }
+    const idle = (c.idle && typeof c.idle === 'object') ? c.idle : null;
+    const idleUnverified = !incomplete && idle !== null &&
+        idle.verdict !== 'complete' && idle.verdict !== 'live_edge';
+    const live = verdict === 'live_edge';
+    const clock = live ? coverageClock(coveredTo) : null;
+    return {
+        verdict,
+        withheld: incomplete,
+        label,
+        reasons,
+        uncovered: incomplete ? coverageRanges(c.uncovered, restartCause) : [],
+        coveredTo,
+        restartCause,
+        excludesInFlight: !incomplete && c.excludes_in_flight === true,
+        upTo: live ? UP_TO_PREFIX + clock : null,
+        liveEdge: live ? { from: coveredTo, to: null, reason: null, live: true,
+            text: LIVE_EDGE_RANGE_PREFIX + clock } : null,
+        idleUnverified,
+        idleUncovered: idleUnverified ? coverageRanges(idle.uncovered, restartCause) : [],
+    };
+}
+
+/* True when a whole-window view must render the unavailable state. */
+export function coverageWithholds(data) {
+    const cov = coverageOf(data);
+    return !!(cov && cov.withheld);
+}
+
+/* The AAS chart's y-scale input. A withheld window carries no whole-window
+ * peak (max_aas), so the scale follows the per-bucket stacks the server did
+ * send; the peak itself is never displayed for such a window. */
+export function aasScaleMax(data) {
+    if (data && Number.isFinite(data.max_aas)) return data.max_aas;
+    if (!coverageWithholds(data)) return (data && data.max_aas) || 0;
+    let peak = 0;
+    for (const b of (data && data.buckets) || []) {
+        if (!b) continue;
+        let sum = 0;
+        if (Array.isArray(b.aas)) {
+            for (const v of b.aas) if (Number.isFinite(v)) sum += v;
+        } else {
+            for (const [k, v] of Object.entries(b)) if (k !== 't' && Number.isFinite(v)) sum += v;
+        }
+        if (sum > peak) peak = sum;
+    }
+    return peak;
 }
 
 /* Human label for a fidelity token (used in the AAS legend / status). */
 export function fidelityLabel(fid) {
-    switch (fid) {
+    switch (fidelityOf(fid === undefined ? null : { fidelity: fid })) {
         case 'sampled': return 'Sampled (estimated)';
         case 'mixed':   return 'Mixed (sampled + exact)';
         case 'none':    return 'No data';
-        default:        return 'Exact';
+        case 'exact':   return 'Exact';
+        default:        return 'Incomplete capture';
     }
 }
 
@@ -63,7 +218,8 @@ function evidencePhrase(fid) {
     if (fid === 'sampled') return 'sampled estimates';
     if (fid === 'mixed') return 'mixed estimates';
     if (fid === 'none') return 'no data';
-    return 'exact';
+    if (fid === 'exact') return 'exact';
+    return 'incomplete capture';
 }
 
 /* D4/D7 compare-header evidence model. Unlike the ordinary per-pane badge,
@@ -74,12 +230,16 @@ export function buildCompareFidelity(dataA, dataB, opts) {
     const a = fidelityOf(dataA);
     const unavailable = !!(opts.baselinePredates || opts.baselineUnavailable);
     const b = unavailable ? 'none' : fidelityOf(dataB);
+    const mismatch = a === INCOMPLETE_FIDELITY || b === INCOMPLETE_FIDELITY ||
+        (a !== b && b !== 'none');
     return {
         a: { fidelity: a, label: fidelityLabel(a) },
         b: { fidelity: b, label: fidelityLabel(b) },
-        mismatch: a !== b && b !== 'none',
-        warning: a !== b && b !== 'none'
-            ? 'Δ compares ' + evidencePhrase(a) + ' against ' + evidencePhrase(b)
+        mismatch,
+        warning: mismatch
+            ? (b === 'none'
+                ? "No comparison: the baseline has no data; this window's capture is incomplete."
+                : 'Δ compares ' + evidencePhrase(a) + ' against ' + evidencePhrase(b))
             : null,
         baselinePredates: !!opts.baselinePredates,
         baselineUnavailable: !!opts.baselineUnavailable,
@@ -92,20 +252,19 @@ export function buildCompareFidelity(dataA, dataB, opts) {
  *
  * buildFidelityShading(data, win) → {
  *   fidelity,            // the window's fidelity token
- *   bands: [{ from, to, kind }],   // time ranges to shade (ns), kind=sampled|mixed
+ *   bands: [{ from, to, kind }],   // time ranges to shade (ns), including gaps
  *   markArea,            // ECharts markArea.data spec (array of [start,end] pairs)
  *                        //   with itemStyle — fed straight into a series markArea
- *   showLegend,          // whether the sampled/exact legend chip is relevant
+ *   showLegend,          // whether the fidelity legend chip is relevant
  *   disclaimer,          // MIXED_DISCLAIMER for mixed with sampled sub-ranges;
  *                        // null otherwise, including the whole-window fallback
  * }
  *
  * The server gives a single fidelity per window. For a "mixed" window it can
  * also (optionally) provide `fidelity_ranges`: an array of
- * { from, to, fidelity } sub-ranges so the band covers only the sampled parts.
- * When that detail is absent we band the whole window with the "mixed" style —
- * "show the band only over the sampled sub-ranges IF AVAILABLE, else mark the
- * window mixed" (REWORK_PLAN B5).
+ * { from, to, fidelity } sub-ranges. Shade sampled, mixed and uncaptured time
+ * distinctly; a new verdict is incomplete. Without detail, shade the whole
+ * non-exact window using its verdict.
  */
 export function buildFidelityShading(data, win) {
     win = win || {};
@@ -115,24 +274,36 @@ export function buildFidelityShading(data, win) {
 
     const bands = [];
 
-    if (fidelity === 'sampled') {
-        bands.push({ from: xMin, to: xMax, kind: 'sampled' });
-    } else if (fidelity === 'mixed') {
-        const ranges = Array.isArray(data && data.fidelity_ranges)
-            ? data.fidelity_ranges : null;
-        const sampledSub = ranges
-            ? ranges.filter(r => r && r.fidelity === 'sampled')
-            : null;
-        if (sampledSub && sampledSub.length) {
-            for (const r of sampledSub) {
-                bands.push({ from: r.from, to: r.to, kind: 'sampled' });
-            }
-        } else {
-            // No sub-range detail: mark the whole window mixed.
-            bands.push({ from: xMin, to: xMax, kind: 'mixed' });
+    const ranges = Array.isArray(data && data.fidelity_ranges) ? data.fidelity_ranges : [];
+    for (const r of ranges) {
+        if (!r) continue;
+        const kind = fidelityOf(r);
+        if (kind !== 'exact') {
+            bands.push({ from: r.from, to: r.to, kind });
         }
     }
-    // exact / none → no shading.
+    // U3: the server's uncovered ranges are shaded where they lie, so the
+    // per-bucket series outside them stays readable.
+    const cov = coverageOf(data);
+    if (cov) {
+        for (const u of cov.uncovered) {
+            bands.push({ from: u.from, to: u.to, kind: INCOMPLETE_FIDELITY });
+        }
+    }
+    if (fidelity === 'mixed' && !bands.some(b => b.kind === 'sampled' || b.kind === 'mixed')) {
+        // Keep the mixed fallback behind the more specific uncaptured bands.
+        // Those ranges do not locate the sampled part of a mixed window.
+        bands.unshift({ from: xMin, to: xMax, kind: 'mixed' });
+    } else if (!bands.length && fidelity !== 'exact') {
+        bands.push({ from: xMin, to: xMax, kind: fidelity });
+    }
+    // A3 item 1: the live_edge clipped range is shaded and named; its buckets
+    // stay missing (the server sends them null). Added after the whole-window
+    // fallback so a sampled live window keeps its own shading too.
+    if (cov && cov.liveEdge && (xMax == null || cov.liveEdge.from < xMax)) {
+        bands.push({ from: cov.liveEdge.from, to: xMax, kind: INCOMPLETE_FIDELITY,
+            label: cov.liveEdge.text });
+    }
 
     const markArea = bandsToMarkArea(bands);
 
@@ -140,10 +311,18 @@ export function buildFidelityShading(data, win) {
         fidelity,
         bands,
         markArea,
-        showLegend: fidelity === 'sampled' || fidelity === 'mixed',
+        showLegend: bands.length > 0,
         disclaimer: fidelity === 'mixed' && bands.some(b => b.kind === 'sampled')
             ? MIXED_DISCLAIMER : null,
     };
+}
+
+/* Shared by chart bands and their legends, including uncaptured ranges. */
+export function fidelityBandStyle(kind) {
+    if (kind === 'sampled') return { fill: SAMPLED_BAND_COLOR, border: SAMPLED_BORDER, label: 'Sampled (estimated)' };
+    if (kind === 'mixed') return { fill: MIXED_BAND_COLOR, border: MIXED_BORDER, label: 'Mixed (sampled + exact)' };
+    return { fill: NOT_CAPTURED_BAND_COLOR, border: NOT_CAPTURED_BORDER,
+        label: kind === 'none' ? 'Not captured' : fidelityLabel(INCOMPLETE_FIDELITY) };
 }
 
 /* Turn shading bands into an ECharts markArea.data array. Each entry is a
@@ -154,11 +333,16 @@ export function bandsToMarkArea(bands) {
     if (!bands || !bands.length) return null;
     const data = [];
     for (const b of bands) {
-        const fill   = b.kind === 'mixed' ? MIXED_BAND_COLOR : SAMPLED_BAND_COLOR;
-        const border = b.kind === 'mixed' ? MIXED_BORDER : SAMPLED_BORDER;
+        const style = fidelityBandStyle(b.kind);
+        const { fill, border } = style;
+        const label = b.label || style.label;
         const start = { itemStyle: { color: fill,
                                      borderColor: border, borderWidth: 1,
                                      borderType: 'dashed' } };
+        if (b.kind === 'none' || b.kind === INCOMPLETE_FIDELITY) {
+            start.name = label;
+            start.label = { position: 'insideTop', distance: 4, color: '#ddd', fontSize: 10 };
+        }
         const end = {};
         if (b.from != null) start.xAxis = b.from;
         if (b.to != null) end.xAxis = b.to;
