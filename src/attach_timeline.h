@@ -29,7 +29,7 @@ struct pgwt_timeline_row {
     uint64_t handler_entry_ns, handler_exit_ns, bootstrap_open_start_ns;
     uint64_t bootstrap_open_ns, bootstrap_fire_ns, wait_open_ns, wait_enable_ns, exit_ns;
     uint64_t handler_entry_nvcsw, handler_entry_nivcsw, handler_exit_nvcsw, handler_exit_nivcsw;
-    bool entry_usage_valid, exit_usage_valid, lost;
+    bool entry_usage_valid, exit_usage_valid, lost, attached_by_recovery;
     bool bootstrap_open_ok, wait_open_ok, wait_enable_ok;
     bool disposition_known, fired, stored;
 };
@@ -190,6 +190,22 @@ static inline void pgwt_timeline_loss(struct pgwt_attach_timeline *t,
     struct pgwt_timeline_row *r = pgwt_timeline_find(t, pid, cookie, true);
     if (r && r->slot == 1) r->lost = true;
 }
+/* Tick recovery has no lifecycle cookie. Credit the latest observed, still
+ * active birth of this PID, never completed history or an unrelated tick row.
+ * This bounded scan runs only for successful recovery with diagnostics on.
+ * Keep outcome=attached: the real watchpoint is live in either attach path.
+ * Do not invent phase timestamps when they were filed under another cookie. */
+static inline void pgwt_timeline_recovered(struct pgwt_attach_timeline *t, uint32_t pid)
+{
+    struct pgwt_timeline_row *latest = NULL;
+    for (size_t i = 0; i < PGWT_TIMELINE_SLOTS; ++i) {
+        struct pgwt_timeline_row *r = &t->rows[i];
+        if (r->slot == 1 && r->pid == pid && r->fork_ns && !r->exit_ns &&
+            (!latest || r->fork_ns > latest->fork_ns))
+            latest = r;
+    }
+    if (latest) latest->attached_by_recovery = true;
+}
 static inline const char *pgwt_timeline_outcome_name(enum pgwt_timeline_outcome o)
 {
     const char *names[] = {"attached", "never_fired", "fired+stored", "fired+not_stored", "unknown"};
@@ -216,7 +232,8 @@ static inline void pgwt_timeline_finish(FILE *out, struct pgwt_attach_timeline *
     struct pgwt_timeline_row *r = pgwt_timeline_find(t, pid, cookie, false);
     if (!r || r->slot != 1 || !r->exit_ns) return;
     int saved = errno;
-    enum pgwt_timeline_outcome o = r->wait_enable_ns && r->wait_enable_ok ? PGWT_TL_ATTACHED :
+    enum pgwt_timeline_outcome o = r->attached_by_recovery ||
+        (r->wait_enable_ns && r->wait_enable_ok) ? PGWT_TL_ATTACHED :
         !r->disposition_known ? PGWT_TL_UNKNOWN : !r->fired ? PGWT_TL_NEVER_FIRED :
         r->stored ? PGWT_TL_STORED : PGWT_TL_NOT_STORED;
     /* Assemble on the stack: one stdio write per EXIT avoids dozens of

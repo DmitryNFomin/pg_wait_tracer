@@ -53,6 +53,21 @@ def main():
                  'stat opens bounded by children plus constant'),
                 ('swallowed_fork', 'if (be && (!pgwt_mode_uses_watchpoints(d) || be->wp_fd >= 0 ||\n               be->bootstrap_fd >= 0))',
                  'if (be)', 'FORK after recovery must attempt attach'),
+                ('single_children_read', '''    ssize_t n = -1;
+    if (fd >= 0) {
+        n = 0;
+        while ((size_t)n < capacity) {
+            ssize_t got = read(fd, children + n, capacity - (size_t)n);
+            if (got < 0 && errno == EINTR)
+                continue;
+            if (got < 0) { n = -1; break; }
+            if (got == 0) break;
+            n += got;
+        }
+    }''', '    ssize_t n = fd >= 0 ? read(fd, children, capacity) : -1;',
+                 'child past first page recovered without fallback'),
+                ('recovery_credit_missing', 'pgwt_timeline_recovered(d->attach_timeline, pid);',
+                 '(void)pid;', 'recovery credits FORK lifetime only on real attach'),
             ]
             for name, old, new, assertion in mutations:
                 assert backend.count(old) == 1, name
@@ -60,6 +75,11 @@ def main():
                 result = subprocess.run([str(binary)], text=True, capture_output=True)
                 assert (result.returncode == 1 and 'REACHED backend recovery' in result.stdout
                         and 'FAIL: ' + assertion in result.stderr), result.stdout + result.stderr
+                reached = 'REACHED child after first seq_file page' if name == 'single_children_read' else (
+                    'REACHED recovery attach with existing FORK cookie' if name == 'recovery_credit_missing'
+                    else 'REACHED backend recovery')
+                assert reached in result.stdout, result.stdout
+                print(f'{name}: built; {reached}; exit={result.returncode}; {result.stderr.strip()}')
                 print(f'{name}: KILLED at {assertion}')
 
 

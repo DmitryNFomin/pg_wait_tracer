@@ -715,6 +715,14 @@ static int recover_unattached_backend(struct pgwt_daemon *d, pid_t pid)
     pgwt_debug_block_end(d, "backend_addr_shared", pid, started_ns);
     if (ptr != 0 && addr_shared == 1) {
         if (pgwt_handle_init(d, pid, ptr, 0) == 0) {
+            /* Recovery runs outside lifecycle receipt: its cookie need not
+             * be this child's FORK cookie. Credit the observed lifetime only
+             * after confirming that INIT really completed attachment. */
+            if (d->attach_timeline) {
+                be = pgwt_find_backend(&d->backends, pid);
+                if (be && be->wp_fd >= 0 && be->init_attached)
+                    pgwt_timeline_recovered(d->attach_timeline, pid);
+            }
             if (d->verbose)
                 fprintf(stderr, "INFO: recovered unattached backend PID %d "
                         "(initial-scan straddle race)\n", pid);
@@ -729,19 +737,33 @@ int pgwt_recover_unattached_backends(struct pgwt_daemon *d)
     if (!pgwt_mode_uses_watchpoints(d))
         return 0;
 
-    /* One read in the common case. A full buffer may end mid-PID: fall back
-     * rather than trusting a truncated list. The kernel's list is non-atomic;
-     * a missed birth is covered by the next tick (level-triggered recovery). */
+    /* seq_file may return a page per read, even with a larger buffer. Read
+     * through EOF; a full buffer may end mid-PID and requires a fallback.
+     * The kernel's list is non-atomic; a missed birth is covered by the next
+     * tick (level-triggered recovery). */
     const size_t capacity = 65536;
     char path[96];
     snprintf(path, sizeof(path), "/proc/%d/task/%d/children",
              d->postmaster_pid, d->postmaster_pid);
     char *children = malloc(capacity + 1);
     int fd = children ? open(path, O_RDONLY | O_CLOEXEC) : -1;
-    ssize_t n = fd >= 0 ? read(fd, children, capacity) : -1;
+    ssize_t n = -1;
+    if (fd >= 0) {
+        n = 0;
+        while ((size_t)n < capacity) {
+            ssize_t got = read(fd, children + n, capacity - (size_t)n);
+            if (got < 0 && errno == EINTR)
+                continue;
+            if (got < 0) { n = -1; break; }
+            if (got == 0) break;
+            n += got;
+        }
+    }
     if (fd >= 0) close(fd);
     int recovered = 0;
     if (n >= 0 && (size_t)n < capacity) {
+        if (memchr(children, '\0', (size_t)n))
+            goto fallback;
         children[n] = '\0';
         char *p = children;
         while (*p) {
@@ -750,7 +772,7 @@ int pgwt_recover_unattached_backends(struct pgwt_daemon *d)
             char *end;
             errno = 0;
             long pid = strtol(p, &end, 10);
-            if (errno || end == p || pid <= 0 || pid > INT_MAX ||
+            if (!isdigit((unsigned char)*p) || errno || end == p || pid <= 0 || pid > INT_MAX ||
                 (*end && !isspace((unsigned char)*end)))
                 goto fallback;
             recovered += recover_unattached_backend(d, (pid_t)pid);
