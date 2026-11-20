@@ -45,7 +45,8 @@
 - Add C unit tests to `tests/unit_tests.list` (single source of truth); put UI
   logic in pure builders with a `tests/web_unit/*.test.mjs` case.
 - Use `[skip ci]` only for docs-only commits.
-- Push only with a passing `make check` stamp; the hook blocks pushes without one.
+- Before every push, run `make check-fast`; its stamp satisfies the pre-push hook.
+  The full suite runs in CI as `full-check`, which a PR must pass to merge.
   Never bypass the guard (`PGWT_SKIP_PUSH_GUARD` is for humans). `make check`
   itself queues for a machine-wide lock through `scripts/check-lock.sh`; never
   bypass it (`PGWT_SKIP_CHECK_LOCK=1` is for humans).

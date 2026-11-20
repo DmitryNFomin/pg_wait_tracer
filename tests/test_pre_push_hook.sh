@@ -67,7 +67,7 @@ make_fixture() {
     chmod +x "$base/main/scripts/git-hooks/pre-push"
     cp "$HASH_SRC" "$base/main/scripts/tree-hash.sh"
     chmod +x "$base/main/scripts/tree-hash.sh"
-    echo ".pgwt-check.stamp" > "$base/main/.gitignore"
+    printf '.pgwt-check.stamp\n.pgwt-check.mode\n' > "$base/main/.gitignore"
     echo "one" > "$base/main/data.txt"
     git_q "$base/main" init -q -b main
     git_q "$base/main" config --local user.email test@example.com
@@ -87,7 +87,10 @@ make_fixture() {
 # scripts/tree-hash.sh (relative-to-script resolution, same as the hook).
 tree_hash_of() { ( cd "$1" && ./scripts/tree-hash.sh ); }
 
-stamp_correctly() { tree_hash_of "$1" > "$1/.pgwt-check.stamp"; }
+stamp_correctly() {
+    printf '%s\n' "$(tree_hash_of "$1")" > "$1/.pgwt-check.stamp"
+    printf '%s\n' "${2:-fast}" > "$1/.pgwt-check.mode"
+}
 stamp_stale()     { echo "0000000000000000000000000000000000000000" > "$1/.pgwt-check.stamp"; }
 
 do_push() {
@@ -121,6 +124,44 @@ check "$([[ $rc -eq 0 ]] && echo true || echo false)" \
     "correct stamp: push succeeds"
 check_contains "$out" "new branch" \
     "correct stamp: the ref actually landed on the remote"
+
+base="$tmproot/c3full"; make_fixture "$base"
+stamp_correctly "$base/main" full
+out=$(do_push "$base/main" main); rc=$?
+check "$([[ $rc -eq 0 ]] && echo true || echo false)" \
+    "full-mode stamp: push succeeds"
+
+# Mode metadata must never approve a bad stamp or prevent a matching one.
+for mode in missing unknown 'fast extra' ''; do
+    base="$tmproot/c3mode"; make_fixture "$base"
+    stamp_correctly "$base/main"
+    if [[ "$mode" == missing ]]; then rm "$base/main/.pgwt-check.mode"
+    else printf '%s\n' "$mode" > "$base/main/.pgwt-check.mode"; fi
+    out=$(do_push "$base/main" main); rc=$?
+    check "$([[ $rc -eq 0 ]] && echo true || echo false)" \
+        "mode '$mode': matching hash approves push"
+
+    base="$tmproot/c3stale"; make_fixture "$base"
+    stamp_stale "$base/main"
+    if [[ "$mode" != missing ]]; then
+        printf '%s\n' "$mode" > "$base/main/.pgwt-check.mode"
+    fi
+    out=$(do_push "$base/main" main); rc=$?
+    check "$([[ $rc -ne 0 && "$out" == *'tree changed since the last passing'* ]] && echo true || echo false)" \
+        "mode '$mode': stale stamp still refuses push"
+
+    rm "$base/main/.pgwt-check.stamp"
+    out=$(do_push "$base/main" main); rc=$?
+    check "$([[ $rc -ne 0 && "$out" == *'no .pgwt-check.stamp'* ]] && echo true || echo false)" \
+        "mode '$mode': missing stamp still refuses push"
+done
+
+# A combined hash/mode stamp is not the legacy-compatible format.
+base="$tmproot/c3combined"; make_fixture "$base"
+printf '%s full\n' "$(tree_hash_of "$base/main")" > "$base/main/.pgwt-check.stamp"
+out=$(do_push "$base/main" main); rc=$?
+check "$([[ $rc -ne 0 ]] && echo true || echo false)" \
+    "combined hash/mode stamp is refused"
 
 # ── Cases 1-3, repeated from the LINKED WORKTREE (the case #203/#241 got
 #    wrong: resolving the main checkout's tree/stamp instead of the
