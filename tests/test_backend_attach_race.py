@@ -575,7 +575,7 @@ def main():
              "live or unknown failure stays a real failure"),
             ("PF_EXITING_mask_wrong", "flags & 0x4ULL", "flags & 0x8ULL",
              "live or unknown failure stays a real failure"),
-            ("ignore_vsize", "(flags & 0x4ULL) && vsize == 0", "(flags & 0x4ULL) && vsize >= 0",
+            ("ignore_vsize", "(flags & 0x4ULL) && vsize == 0", "(flags & 0x4ULL) && (vsize || 1)",
              "live or unknown failure stays a real failure"),
             ("missing_live_count", "wp_attach_failures_live_total++", "wp_attach_failures_live_total += 0",
              "live diagnostic count"),
