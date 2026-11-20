@@ -1130,3 +1130,8 @@ test_coverage_drain.py
 
 # Compile/link-only capability guard: no BPF on the host.
 test_libbpf_positions.py
+
+# Main-loop scheduling, watchdog and required mutants. Refs #989.
+test_rt_priority
+test_rt_priority.py
+test_rt_runtime_measure.py

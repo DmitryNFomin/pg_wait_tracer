@@ -1,3 +1,4 @@
+#include "thread_other.h"
 /* query_text.c -- source- and context-aware SQL text sidecar. */
 #include "query_text.h"
 #include "synthetic_query.h"
@@ -549,7 +550,7 @@ static int synthetic_async_start(struct pgwt_query_text_capture *qt)
         free(async);
         return -1;
     }
-    if (pthread_create(&async->thread, NULL, synthetic_worker_main, async) != 0) {
+    if (pgwt_thread_create_other(&async->thread, synthetic_worker_main, async) != 0) {
         pthread_cond_destroy(&async->cond);
         pthread_mutex_destroy(&async->mutex);
         free(async);

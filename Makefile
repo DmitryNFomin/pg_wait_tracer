@@ -120,6 +120,8 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/anomaly.c \
              $(SRC_DIR)/backend.c \
              $(SRC_DIR)/backend_init.c \
+             $(SRC_DIR)/rt_priority.c \
+             $(SRC_DIR)/rt_priority_linux.c \
              $(SRC_DIR)/discovery.c \
              $(SRC_DIR)/backend_status_layout.c \
              $(SRC_DIR)/synthetic_query.c \

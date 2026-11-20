@@ -95,6 +95,11 @@ static cJSON *build_status(const struct pgwt_daemon *d)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "ok", 1);
+    cJSON_AddStringToObject(root, "rt_priority", pgwt_rt_state_name(&d->rt_priority));
+    cJSON_AddNumberToObject(root, "rt_priority_demotions_total", d->rt_priority.demotions);
+    cJSON_AddNumberToObject(root, "rt_priority_demote_errno", d->rt_priority.demote_errno);
+    cJSON_AddNumberToObject(root, "rt_priority_soft_us", d->rt_priority.soft_us);
+    cJSON_AddNumberToObject(root, "rt_priority_hard_us", d->rt_priority.hard_us);
     /* Capture tier. --lightweight is reported as its own mode so the answer
      * is never a lie about what is being captured; otherwise report the
      * active provider name ("full" | "sampled"), with tiered distinguished. */
@@ -231,6 +236,11 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "counter_vector_valid", cv.valid);
     cJSON_AddBoolToObject(root, "ok", 1);
+    cJSON_AddStringToObject(root, "rt_priority", pgwt_rt_state_name(&d->rt_priority));
+    cJSON_AddNumberToObject(root, "rt_priority_demotions_total", d->rt_priority.demotions);
+    cJSON_AddNumberToObject(root, "rt_priority_demote_errno", d->rt_priority.demote_errno);
+    cJSON_AddNumberToObject(root, "rt_priority_soft_us", d->rt_priority.soft_us);
+    cJSON_AddNumberToObject(root, "rt_priority_hard_us", d->rt_priority.hard_us);
     cJSON_AddNumberToObject(root, "uptime_s",
                             (double)(now_mono_ns() - d->start_ts) / 1e9);
 

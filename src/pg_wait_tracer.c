@@ -12,6 +12,7 @@
 #include <getopt.h>
 #include <errno.h>
 #include <math.h>
+#include <limits.h>
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
@@ -61,6 +62,9 @@ static void usage(const char *prog)
         "\n"
         "Daemon:\n"
         "      --daemon               Run as daemon (reconnect on PG restart)\n"
+        "      --no-rt-priority       Disable main-loop SCHED_FIFO 1 (default on)\n"
+        "      --rt-soft-us <US>      Nonblocking RT CPU before demotion (default 200000)\n"
+        "      --rt-hard-us <US>      Kernel kill limit (default 1000000; > soft)\n"
         "\n"
         "Capture tier:\n"
         "      --mode <MODE>          tiered (default) | sampled | full | coop\n"
@@ -250,8 +254,14 @@ static enum pgwt_mode parse_mode(const char *s)
 #define OPT_ANOM_CPU_MARGIN 280
 #define OPT_ANOM_CPU_COVERAGE_GAP 281
 #define OPT_EXACT_PERF 282
+#define OPT_NO_RT_PRIORITY 283
+#define OPT_RT_SOFT_US 284
+#define OPT_RT_HARD_US 285
 
 static struct option long_opts[] = {
+    {"no-rt-priority", no_argument, NULL, OPT_NO_RT_PRIORITY},
+    {"rt-soft-us", required_argument, NULL, OPT_RT_SOFT_US},
+    {"rt-hard-us", required_argument, NULL, OPT_RT_HARD_US},
     {"exact-perf", no_argument, NULL, OPT_EXACT_PERF},
     {"pid",        required_argument, NULL, 'p'},
     {"pgdata",     required_argument, NULL, 'D'},
@@ -314,6 +324,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "FATAL: cannot allocate daemon state\n");
         return 1;
     }
+    pgwt_rt_init(&d->rt_priority, &pgwt_rt_linux_ops);
     d->epoll_fd  = -1;
     d->timer_fd  = -1;
     d->sample_timer_fd = -1;
@@ -381,6 +392,21 @@ int main(int argc, char **argv)
         case OPT_SKIP_QID:    d->skip_query_id = 1; break;
         case OPT_SKIP_USDT:   d->skip_usdt = 1; break;
         case OPT_MODE:        d->mode = parse_mode(optarg); break;
+        case OPT_NO_RT_PRIORITY: d->rt_priority.disabled = true; break;
+        case OPT_RT_SOFT_US:
+        case OPT_RT_HARD_US: {
+            char *end;
+            errno = 0;
+            unsigned long value = strtoul(optarg, &end, 10);
+            if (errno || end == optarg || *end || optarg[0] == '-' || !value || value == ULONG_MAX) {
+                fprintf(stderr, "ERROR: RT watchdog limits must be positive finite microseconds\n");
+                free(d);
+                return 1;
+            }
+            if (opt == OPT_RT_SOFT_US) d->rt_priority.soft_us = value;
+            else d->rt_priority.hard_us = value;
+            break;
+        }
         case OPT_EXACT_PERF:  d->exact_perf = true; break;
         case OPT_SAMPLE_RATE: d->sample_rate_hz = atoi(optarg); break;
         case OPT_ESC_BUDGET:
@@ -693,6 +719,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "INFO: skipping query_id reads in BPF\n");
     }
 
+    if (d->rt_priority.hard_us <= d->rt_priority.soft_us) {
+        fprintf(stderr, "ERROR: require --rt-hard-us > --rt-soft-us\n");
+        free(d);
+        return 1;
+    }
+    pgwt_rt_prepare(&d->rt_priority);
+
     /* Set up discovery state: pgdata, pre-set PID, or auto-discover.
      * pgwt_discover() uses: d->pgdata (if set) > d->postmaster_pid (if set) > auto. */
     if (pgdata)
@@ -764,6 +797,7 @@ int main(int argc, char **argv)
             }
 
             pgwt_daemon_run(d);
+            pgwt_rt_pause(&d->rt_priority);
             pgwt_daemon_cleanup(d);
 
             if (d->exit_reason != PGWT_EXIT_PG_DEAD)
@@ -809,6 +843,7 @@ done:
     }
 
     pgwt_daemon_run(d);
+    pgwt_rt_pause(&d->rt_priority);
     pgwt_daemon_cleanup(d);
     free(d);
     return 0;

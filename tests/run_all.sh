@@ -619,6 +619,7 @@ EOF
 # Fifth field (optional): whitespace-separated extra arguments, split into
 # a bash array without eval; shell quoting/expansion inside it is unsupported.
 LIVE_TESTS=(
+    "test_rt_priority_live|python3|test_rt_priority_live.py"
     "test_evidence_capture_live|python3|test_evidence_capture_live.py"
     # #947 U1: trace v6 COVERAGE records from a real daemon -- SIGKILL leaves
     # an unsealed boot with its last W <= 2 s before the kill, a restart opens

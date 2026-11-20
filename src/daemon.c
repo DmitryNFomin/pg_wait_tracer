@@ -1982,6 +1982,24 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
     if (d->debug_dump_state)
         d->debug_last_loop_ts_ns = pgwt_debug_monotonic_ns();
 
+    pgwt_rt_start(&d->rt_priority);
+    /* Test-only watchdog stimulus: start on the first loop after activation.
+     * The signal handler itself must demote, without help from loop polling. */
+    const char *spin = getenv("PGWT_TEST_RT_SPIN");
+    if (spin && strcmp(spin, "1") == 0 &&
+        d->rt_priority.state == PGWT_RT_ACTIVE) {
+        struct timespec spin_start, spin_end;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &spin_start);
+        fprintf(stderr, "PGWT_TEST_RT_SPIN: starting main-loop spin\n");
+        while (d->rt_priority.state == PGWT_RT_ACTIVE) {
+            __asm__ volatile("" ::: "memory");
+        }
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &spin_end);
+        fprintf(stderr, "PGWT_TEST_RT_SPIN: demoted after cpu_us=%llu\n",
+                (unsigned long long)((spin_end.tv_sec - spin_start.tv_sec) * 1000000LL +
+                (spin_end.tv_nsec - spin_start.tv_nsec) / 1000LL));
+    }
+
     while (d->running) {
         /* A budget yield means records remain. Re-enter epoll without sleeping
          * so ready timer/signal/control fds run before the next event batch;

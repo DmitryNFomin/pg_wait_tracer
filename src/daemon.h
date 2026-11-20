@@ -3,6 +3,7 @@
 #define PGWT_DAEMON_H
 
 #include "pg_wait_tracer.h"
+#include "rt_priority.h"
 #include "backend.h"
 #include "event_writer.h"
 #include "summary_writer.h"
@@ -284,6 +285,7 @@ enum pgwt_format {
 };
 
 struct pgwt_daemon {
+    struct pgwt_rt_priority rt_priority;
     pid_t lifecycle_first_gone_pid; /* positive first-handling exclusion, only during cleanup */
     /* Failed enrollment can leave no registry entry. Keep that evidence until
      * EXIT so a later gone check cannot masquerade as first handling. */

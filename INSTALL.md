@@ -13,6 +13,71 @@
 
 ## Prerequisites
 
+### Main-loop real-time priority
+
+The daemon enables **SCHED_FIFO priority 1 on its main event-loop thread** by
+default. Every other thread uses SCHED_OTHER, including threads created later.
+Startup first removes any inherited real-time policy (for example from `chrt`),
+then enables FIFO only after initialization and reads back every thread's policy.
+The reset-on-fork flag also prevents helper processes from inheriting FIFO.
+
+This reduces missed short-lived PostgreSQL processes under load. RHEL-family
+CFS schedulers can delay a freshly woken task; the default RHEL 8 `tuned`
+`virtual-guest` profile raises the wakeup delay to 15 ms. Raising one process's
+nice priority does not reliably help when processes are grouped by session or
+service. The tracer does not change host scheduler settings. The background
+and measurements are in [the scheduling decision](https://github.com/DmitryNFomin/pg_wait_tracer/issues/989).
+
+In addition to the existing capture privileges, FIFO needs **CAP_SYS_NICE**.
+When restricting a root service's capabilities, include CAP_SYS_NICE in its
+`CapabilityBoundingSet` and `AmbientCapabilities` alongside its capture
+capabilities. On EL8 with CONFIG_RT_GROUP_SCHED, a scope or service with
+`CPUQuota` may refuse FIFO even for root: run outside that quota-limited CPU
+group, or have the administrator allocate real-time runtime to the service.
+Service `LimitRTPRIO`/`LimitRTTIME` restrictions can also prevent activation.
+
+If scheduling, watchdog setup, or policy verification fails, capture continues
+at normal priority with one warning naming the failed operation, its error,
+the privileges/service configuration to check, and the consequence:
+**short-lived processes may be missed under load**. Both control-socket `status`
+and `metrics` report `rt_priority` as `active`, `refused`, `demoted`, or `disabled`.
+
+The kernel's **RLIMIT_RTTIME** watchdog bounds real-time CPU consumed without a
+blocking call. The defaults are **200,000 microseconds soft** and **1,000,000
+microseconds hard**. At the soft limit, SIGXCPU immediately demotes the main
+thread to SCHED_OTHER, prints one warning naming the runtime budget, increments
+`rt_priority_demotions_total`, and continues capture at normal priority for the
+rest of that process's life, including PostgreSQL reconnects. Accounting uses
+kernel ticks: preemption or yielding does not reset it; a genuine blocking
+sleep does. A sustained backlog can therefore trigger demotion across multiple
+loop iterations. If demotion cannot execute or fails, the **hard limit kills
+the process with SIGKILL**, without clean shutdown or a sealed capture.
+
+Configure both budgets in microseconds with `--rt-soft-us US --rt-hard-us US`
+(`0 < soft < hard`). The configured limits and a failed demotion's errno are
+also exposed in status/metrics. Use **`--no-rt-priority`** to keep every thread
+at normal priority, including when the program was launched under `chrt`.
+
+Limit sizing (2026-11-20, PG18, four vCPUs):
+`python3 tests/rt_runtime_measure.py --pid POSTMASTER --evidence-dir /tmp/rt-measure`
+ran each mode for 30 seconds with 500 idle connections, 16 reconnecting pgbench
+clients, and parallel aggregate scans of one million rows (two workers planned
+per query; workers observed under load on both VMs). An independent filtered
+`perf` scheduler trace sums CPU slices across runnable preemptions and CPU
+migrations, ending a run only at an actual sleep. Both traces reported zero
+lost events; captures stayed at FIFO 1 throughout the measurements.
+
+| Kernel | Full: longest CPU run / completed runs | Sampled at 100 Hz: longest / runs |
+| --- | --- | --- |
+| EL8 4.18.0-553.157.1 | 27.216561 ms / 5,074 | 9.456643 ms / 4,419 |
+| EL9 5.14.0-687.41.1 | 10.406600 ms / 5,256 | 4.061293 ms / 4,643 |
+
+The 200 ms soft budget is 7.3 times the longest observed run; the 1 s hard
+budget leaves a further fivefold margin for delivery and demotion. These are
+measured defaults, not a bound on every workload. The live gate separately
+forces a spin with a 20 ms soft budget, verifies actual kernel demotion (also
+after dropping CAP_SYS_NICE), and requires capture to continue afterwards.
+
 ### 1. Build Dependencies
 
 #### Rocky Linux 9 / RHEL 9 / AlmaLinux 9 / Oracle Linux 9

@@ -1,3 +1,4 @@
+#include "thread_other.h"
 /* pgss_resolver.c -- asynchronous sampled query-text resolution. */
 #include "pgss_resolver.h"
 
@@ -627,7 +628,7 @@ int pgwt_pgss_resolver_start(struct pgwt_pgss_resolver **out,
         free(r);
         return -1;
     }
-    if (pthread_create(&r->thread, NULL, resolver_main, r) != 0) {
+    if (pgwt_thread_create_other(&r->thread, resolver_main, r) != 0) {
         pthread_cond_destroy(&r->cond);
         pthread_mutex_destroy(&r->mutex);
         free(r);
