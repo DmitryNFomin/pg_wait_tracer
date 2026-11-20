@@ -31,6 +31,7 @@ Selections do not re-anchor, resize or pool these cohorts. Every observed birth 
 N_k counts distinct observed births in J_k.
 U_k counts distinct qualifying omitted lifetimes born in J_k, including zero-duration lifetimes.
 Pre-existing tasks discovered at capture start are not observed births. They require the ordinary attachment and base-coverage rules; discovery does not create an A2 omission.
+Discovery admission (merge-v1 DECISIONs 30-44) contributes neither an observed birth to N_k nor an omission to U_k; a pre-existing terminal discharge is not UNTRACED.
 An A2 declaration with fork_ns < boot_start is invalid. Do not clamp its birth, assign it to J_0 or invent a negative-index cohort.
 
 A cohort finalizes only when qualified source boundaries establish complete birth accounting through J_k.end and every birth has either proved attachment or a reconciled terminal disposition.
