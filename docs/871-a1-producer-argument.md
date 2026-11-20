@@ -1158,13 +1158,21 @@ explicit test premise can a transient capacity gap close: GAP_CLOSE is at
 `rearm_at`, written when the first FRONTIER >= rearm_at arrives, never by
 REARM itself. Other gaps stay open for the rest of the boot.
 
-Backends alive before capture have no fork cookie and their records are
-counted and dropped. If any are alive at boot_start, a PAUSE gap covers
-`[boot_start, last_preexisting_exit)`. Its close waits for the received EXIT
-of the last such backend; a missing exit leaves the gap open. This includes
-long-lived startup auxiliary children: an idle client's exit alone does not
-close the gap while another startup child remains alive. Starting with none
-opens no such gap. Time before a late-attached backend's first released
+**Current limit of the experimental mode:** under exact_perf, every window is
+Unavailable while any process that was running at capture start is alive.
+This includes PostgreSQL's auxiliary processes, which live as long as the
+postmaster, so in practice every window is Unavailable until discovery
+admission exists (planned as a contract amendment).
+
+These backends have no fork cookie and their records are counted and dropped.
+A PAUSE gap covers `[boot_start, last_preexisting_exit)`, waiting for every
+received EXIT; a missing exit leaves it open. A later cookie-less TRACE or
+LIFECYCLE record adds an unlisted pid, including one whose fork-cookie
+allocation failed. It keeps an open gap open or writes a new fsynced GAP_OPEN
+from boot_start if the gap closed or never opened. That late GAP_OPEN revokes
+earlier certified coverage; closure uses the latest exit time of the set.
+An initially empty set opens no gap until such a record arrives.
+Time before a late-attached backend's first released
 record remains untraced under merge-v1 25c; this unit writes no carrier for
 it and does not count it as an A2 omission. A2 reason 5, kind 7 and UNTRACED
 remain a later unit.

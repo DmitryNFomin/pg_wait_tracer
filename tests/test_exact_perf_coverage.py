@@ -67,6 +67,15 @@ MUTANTS = [
     ("forget_gap_failure", "src/open_snapshot.c",
      "    if (rc != 0) t->gap_failed = true;", "    /* failed revocation forgotten */",
      "sync_failure", "failed GAP_OPEN permanently disables watermarks"),
+    ("count_only_open", "src/merge_capture.c",
+     "        if (c->coverage_begun) {", "        if (c->coverage_begun && false) {",
+     "later_open", "unlisted backend holds existing gap open"),
+    ("count_only_closed", "src/merge_capture.c",
+     "        if (c->coverage_begun) {", "        if (c->coverage_begun && false) {",
+     "later_closed", "unlisted backend reopens closed gap"),
+    ("count_only_empty", "src/merge_capture.c",
+     "        if (c->coverage_begun) {", "        if (c->coverage_begun && false) {",
+     "later_empty", "unlisted backend opens initially absent gap"),
 ]
 
 

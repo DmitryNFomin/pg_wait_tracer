@@ -90,6 +90,7 @@ static struct fixture *coverage_setup(const uint32_t *preexisting, size_t n)
 }
 static void cleanup(struct fixture *h)
 {
+    pgwt_transport_destroy(h->d.transport);
     pgwt_capture_destroy(h->d.capture);
     free(h->tracker.capacity_gaps);
     pgwt_writer_close(&h->writer);
@@ -411,6 +412,129 @@ static void preexisting(void)
     h=coverage_setup(NULL,0);b=h->base;frontier(h,b+300);tick(h,b+100,b+100,b+100);tick(h,b+310,b+310,b+310);
     s=scan(h);C(count(&s,PGWT_COVK_GAP_OPEN)==0,"no preexisting backend opens no gap");cleanup(h);
 }
+/* Exercise the production transport receipt/token path: no-cookie records
+ * return before queueing, but must still update the coverage population. */
+static void uncovered_record(struct fixture *h, uint32_t pid, uint64_t at, unsigned type)
+{
+    if (!h->d.transport) {
+        struct pgwt_transport_io io = {.ctx=&h->d, .now=tb_now,
+            .control=tb_control, .wake=tb_wake, .attempts=tb_attempts,
+            .failures=tb_failures, .discards=tb_discards, .positions=tb_positions,
+            .counters=tb_counters, .drain=tb_drain, .cpu_set_unchanged=tb_topology,
+            .received_token=tb_received_token, .envelope_token=tb_envelope_token, .fault=tb_fault};
+        uint32_t cpus[]={0,1};
+        h->d.transport=pgwt_transport_create(cpus,2,64,&io);
+        C(h->d.transport,"uncovered transport construction");
+    }
+    unsigned char bytes[48]={0};
+    tb_le(bytes+(type?16:0),at,8);
+    tb_le(bytes+(type?4:8),pid,4);
+    if (type) tb_le(bytes,type,4);
+    uint64_t before=pgwt_transport_stats(h->d.transport).uncovered;
+    C(tb_emit(&h->d,0,type?PGWT_WIRE_DEST_L:PGWT_WIRE_DEST_CPU,
+              type?PGWT_WIRE_LIFECYCLE:PGWT_WIRE_TRACE,0,bytes,type?24:48)==0,
+      "uncovered transport receipt");
+    C(pgwt_transport_stats(h->d.transport).uncovered==before+1,
+      "cookie-less record counted once");
+    C(pgwt_transport_pending_records(h->d.transport)==0 &&
+      pgwt_capture_pending_records(h->d.capture)==0,"cookie-less record never staged");
+}
+static void later_open(void)
+{
+    for (unsigned kind=0;kind<2;++kind) {
+        uint32_t pids[]={11,12};
+        struct fixture *h=coverage_setup(pids,2);uint64_t b=h->base;
+        unsigned before=syncs;
+        unsigned type=kind?PGWT_LIFECYCLE_INIT:0;
+        uncovered_record(h,13,b+100,type);
+        uncovered_record(h,13,b+110,type); /* repeated observations are one pid */
+        uncovered_record(h,11,b+250,PGWT_LIFECYCLE_EXIT);
+        uncovered_record(h,12,b+230,PGWT_LIFECYCLE_EXIT);
+        struct scan s=scan(h);
+        C(count(&s,PGWT_COVK_GAP_CLOSE)==0,"unlisted backend holds existing gap open");
+        C(count(&s,PGWT_COVK_GAP_OPEN)==1 && syncs==before,"open gap is reused");
+        uncovered_record(h,13,b+200,PGWT_LIFECYCLE_EXIT);
+        s=scan(h);
+        C(count(&s,PGWT_COVK_GAP_CLOSE)==1 && s.records[s.n-1].a==b+250,
+          "later backend closes at latest exit, including out-of-order delivery");
+        frontier(h,b+400);tick(h,b+300,b+300,b+300);
+        frontier(h,b+500);tick(h,b+510,b+510,b+510);
+        verdict(h,b+100,b+110,false);verdict(h,b+260,b+280,true);
+        cleanup(h);
+    }
+}
+static void later_closed(void)
+{
+    for (unsigned kind=0;kind<2;++kind) {
+        uint32_t pid=11;
+        struct fixture *h=coverage_setup(&pid,1);uint64_t b=h->base;
+        uncovered_record(h,pid,b+190,PGWT_LIFECYCLE_EXIT);
+        frontier(h,b+400);tick(h,b+250,b+250,b+250);tick(h,b+410,b+410,b+410);
+        verdict(h,b+200,b+240,true);
+        struct scan s=scan(h);uint64_t first_id=s.records[1].c;
+        unsigned before=syncs;
+        uncovered_record(h,22,b+300,kind?PGWT_LIFECYCLE_INIT:0);
+        s=scan(h);
+        C(count(&s,PGWT_COVK_GAP_OPEN)==2,"unlisted backend reopens closed gap");
+        struct pgwt_coverage_record open=s.records[s.n-1];
+        C(open.kind==PGWT_COVK_GAP_OPEN && open.a==b && open.reason==PGWT_COVR_PAUSE,
+          "reopened PAUSE starts at boot_start below written W");
+        C(open.c!=first_id && syncs==before+1,"reopened gap has fresh id and fsync");
+        verdict(h,b+200,b+240,false);
+        uncovered_record(h,23,b+310,PGWT_LIFECYCLE_INIT);
+        uncovered_record(h,22,b+500,PGWT_LIFECYCLE_EXIT);
+        s=scan(h);C(count(&s,PGWT_COVK_GAP_CLOSE)==1,"reopened gap waits for all later pids");
+        uncovered_record(h,23,b+450,PGWT_LIFECYCLE_EXIT);
+        s=scan(h);
+        C(count(&s,PGWT_COVK_GAP_CLOSE)==2 && s.records[s.n-1].a==b+500 &&
+          s.records[s.n-1].c==open.c,"reopened gap closes at latest exit with matching id");
+        frontier(h,b+700);tick(h,b+600,b+600,b+600);tick(h,b+710,b+710,b+710);
+        verdict(h,b+200,b+240,false);verdict(h,b+510,b+540,true);
+        cleanup(h);
+    }
+}
+static void later_empty(void)
+{
+    for (unsigned kind=0;kind<3;++kind) {
+        struct fixture *h=coverage_setup(NULL,0);uint64_t b=h->base;
+        frontier(h,b+400);tick(h,b+250,b+250,b+250);tick(h,b+410,b+410,b+410);
+        struct scan s=scan(h);
+        C(count(&s,PGWT_COVK_GAP_OPEN)==0,"initially empty population has no gap");
+        verdict(h,b+100,b+150,true);
+        unsigned before=syncs;
+        /* EXIT may itself be the first observation of a missed backend. */
+        unsigned type=kind==2?PGWT_LIFECYCLE_EXIT:kind?PGWT_LIFECYCLE_INIT:0;
+        uncovered_record(h,22,b+190,type);
+        s=scan(h);
+        C(count(&s,PGWT_COVK_GAP_OPEN)==1,"unlisted backend opens initially absent gap");
+        C(s.records[s.n-(kind==2?2:1)].a==b && syncs==before+1,
+          "first uncovered record fsyncs gap from boot_start");
+        verdict(h,b+100,b+150,false);
+        if (kind!=2) uncovered_record(h,22,b+190,PGWT_LIFECYCLE_EXIT);
+        s=scan(h);
+        C(count(&s,PGWT_COVK_GAP_CLOSE)==1 && s.records[s.n-1].a==b+190,
+          "initially absent gap closes at observed exit");
+        verdict(h,b+100,b+150,false);verdict(h,b+200,b+240,true);
+        cleanup(h);
+    }
+}
+static void later_full(void)
+{
+    uint32_t pids[MAX_BACKENDS];
+    for (size_t i=0;i<MAX_BACKENDS;++i) pids[i]=(uint32_t)i+1;
+    struct fixture *h=coverage_setup(pids,MAX_BACKENDS);uint64_t b=h->base;
+    unsigned char bytes[48]={0};tb_le(bytes+8,MAX_BACKENDS+1,4);
+    ma_envelope e={.version=1,.kind=MA_TRACE,.bytes=bytes,.size=48};
+    C(pgwt_capture_received(h->d.capture,&e,h->d.now)==-ENOMEM,
+      "uncovered population exhaustion is explicit");
+    for (size_t i=0;i<MAX_BACKENDS;++i)
+        uncovered_record(h,pids[i],b+190,PGWT_LIFECYCLE_EXIT);
+    struct scan s=scan(h);
+    C(count(&s,PGWT_COVK_GAP_OPEN)==1 && count(&s,PGWT_COVK_GAP_CLOSE)==0,
+      "untracked backend keeps gap permanently open");
+    frontier(h,b+400);tick(h,b+250,b+250,b+250);tick(h,b+410,b+410,b+410);
+    verdict(h,b+200,b+240,false);cleanup(h);
+}
 static void sync_failure(void)
 {
     struct fixture *h=coverage_setup(NULL,0);uint64_t b=h->base;
@@ -441,8 +565,10 @@ int main(int argc,char **argv)
         pgwt_writer_destroy(&h->writer);free(h);
         return 0;
     }
-    const char *names[]={"progress","publish_order","failure","reasons","rearm","late","preexisting","sync_failure","binding"};
-    void (*run[])(void)={progress,publish_order,failure,reasons,rearm,late,preexisting,sync_failure,binding};
+    const char *names[]={"progress","publish_order","failure","reasons","rearm","late","preexisting",
+        "later_open","later_closed","later_empty","later_full","sync_failure","binding"};
+    void (*run[])(void)={progress,publish_order,failure,reasons,rearm,late,preexisting,
+        later_open,later_closed,later_empty,later_full,sync_failure,binding};
     unsigned ran=0;
     for(size_t i=0;i<sizeof(run)/sizeof(run[0]);++i) {
         if(argc>1 && strcmp(argv[1],names[i])) continue;

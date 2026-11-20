@@ -65,7 +65,7 @@ struct pgwt_merge_capture {
     uint64_t last_service_at;
     struct pgwt_transport_budget budget;
     uint64_t coverage_boot_start, feeding_t, preexisting_last_exit;
-    bool coverage_begun, feeding_data;
+    bool coverage_begun, feeding_data, preexisting_tracking_failed;
     uint32_t preexisting[MAX_BACKENDS];
     size_t preexisting_count;
     struct pgwt_capture_gap last_void;
@@ -550,9 +550,9 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
     if (e->kind != MA_LIFECYCLE && e->kind != MA_TEXT && e->kind != MA_TRACE) return 0;
     size_t expected = e->kind == MA_TRACE ? 48 : e->kind == MA_TEXT ? 272 : 24;
     if (!e->bytes || e->size != expected) return -EINVAL;
-    /* A TRACE or lifecycle record with no lifetime cookie comes from a
-     * backend that existed before this capture (issue 871 comment
-     * 6873823454: such backends "stay uncovered and reported"). It has no
+    /* A TRACE or lifecycle record with no lifetime cookie is uncovered:
+     * the backend predates capture or its fork-cookie allocation failed
+     * (issue 871 comment 6873823454: "stay uncovered and reported"). It has no
      * generation, so it is not merge input: it is not staged, not held and
      * never published, and the caller counts it. Its legacy side effect
      * (an EXIT retiring the daemon's backend entry) still runs below.
@@ -565,7 +565,29 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
     bool validated_at_receipt = false;
     /* TEXT has no semantic timestamp. Queued pre-proof TEXT is conservatively
      * not trusted until a post-REARM completed round (the transport fences it). */
-    if (uncovered) ++c->uncovered_records;
+    if (uncovered) {
+        ++c->uncovered_records;
+        if (c->coverage_begun) {
+            uint32_t pid = (uint32_t)get_le(e->bytes + (e->kind == MA_TRACE ? 8 : 4), 4);
+            size_t i = 0;
+            while (i < c->preexisting_count && c->preexisting[i] != pid) ++i;
+            if (i == c->preexisting_count) {
+                /* The startup census can miss a backend; failed fork-cookie
+                 * allocation can also leave one uncovered. Revoke from boot
+                 * even if a previous gap has closed and W advanced since. */
+                if (!c->preexisting_count && !c->preexisting_tracking_failed)
+                    coverage_gap(c, (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_PREEXISTING,
+                        .at = c->coverage_boot_start, .detected = now});
+                if (c->preexisting_count == MAX_BACKENDS) {
+                    /* Its EXIT cannot be tracked. Keep the existing gap open
+                     * permanently, even after all tracked backends exit. */
+                    c->preexisting_tracking_failed = true;
+                    return -ENOMEM;
+                }
+                c->preexisting[c->preexisting_count++] = pid;
+            }
+        }
+    }
     else if (dropped) {
         ++c->dropped_records;
     }
@@ -577,7 +599,7 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
             c->preexisting[i] = c->preexisting[--c->preexisting_count];
             uint64_t exit_at = get_le(e->bytes + 16, 8);
             if (exit_at > c->preexisting_last_exit) c->preexisting_last_exit = exit_at;
-            if (!c->preexisting_count)
+            if (!c->preexisting_count && !c->preexisting_tracking_failed)
                 coverage_gap(c, (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_PREEXISTING_END,
                     .at = c->preexisting_last_exit, .detected = now});
             break;

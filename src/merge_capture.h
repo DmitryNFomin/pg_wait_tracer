@@ -118,8 +118,9 @@ struct pgwt_capture_config {
 };
 struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *);
 /* Begin boot coverage after the startup backend scan. The copied pids are
- * alive backends without a fork cookie; only their received EXIT retires one.
- * A missing EXIT therefore leaves the gap open. */
+ * alive backends without a fork cookie. Later cookie-less TRACE/lifecycle
+ * records add missing pids and reopen coverage loss from boot_start if needed.
+ * Only a received EXIT retires a pid; a missing EXIT leaves the gap open. */
 int pgwt_capture_coverage_begin(struct pgwt_merge_capture *, uint64_t boot_start,
                                  const uint32_t *pids, size_t count,
                                  void (*persist)(void *, const struct pgwt_capture_gap *));
