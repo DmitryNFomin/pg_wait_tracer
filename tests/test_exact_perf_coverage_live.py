@@ -259,11 +259,13 @@ def preexisting_gate(pm, root, reader):
             idle.stdin.close()
             idle.wait(timeout=5)
             exited = time.monotonic_ns()
-            # The default remains demand driven. Supply post-exit DATA before
-            # requiring a later frontier; the ten-second measurement above
-            # has no workload and makes no frontier-progress assumption.
-            sql("SELECT pg_sleep(3)")
-            wait_for(daemon, lambda: w_now(trace) > exited + SEC, 10, "watermark advances after idle backend exit")
+            # Default rounds are demand driven; a quiet box need not advance W.
+            # Observe the post-exit interval without adding a workload.
+            time.sleep(3)
+            assert daemon.poll() is None, ("idle daemon exited", log.read_text())
+            after_w = w_now(trace)
+            print(f"IDLE-W-AFTER-EXIT: before_ns={w} after_ns={after_w} "
+                  f"advance_ns={after_w - w}", flush=True)
             after = verdict(reader, trace, exited + SEC // 4, exited + SEC // 2)
             incomplete_loss(after)
             records, _ = read_trace(trace)
@@ -295,7 +297,7 @@ def task_cpu_ticks(pid):
 
 
 def idle_cost_gate(pm, root):
-    for enabled in (False, True):
+    def measure(enabled):
         option = "on" if enabled else "off"
         trace = root / f"idle-cost-{option}"
         daemon, error, log = start_daemon(TRACER, pm, trace, idle_round=enabled)
@@ -333,6 +335,18 @@ def idle_cost_gate(pm, root):
             stop(daemon)
             error.close()
 
+    failures = []
+    for enabled in (False, True):
+        option = "on" if enabled else "off"
+        try:
+            measure(enabled)
+        except Exception as exc:
+            failures.append(option)
+            print(f"IDLE-COST option={option}: FAIL {type(exc).__name__}: {exc}", flush=True)
+        else:
+            print(f"IDLE-COST option={option}: PASS", flush=True)
+    assert not failures, f"idle cost arms failed: {', '.join(failures)}"
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -357,13 +371,22 @@ def main():
         try:
             subprocess.run([pgb, "-i", "-s", "1", "-U", "postgres", db], check=True)
             print("TEST PREMISE: attachment proofs assumed; off EL8 kernel premise assumed; no qualification claim", flush=True)
-            kill_gate(pm, db, pgb, root, reader)
-            saturation_gate(pm, db, pgb, root, reader)
-            preexisting_gate(pm, root, reader)
-            idle_cost_gate(pm, root)
+            failures = []
+            arms = [
+                ("SIGKILL", lambda: kill_gate(pm, db, pgb, root, reader)),
+                ("SATURATION", lambda: saturation_gate(pm, db, pgb, root, reader)),
+                ("PREEXISTING", lambda: preexisting_gate(pm, root, reader)),
+                ("IDLE-COST", lambda: idle_cost_gate(pm, root)),
+            ]
+            for name, arm in arms:
+                try:
+                    arm()
+                except Exception as exc:
+                    failures.append(name)
+                    print(f"{name}: FAIL {type(exc).__name__}: {exc}", flush=True)
         finally:
             sql(f"DROP DATABASE {db}")
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
