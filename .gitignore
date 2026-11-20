@@ -84,6 +84,7 @@ pgwt-darwin-arm64
 .claude/*.local.*
 # make check stamp (scripts/check.sh) and local run outputs
 .pgwt-check.stamp
+.pgwt-check.mode
 tests/results/ui_gallery/
 tests/results/box-check-*.log
 tests/results/ci-smoke-*.log

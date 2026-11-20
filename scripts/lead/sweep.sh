@@ -24,7 +24,10 @@ export GH_PAGER=cat; set -u
 # worktree happened to be $0's directory.
 OUTDIR="${1:-$(cd "$(dirname "$0")" && pwd)}"
 SELFDIR="$(cd "$(dirname "$0")" && pwd)"
-cd /Users/dmitryfomin/work/git/pg_wait_tracer
+# Retain the Mac's shared repository and ledger; CI has its own checkout.
+REPO_ROOT=/Users/dmitryfomin/work/git/pg_wait_tracer
+[ -d "$REPO_ROOT" ] || REPO_ROOT="$SELFDIR/../.."
+cd "$REPO_ROOT" || { echo "UNKNOWN: cannot cd to repo root"; exit 3; }
 RUN="sweep-$(date -u +%Y%m%dT%H%M%SZ)"
 git fetch origin -q 2>/dev/null || { echo "$RUN UNKNOWN: git fetch failed"; exit 3; }
 echo "== $RUN  master=$(git rev-parse --short origin/master) =="
@@ -223,7 +226,7 @@ fi
 # already applies to every other probe in this file.
 DQ="$OUTDIR/.dispatch-queue"
 echo "-- [9] dispatch queue -> $DQ"
-LEDGER="/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead/.active-agents"
+LEDGER="$REPO_ROOT/scripts/lead/.active-agents"
 SANITY_MAX=20   # generous over the 3-agent cap (reviewers/advisers share the ledger too)
 RUNNING_N=$(/usr/bin/python3 "$SELFDIR/agent-ledger.py" count "$LEDGER" 2>/dev/null)
 
@@ -256,12 +259,12 @@ RUNNING_N=$(/usr/bin/python3 "$SELFDIR/agent-ledger.py" count "$LEDGER" 2>/dev/n
 # the over-cap-start catastrophe this guard exists to prevent, so the guard
 # errs toward refusing whenever ANY corroborating signal disagrees with 0.
 CHECK_PROCS=$(pgrep -f 'scripts/check-lock.py' 2>/dev/null | wc -l | tr -d ' ')
-WT_CUTOFF=$(date -v-2H +"%Y-%m-%dT%H:%M:%S" 2>/dev/null)
+WT_CUTOFF=$(/usr/bin/python3 -c 'from datetime import datetime, timedelta; print((datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S"))' 2>/dev/null)
 if [ -n "$WT_CUTOFF" ]; then
   RECENT_WT_HEAD=$(find .git/worktrees -maxdepth 2 -name 'HEAD' -newermt "$WT_CUTOFF" 2>/dev/null | wc -l | tr -d ' ')
   RECENT_WT_DIR=$(find .claude/worktrees -maxdepth 1 -type d -name 'agent-*' -newermt "$WT_CUTOFF" 2>/dev/null | wc -l | tr -d ' ')
 else
-  RECENT_WT_HEAD=""   # `date -v` unsupported on this host -- unknown, not zero
+  RECENT_WT_HEAD=""   # cutoff unavailable -- unknown, not zero
   RECENT_WT_DIR=""
 fi
 
@@ -298,8 +301,8 @@ def _int_or_none(s):
         return None
 
 check_procs = _int_or_none(check_procs_raw) or 0
-recent_wt_head = _int_or_none(recent_wt_head_raw)  # None if `date -v` unavailable
-recent_wt_dir = _int_or_none(recent_wt_dir_raw)    # None if `date -v` unavailable
+recent_wt_head = _int_or_none(recent_wt_head_raw)  # None if cutoff unavailable
+recent_wt_dir = _int_or_none(recent_wt_dir_raw)    # None if cutoff unavailable
 if running == 0 and (
     check_procs > 0 or (recent_wt_head or 0) > 0 or (recent_wt_dir or 0) > 0
 ):
