@@ -706,12 +706,17 @@ marker = re.search(r'^PHASE_REFUSED_MARKER="([^"]*)"$', runner, re.MULTILINE)
 report(marker is not None and marker.group(1) == tu.PHASE_REFUSED_MARKER,
        "runner marker literal equals testutil.PHASE_REFUSED_MARKER")
 functions = [marker.group(0)] if marker else []
+# Carry the runner's classification helpers, including new dependencies,
+# without duplicating its call graph. Take definitions only from the setup
+# before Step 0; later live-test helpers contain embedded C heredocs.
+runner_functions = {match.group(1): match.group(0) for match in re.finditer(
+    r"(?ms)^([a-zA-Z_][a-zA-Z_0-9]*)\(\) \{.*?^\}",
+    runner[:runner.index("# Step 0:")])}
+functions.extend(runner_functions.values())
 for name in ("known_failing_scope_matches", "known_failing_issue",
              "phase_dependent_test", "run_test", "undeclared_phase_test"):
-    match = re.search(r"(?ms)^" + name + r"\(\) \{.*?^\}", runner)
+    match = runner_functions.get(name)
     report(match is not None, "runner function %s is reachable" % name)
-    if match:
-        functions.append(match.group(0))
 runner_harness = "\n".join(functions) + """
 set -o pipefail
 passed=0; failed=0; refused=0; known_failing=0; xpass=0
