@@ -1191,6 +1191,6 @@ bindings with injected kernel reads. `test_exact_perf_coverage_live.py` is
 registered in the live tier for SIGKILL under pgbench (exact record counts
 against flushed QB02 FRONTIER batches), forced capacity saturation and the
 pre-existing connection. These box arms are written, not run by this unit.
-The connection arm deliberately requires completeness after exit; a persistent
-startup child keeps that assertion red under the rule above, rather than
-silently narrowing the uncovered population.
+The connection arm requires incomplete windows with `capture_loss` before and
+after the idle client exits, with GAP_OPEN(PAUSE) at boot_start and no GAP_CLOSE
+while startup auxiliaries remain alive with the postmaster.

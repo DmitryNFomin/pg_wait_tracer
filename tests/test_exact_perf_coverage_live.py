@@ -5,8 +5,9 @@ Linux root only; never run eBPF on macOS. The attachment and (off EL8) kernel
 premises are the existing explicit transport-test premises, not qualification.
 An external capacity-stimulus binary uses 64 transport slots to force saturation;
 no producer, coverage rule, expected answer or production REARM gate is changed.
-The pre-existing-client arm requires the reader to become complete after exit;
-other persistent startup children correctly keep that assertion red under rule 5.
+The pre-existing-client arm stays incomplete with capture_loss before and after
+the idle client exits: startup auxiliaries keep the boot-start PAUSE gap open
+while the postmaster runs.
 All scratch, rebuilt objects and traces are outside the repository.
 """
 import argparse
@@ -237,16 +238,21 @@ def preexisting_gate(pm, root, reader):
             boot = records[0][3]
             w = max(r[3] for r in records if r[1] == "WATERMARK")
             assert w > boot, "startup frontier advances even while uncovered"
+            startup_gaps = [r for r in records if r[1] == "GAP_OPEN" and r[2] == 1 and r[3] == boot]
+            assert startup_gaps, "startup PAUSE gap begins at boot_start"
+            assert not any(r[1] == "GAP_CLOSE" for r in records), "startup auxiliaries keep PAUSE open"
             incomplete_loss(verdict(reader, trace, w - 1, w))
             idle.stdin.close()
             idle.wait(timeout=5)
             exited = time.monotonic_ns()
-            wait_for(daemon, lambda: w_now(trace) > exited + SEC, 10, "certified time after idle backend exit")
+            wait_for(daemon, lambda: w_now(trace) > exited + SEC, 10, "watermark advances after idle backend exit")
             after = verdict(reader, trace, exited + SEC // 4, exited + SEC // 2)
-            assert after["verdict"] == "complete", (
-                "pre-existing gap must close at last startup backend exit; persistent startup children also keep it open",
-                after, log.read_text())
-            print("PREEXISTING: PASS incomplete before exit; complete afterwards", flush=True)
+            incomplete_loss(after)
+            records, _ = read_trace(trace)
+            assert all(r in records for r in startup_gaps), "boot-start PAUSE remains in the trace"
+            assert not any(r[1] == "GAP_CLOSE" for r in records), (
+                "startup auxiliaries keep PAUSE open after idle client exit", log.read_text())
+            print("PREEXISTING: PASS capture_loss before and after exit; boot-start PAUSE stays open", flush=True)
         finally:
             stop(daemon)
             error.close()

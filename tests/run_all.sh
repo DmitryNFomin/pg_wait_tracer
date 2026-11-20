@@ -764,6 +764,12 @@ if [[ $(id -u) -eq 0 ]] && pgrep -x postgres > /dev/null 2>&1; then
             exclude_test "$name" "requires a PG13/17/18 layout, running PG$PG_VERSION"
             continue
         fi
+        # T-cov exercises the same exact_perf producer/daemon layouts.
+        if [[ "$name" == "test_exact_perf_coverage_live" &&
+              "$PG_VERSION" =~ ^(14|15|16)$ ]]; then
+            exclude_test "$name" "requires a PG13/17/18 layout, running PG$PG_VERSION"
+            continue
+        fi
         if [[ "$name" == "test_capture_smoke_full" ]]; then
             watchpoints=$(probe_watchpoints)
             echo "Watchpoint probe: $watchpoints"

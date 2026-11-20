@@ -493,6 +493,36 @@ static void later_closed(void)
         cleanup(h);
     }
 }
+/* Current fail-safe expectation, not discovery-admission semantics: the L
+ * ring can deliver EXIT before the same pre-existing pid's last cookie-less
+ * TRACE on a per-CPU buffer. The retired pid is rediscovered and reopens the
+ * gap from boot_start permanently without another EXIT. Pin that conservative
+ * revocation here; changing it requires an explicit later unit. */
+static void trace_after_exit(void)
+{
+    uint32_t pid=11;
+    struct fixture *h=coverage_setup(&pid,1);uint64_t b=h->base;
+    uncovered_record(h,pid,b+190,PGWT_LIFECYCLE_EXIT);
+    frontier(h,b+400);tick(h,b+250,b+250,b+250);tick(h,b+410,b+410,b+410);
+    struct scan s=scan(h);uint64_t first_id=s.records[1].c;
+    C(count(&s,PGWT_COVK_GAP_CLOSE)==1 && s.records[2].a==b+190,
+      "only preexisting pid closes gap at EXIT");
+    verdict(h,b+200,b+240,true);
+    unsigned before=syncs;
+    uncovered_record(h,pid,b+180,0); /* TRACE timestamp precedes its received EXIT. */
+    s=scan(h);
+    struct pgwt_coverage_record open=s.records[s.n-1];
+    C(count(&s,PGWT_COVK_GAP_OPEN)==2 && open.kind==PGWT_COVK_GAP_OPEN &&
+      open.reason==PGWT_COVR_PAUSE && open.a==b,
+      "TRACE after EXIT reopens PAUSE from boot_start");
+    C(open.c!=first_id && syncs==before+1,"reordered TRACE revocation has fresh id and fsync");
+    verdict(h,b+200,b+240,false);
+    frontier(h,b+700);tick(h,b+600,b+600,b+600);tick(h,b+710,b+710,b+710);
+    s=scan(h);
+    C(count(&s,PGWT_COVK_GAP_CLOSE)==1,"frontier cannot close rediscovered pid gap without another EXIT");
+    verdict(h,b+200,b+240,false);verdict(h,b+610,b+640,false);
+    cleanup(h);
+}
 static void later_empty(void)
 {
     for (unsigned kind=0;kind<3;++kind) {
@@ -566,9 +596,9 @@ int main(int argc,char **argv)
         return 0;
     }
     const char *names[]={"progress","publish_order","failure","reasons","rearm","late","preexisting",
-        "later_open","later_closed","later_empty","later_full","sync_failure","binding"};
+        "later_open","later_closed","trace_after_exit","later_empty","later_full","sync_failure","binding"};
     void (*run[])(void)={progress,publish_order,failure,reasons,rearm,late,preexisting,
-        later_open,later_closed,later_empty,later_full,sync_failure,binding};
+        later_open,later_closed,trace_after_exit,later_empty,later_full,sync_failure,binding};
     unsigned ran=0;
     for(size_t i=0;i<sizeof(run)/sizeof(run[0]);++i) {
         if(argc>1 && strcmp(argv[1],names[i])) continue;
