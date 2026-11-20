@@ -293,7 +293,7 @@ All records have `identity_known=true`, ready dependencies and unchanged payload
 | 42 | `K_D10, MARKER_D12@E(q1), D14@P0(q2), S(15)`; marker satisfies 25c’s fresh-state obligation. | `FORK_D10 → MARKER_D12[U] → D14[T] → F14`. |
 | 43 | Every input observes Ci. `CHECK(20,Ci), K_D10, D12@P0(q1), S(13)` | `VOID20[Ci,counter_change]`. |
 
-## 6. Discovery admission (DECISIONs 30-44)
+## 6. Discovery admission (DECISIONs 30-45)
 
 Status: INFERRED normative design (2026-11-20). This text asserts neither implementation nor platform qualification. It reverses the earlier exclusion of processes already running at capture start (owner decision recorded on issue 988: "a").
 
@@ -335,7 +335,7 @@ All emission sites, including markers and terminal paths, implement the same ide
 
 Here `e` is the successful enable-completion time of the final attachment. The control establishes discovery provenance and continuous enablement from that attachment, but supplies no coverage lower bound or source boundary. Its proof includes Decisions 31–35, address qualification, installation visibility before enable, successful enable and preserved producer state. Unknown facts are false.
 
-Issue ADMIT once for the final startup attachment. A valid control may arrive after dependent DATA; those records and their release frontier wait for it. Contradictory provenance or a claimed admission proof containing a false required fact reports `FAULT(unknown_evidence,d,C)`.
+Issue ADMIT once for the final startup attachment. A valid control may arrive after dependent DATA; those records and their release frontier wait for matching ADMIT or accepted ABANDON_DISCOVERY under Decision 45. Abandonment permits validated consumption of the abandoned numerical stream, not its publication or numerical certification. Matching terminal lifecycle evidence retains Decision 40’s discharge route without ADMIT. Contradictory provenance or a claimed admission proof containing a false required fact reports `FAULT(unknown_evidence,d,C)`.
 
 A record from an earlier attachment attempt, or stamped before `e`, cannot establish the fresh-record lower bound. Resolve attempt membership from retained attachment and producer-fence evidence; timestamp equality alone does not prove membership in the final attachment.
 
@@ -381,7 +381,7 @@ After ADMIT there is no disable, reseed or replacement of the admitted attachmen
 
 A failed bracket, including denied or unreadable proof, supplies no lower bound. It does not by itself manufacture a loss increment. Independently failed required reads, writes, publications or continuity obligations retain their existing fault accounting.
 
-On exhaustion, a lifetime with an independently valid final attachment may receive ADMIT for the fresh-record route. It remains pending until a qualifying record actually releases or a matching terminal discharge is accepted. A task may run briefly and then remain idle indefinitely; “it ran, so a record will come” is false. Without a valid final attachment it remains pending without ADMIT.
+On exhaustion, a lifetime with an independently valid final attachment may receive ADMIT for the fresh-record route. It remains pending until a qualifying record actually releases or a matching terminal discharge is accepted. A task may run briefly and then remain idle indefinitely; “it ran, so a record will come” is false. When attachment attempts permanently cease without a valid final attachment, an installed, never-admitted discovery identity receives ABANDON_DISCOVERY under Decision 45. Its inventory entry remains unresolved until a matching terminal discharge is accepted. A candidate without an installed discovery identity remains pending under the existing inventory and terminal-discharge rules.
 
 The quiet-baseline route is required scope. Ordinary indefinitely idle, otherwise qualified clients and auxiliaries must be exercised by qualification; waiting for their first transition does not satisfy that requirement.
 
@@ -405,13 +405,15 @@ Replace T-cov rule 5’s closure condition with:
 
 `C_close = max(census_fence, every committed lower bound b_i, every terminal discharge x_i)`.
 
-Compute `C_close` only after census completeness and discharge of every inventory entry. Require qualified completeness strictly beyond `C_close` and successful publication of all supporting records and coverage evidence before advertising coverage beyond it. Publication failure commits neither the affected lower bound nor gap closure.
+Compute `C_close` only after census completeness and discharge of every inventory entry. Require qualified completeness strictly beyond `C_close`, successful validation and accounting of all applicable Decision 45 discards, and successful publication of all supporting records and coverage evidence before committing closure. Persist the gap end `P_close` defined by Decision 42. Publication failure commits neither the affected lower bound nor gap closure. Neither `C_close` nor `P_close` supplies a source boundary or advances FRONTIER.
 
-The interval `[boot_start,C_close)` is unavailable. Later windows are eligible only under all other coverage, loss, attribution and A2 rules. Pending diagnostics report the number of unresolved inventoried lifetimes and separately report whether census completeness is known. A known complete census with no unresolved lifetimes is distinct from an unknown census.
+The interval `[boot_start,P_close)` is unavailable, with `P_close` from Decision 42. Windows beginning at or after `P_close` are eligible only under all other coverage, loss, attribution and A2 rules. Abandonment supplies neither a lower bound nor terminal discharge; an abandoned lifetime remains unresolved until Decision 40 discharges it. Pending diagnostics report the number of unresolved inventoried lifetimes and separately report whether census completeness is known. A known complete census with no unresolved lifetimes is distinct from an unknown census.
 
-**DECISION 42 — No discovery storage carrier.** Use the existing persisted startup gap; add no per-record discovery storage carrier. For the fresh-record route, every uncertified incoming interval ends at or before its committed `b_i≤C_close`, including records from earlier attempts. Exclude completed waits whose endpoint equals `C_close` as well as those ending earlier. A window beginning at `C_close` cannot count the uncertified completion at that endpoint. Preserve raw payload bytes.
+**DECISION 42 — No discovery storage carrier.** Use the existing persisted startup gap; add no per-record discovery storage carrier. For an admitted lifetime, uncertified incoming intervals, including earlier-attempt intervals, must end at or before its committed `b_i≤C_close`. For an abandoned lifetime resolved by terminal discharge, its discarded timed records must be stamped at or before its accepted `x_i≤C_close`. Reconcile these facts before closure; contradictory evidence retains its existing fault consequences. Preserve the raw payload bytes of published records.
 
-This endpoint rule is conservative: without a persisted per-record distinction, no completion at `C_close` is counted through this startup-gap route. Durations use ordinary half-open clipping.
+Persist the gap end `P_close`. Set `P_close=C_close+1 ns` if any released discovery TRANS/MARKER whose incoming numerical evidence is uncertified—a fresh-record anchor, an earlier-attempt record, or a record discarded under Decision 45—has semantic timestamp exactly `C_close`; otherwise set `P_close=C_close`. For this test, a Decision 45 discard counts when it passes validated release consumption, although it is never published. Merely staged or rejected records do not count. Untimed TEXT has no semantic timestamp, and a lifecycle EXIT alone does not trigger the increment.
+
+When the increment applies, the number of completions at `C_close` is unknown, not zero. The persisted unavailable interval includes that instant, so no window containing it is available. Otherwise discovery imposes no additional exclusion at `C_close`; certified completions there retain their ordinary window membership. If `C_close+1 ns` overflows, closure does not commit. Store `P_close` in the existing GAP_CLOSE endpoint field and keep its reserved field zero. This requires no format, reader or consumer change. Durations use ordinary half-open clipping.
 
 The quiet-baseline route qualifies only when subsequently certified intervals use its coherent baseline. An earlier-attempt record cannot rebase them. Gap persistence alone supplies no wait or CPU observations. Missing retained coverage evidence remains unavailable, including on replay or cache reuse. Existing Decision 25c persistence obligations are unchanged.
 
@@ -438,11 +440,32 @@ Before qualification passes, exercise quiet clients and auxiliaries, valid-zero 
 
 Freeze this contract and obtain two independent contract-only answer sets before implementation. Adapter/kernel rows exercise the stated physical facts; abstract merge rows do not establish those facts merely by setting a proof boolean.
 
+**DECISION 45 — Abandoned discovery.** Add control input:
+
+`ABANDON_DISCOVERY(pid,g,d,C)`.
+
+It consumes no transport source position and supplies no source boundary. When startup attachment attempts for an installed discovery identity permanently end, the daemon issues one final disposition: ADMIT for an independently valid final attachment, or ABANDON when none exists. Retransmission of an accepted abandonment is permitted as specified below.
+
+Accept a first abandonment only for an inventoried, unambiguously bound discovery identity `(capture,pid,g)` with no accepted ADMIT in any epoch of the capture, while the startup gap is open. Unknown or contradictory identity facts do not qualify. An invalid abandonment reports `FAULT(unknown_evidence,d,C)`. Acceptance is permanent for that identity throughout the capture and survives REARM. It does not change the identity map, remove a tombstone, recycle a cookie, alter queued cookies or affect another lifetime using the same PID.
+
+An identical duplicate of an accepted abandonment is idempotent, including after terminal discharge or gap closure: it creates no second disposition, discard or diagnostic increment. Continue ordinary counter observations on every control; idempotence does not suppress an independently observed fault. Any later ADMIT or CONFIRM for the abandoned identity is contradictory evidence and reports `FAULT(unknown_evidence,d,C)`. An already admitted identity cannot be abandoned.
+
+From acceptance, that lifetime’s staged and future TRANS/MARKER records and TEXT belonging exclusively to its abandoned numerical stream are consumed under the ordinary release rules, counted once in `discovery_abandoned_records`, and never published. This diagnostic is separate from the existing 15-counter vector. Shared metadata or another lifetime’s records are not discarded by this decision. Untimed TEXT remains untimed. Count each completed discard once even if a subsequent publication in the same release attempt fails.
+
+Abandonment removes only the missing-ADMIT dependency. Before a frontier passes a discarded record, validate its transport identity, source position, arrival timestamp and retained boundaries, and validate the complete eligible batch’s applicable identities, dependencies, ordering and continuity. Reconcile attachment history, producer completion and reliable failure accounting; account for every consumed discard; obtain ordinary qualified source completeness strictly beyond the proposed frontier; and successfully publish all required supporting and coverage evidence. Missing completion proof holds release. Established failures retain their existing fault handling. No discarded record may bypass duplicate, clock, seal, tie, sequence, counter, dependency or publication checks, or conceal evidence disproving an earlier frontier.
+
+Every discarded timed record must remain inside the persisted unavailable interval. While the lifetime is unresolved, the startup gap stays open. Abandonment supplies no `b_i`, does not discharge the inventory entry and does not establish census completeness. Only an accepted Decision 40 terminal discharge resolves the abandoned lifetime. Its matching lifecycle EXIT is released normally under strict eligibility and successful-publication rules; it is not discarded. Terminal reconciliation must establish that the lifetime’s discarded timed records are stamped at or before `x_i`. A discarded record exactly at `C_close` triggers Decision 42’s increment.
+
+Abandonment is not a loss and forgives no loss. Failed enable, binding, read, allocation, map, staging, accounting and publication operations retain their applicable consequences. A refuted admission claim or uncertain record attribution cannot be converted into a successful discard. Acceptance neither cancels a fault nor rearms a suspended epoch; trusted release remains suspended until an independently valid REARM.
+
 ### Clarifications after the oracle round (lead, 2026-11-20)
 
 Two independent answer sets (oracle-discovery/answers-sol.md, answers-opus.md) agreed with each other and with the expected outputs on 38 of 39 rows. These sentences decide the remaining points; neither changes an agreed answer.
 - After a late unlisted pre-existing lifetime is discovered (row D10), the startup gap is open again from `boot_start`, the pending inventory holds that lifetime (pending 1), and census completeness is no longer established. The observation alone produces no merge VOID.
 - A wait that is still open in a row contributes no completed count and no duration; it is not reported as zero duration (row D02c).
+
+After the review of the merge unit found two gaps (the instant C, and an identity installed but never admitted), DECISIONs 36, 38, 41 and 42 were revised and DECISION 45 (abandoned discovery) was added. The persisted gap end follows Fable's rule (C+1 only when an uncertified discovery record is stamped exactly C; no flag in the reserved field); Astra, who had proposed a flag, raised no soundness objection to it. Two fresh independent answer sets for the 34 changed and new rows (oracle-discovery/answers-delta-sol.md, answers-delta-opus.md, compare-delta.md) agreed with each other and with the expected outputs on 33 rows. This sentence decides the remaining one; it changes no agreed answer.
+- A terminal discharge commits only when its lifecycle EXIT has been published successfully. A rejected EXIT publication leaves the lifetime pending and the startup gap open (row A15).
 
 ### Oracle
 

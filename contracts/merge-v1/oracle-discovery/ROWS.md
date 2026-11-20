@@ -21,10 +21,18 @@ Notation additions:
 - `Cf=C0` except `fork_state_update_fail=1`; `Cs=C0` except `state_map_update_fail=1`. `Ce` and `Cw` retain §5’s definitions.
 - AD, B, TRY, TERM, AOP and LATE are controls or adapter observations; they consume no transport source positions.
 - All stated numerical evaluations request results only from the supplied records and coverage evidence. No unstated open-wait snapshot is supplied.
+- `AB_D` abbreviates `ABANDON_DISCOVERY(pid_D,g_D,20,C0)`; `AB_H` substitutes H.
+- In the new A rows, D’s discovery identity is installed and unambiguously bound to its census entry. Its attachment attempts have permanently ended without a valid final attachment unless the row supplies ADMIT or overrides these facts.
+- `TERM_Dt` and `EXIT_Dt@L` substitute D and timestamp `t` in the existing terminal notation.
+- `M_Dt@P0` is a MARKER belonging to D at semantic timestamp `t`.
+- `TEXT_Dx@L` is untimed metadata x belonging exclusively to D’s numerical stream. A `{requires x}` annotation specifies a dependency on that metadata.
+- AB is a control and consumes no transport source position.
+- Every new A row requests the final `discovery_abandoned_records` diagnostic, initially zero.
+- Numerical evaluations and startup-gap observations use the emitted coverage records decoded by the existing reader. Supply otherwise valid coverage, attribution and A2 evidence except for restrictions explicitly present in the row. Do not substitute an in-memory discovery lower bound for the persisted gap.
 
 | ID | Input sequence / starting-state override |
 |---|---|
-| D01 | `AD_D8, D12(Y→X)@P0, D15(X→0,3)@P0, S(16)`. Evaluate X duration/count in `[12,16)` and the completion at 12. |
+| D01 | `AD_D8, D12(Y→X)@P0, D15(X→0,3)@P0, S(16)`. Evaluate X duration/count in both `[12,16)` and `[13,16)`, and evaluate the completed-Y count in `[12,13)`. |
 | D02a | `AD_D13, B_D12, S(12), S(13), D15(X→0,3)@P0, S(16)`. Evaluate X in `[12,16)`. |
 | D02b | Earlier seed word X. `AD_D8, READ_D(12,X), S(16)`. No TRANS/MARKER input. |
 | D02c | Earlier seed word X. `AD_D8, READ_D(12,X), D9(X→Y)@P0, D10(Y→X,1)@P0, S(13)`. Neither record had been dequeued at the reread. Evaluate X in `[10,13)`. |
@@ -63,4 +71,27 @@ Notation additions:
 | Q07 | `AD_D13, B_D12{X=0, accumulator=0, CPU base=0, base_valid=true, on_cpu_ts=0}, AOP(D remains asleep until 14; switch-in at 14; CPU execution through 15), D15(0→Y,3,cpu=1)@P0, S(16)`. Evaluate CPU for the supplied `[12,15)` interval and inspect the seed. |
 | Q08 | `B_D12{e=13, armed_address=A1, resolved_address=A2}, S(16)`, with `A1≠A2`. No AD or DATA input. |
 | Q09 | `TRY_D(7,8;α1,v0=7,v1=8), TRY_D(9,10;α2,v0=8,v1=9), TRY_D(11,12;α3,v0=9,v1=9), AD_D12{α3}, B_D11{α3,v0=9,v1=9}, D9(Y→Z,1)@P0{retained origin α1}, S(12), D15(X→0,4)@P0{origin α3}, S(16)`. The D9 record arrives after AD and B. Inspect final lower bound and baseline after each release. |
+| D14a | `AD_D8, D12(Y→X)@P0, A12(Y→0,2)@P1, D15(X→0,3)@P0, S(16)`. A’s incoming Y interval has its existing attached provenance. Evaluate the completed-Y count across A and D in `[12,13)`, and X duration/count in `[13,16)`. |
+| D14b | Census fence 15. `AD_D8, D12(Y→X)@P0, D15(X→0,3)@P0, S(16)`. Evaluate X duration/count in `[15,16)`. |
+| D14c | Q09’s inputs, replacing `D9(Y→Z,1)@P0{retained origin α1}` with `D11(Y→Z)@P0{retained origin α2}`. Retained physical history places this α2 emission before α2’s completion fence and the α3 seed; both the emission and the α3 seed have timestamp 11. Evaluate X duration/count in `[11,16)` and `[12,16)`, and inspect the final lower bound and baseline after each release. |
+| A01 | `D9(Y→X)@P0, D12(X→Y,3)@P0, S(13), AB_D, S(16)`. |
+| A02 | A01’s inputs, then `D17(Y→X,5)@P0, S(20)`. |
+| A03 | A01’s inputs, then `terminal_D18(Y→EXIT,6)@E, EXIT_D18@L, TERM_D18, S(18), S(19)`. |
+| A04 | Census contains D and H. `AD_D8, D12(Y→X)@P0, S(13), AB_D`. No H control or DATA is supplied. |
+| A05 | `D9(Y→X)@P0, AB_D, AD_D8, S(16)`. |
+| A06 | `AB_H`. H is absent from the census. |
+| A07 | Census contains D and H. `D9(Y→X)@P0, AD_H13, B_H12, AB_D, H15(X→0,3)@P1, S(16)`. |
+| A08 | `D9(Y→X)@P0, AB_D, CHECK(20,Ce), S(16)`. |
+| A09 | A03’s inputs, then an identical retransmission of its `AB_D`. |
+| A10 | A01’s inputs, then `B_D12{e=13}`. |
+| A11 | A01’s inputs, then `D14(Y→X,2)@P0`. |
+| A12 | A01’s inputs, then `FAULT(allocation_fail,20,C0), REARM(21,C0,attachment_proofs), D17(Y→X,5)@P0, S(18)`. REARM supplies fresh valid A/B attachment proofs and a readable C0 baseline; it supplies no discovery ADMIT or CONFIRM. Observations after REARM use detection time 22. |
+| A13 | `D9(Y→X)@P0, AB_D, BOUNDARY(P0,16,p), BOUNDARY(P1,16,p), BOUNDARY(L,16,p)`, each using its next source position. No E boundary is supplied. |
+| A14 | `D9(Y→X)@P0, AB_D, CHECK(20,unknown), S(16)`. The CHECK cannot establish completed failure accounting. |
+| A15 | A03’s inputs, except the writer rejects `EXIT_D18` at detection time 20 and observes Cw. Other publications, including VOID, succeed. |
+| A16 | `D9(Y→X)@P0{identity_known=false}, AB_D, S(16)`. The record’s attribution to the installed identity cannot be established. |
+| A17 | A03’s inputs, then `K_R20, R22@P0, S(23)`. R is `(pid=30,g=1)` with valid fork-seed provenance. |
+| A18 | `D9(Y→X)@P0, FAULT(allocation_fail,20,C0), AB_D, S(16)`. |
+| A19 | `TEXT_Dx@L, D9(Y→X)@P0{requires x}, M_D10@P0{requires x}, AB_D, S(16)`. Metadata x is valid; no other lifetime depends on it. |
+| A20 | D was never enabled and has no mutable interval state. `TERM_D18, EXIT_D18@L, S(19), AB_D`. |
 
