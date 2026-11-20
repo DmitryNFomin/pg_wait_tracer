@@ -4,7 +4,7 @@
 #
 #   tests/provision-runner.sh ubuntu
 #   tests/provision-runner.sh el8
-#   tests/provision-runner.sh el9    # stub — step 4 of docs/DEV_LOOP_PLAN.md
+#   tests/provision-runner.sh el9
 #
 #   tests/provision-runner.sh ubuntu --runner-token TOKEN
 #     Also installs + registers the persistent GitHub Actions self-hosted
@@ -19,12 +19,12 @@
 #     machine, same labels, so CI's `[self-hosted, gate-box]` targeting sees
 #     it as just another box in the pool): GitHub runner names must be
 #     unique per repo, so a second box registering as "pgwt-gate" again
-#     would collide with the first. Labels are deliberately NOT
-#     parameterized here — every gate box, however many there are, carries
-#     the exact same `self-hosted,linux,x64,gate-box` set so CI never has to
-#     know how many boxes are in the pool.
+#     would collide with the first. Ubuntu boxes keep the
+#     `self-hosted,linux,x64,gate-box` labels. EL8 uses its own
+#     `self-hosted,linux,x64,gate-box-el8` pool and defaults to
+#     pgwt-gate-el8; the pools must never overlap.
 #
-# ubuntu/el8 install everything `make box-check` needs for the LIVE tier
+# ubuntu/el8/el9 install everything `make box-check` needs for the LIVE tier
 # (tests/run_all.sh --require-live): build deps for the daemon + pgwt-server
 # (same recipe as .github/workflows/ci.yml / nightly.yml — the known-good
 # apt/dnf + bpftool-fallback steps), the PGDG repo, PostgreSQL 13/16/17/18 (one
@@ -65,12 +65,12 @@
 # Stable exit-status contract (callers branch on these codes):
 #   0: provisioning succeeded.
 #   1: privilege check or provisioning failed (commands may return other errors).
-#   2: invalid arguments / usage.
-#   3: OS unsupported by this provisioner (only the unsupported-OS arm emits it).
+#   2: invalid arguments / usage, including unknown OS names.
+#   3: reserved for a recognised OS without a provisioning recipe.
 #  75: EX_TEMPFAIL, contention: a bounded lock wait genuinely timed out.
 # Hand invocation defaults to 600s; box-check passes --lock-wait unbounded.
-# Both 3 and 75 are reserved: only the unsupported-OS arm and bounded lock
-# timeout deliberately emit them. Any child's 3 or 75 is normalised to 1.
+# Both 3 and 75 are reserved: only a deliberate unsupported-OS refusal or
+# bounded lock timeout may emit them. Any child's 3 or 75 is normalised to 1.
 set -euo pipefail
 PROVISION_DELIBERATE_EXIT=0
 
@@ -88,10 +88,10 @@ OS="${1:-}"
 shift || true
 
 # --runner-token / PGWT_RUNNER_TOKEN: optional, only consumed by the "GitHub
-# Actions runner" block near the bottom of this script (OS=ubuntu only).
+# Actions runner" block near the bottom of this script (OS=ubuntu or el8).
 RUNNER_TOKEN="${PGWT_RUNNER_TOKEN:-}"
-# --runner-name / PGWT_RUNNER_NAME: optional, defaults to "pgwt-gate" (the
-# original box's name) below — see the "GitHub Actions runner" block.
+# --runner-name / PGWT_RUNNER_NAME: optional, defaults to "pgwt-gate" for
+# Ubuntu or "pgwt-gate-el8" for EL8 — see the "GitHub Actions runner" block.
 RUNNER_NAME="${PGWT_RUNNER_NAME:-}"
 LOCK_WAIT=600
 while [[ $# -gt 0 ]]; do
@@ -130,7 +130,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-RUNNER_NAME="${RUNNER_NAME:-pgwt-gate}"
+if [[ "$OS" == el8 ]]; then
+    RUNNER_NAME="${RUNNER_NAME:-pgwt-gate-el8}"
+else
+    RUNNER_NAME="${RUNNER_NAME:-pgwt-gate}"
+fi
 if [[ "$LOCK_WAIT" != unbounded && ! "$LOCK_WAIT" =~ ^0*[1-9][0-9]*$ ]]; then
     echo "Invalid --lock-wait: $LOCK_WAIT (expected a positive integer or unbounded)" >&2
     exit 2
@@ -142,14 +146,8 @@ if [[ -z "$OS" ]]; then
 fi
 
 case "$OS" in
-    el9)
-        echo "STUB: el9 provisioning is not implemented yet — it is step 4" >&2
-        echo "of docs/DEV_LOOP_PLAN.md (ephemeral VMs + real OS matrix)." >&2
-        PROVISION_DELIBERATE_EXIT=1
-        exit 3
-        ;;
-    ubuntu|el8)
-        ;;
+    ubuntu) ;;
+    el8|el9) EL_MAJOR="${OS#el}" ;;
     *)
         echo "Unknown OS: $OS (expected ubuntu|el8|el9)" >&2
         exit 2
@@ -271,10 +269,16 @@ case "$OS" in
             || apt-get install -y -qq linux-tools-generic 2>/dev/null \
             || log "WARNING: no linux-tools package matched — perf may be unavailable"
         ;;
-    el8)
-        log "enabling PowerTools for EL8 build dependencies"
-        dnf install -y dnf-plugins-core
-        dnf config-manager --set-enabled powertools
+    el8|el9)
+        if [[ "$OS" == el8 ]]; then
+            log "enabling PowerTools for EL8 build dependencies"
+            dnf install -y dnf-plugins-core
+            dnf config-manager --set-enabled powertools
+        else
+            log "enabling CRB for EL9 build dependencies"
+            dnf install -y dnf-plugins-core
+            dnf config-manager --set-enabled crb
+        fi
 
         log "installing build + runtime dependencies"
         dnf install -y gcc clang llvm make tar git rsync python3 procps-ng \
@@ -348,13 +352,13 @@ case "$OS" in
         fi
         apt-get update -qq
         ;;
-    el8)
+    el8|el9)
         # The RPM is our marker: do not reinstall the repo on every run.
         if ! rpm -q pgdg-redhat-repo >/dev/null 2>&1; then
-            log "adding PGDG EL8 repo"
-            dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+            log "adding PGDG EL${EL_MAJOR} repo"
+            dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-${EL_MAJOR}-x86_64/pgdg-redhat-repo-latest.noarch.rpm
         else
-            log "PGDG EL8 repo already present"
+            log "PGDG EL${EL_MAJOR} repo already present"
         fi
         # AppStream's postgresql module masks PGDG's postgresqlNN packages.
         dnf -qy module disable postgresql || true
@@ -416,7 +420,7 @@ for V in 13 16 17 18; do
                 pg_ctlcluster "$V" main start
             fi
             ;;
-        el8)
+        el8|el9)
             # PGDG puts each major's clients outside PATH; Debian's
             # pg_wrapper is absent, so use that major's binaries explicitly.
             PSQL="/usr/pgsql-$V/bin/psql"
@@ -428,7 +432,7 @@ for V in 13 16 17 18; do
                     cat > "/etc/yum.repos.d/pgdg$V-archive.repo" <<EOF
 [pgdg$V-archive]
 name=PostgreSQL $V (PGDG archive)
-baseurl=https://yum-archive.postgresql.org/$V/redhat/rhel-8-x86_64/
+baseurl=https://yum-archive.postgresql.org/$V/redhat/rhel-${EL_MAJOR}-x86_64/
 enabled=1
 gpgcheck=0
 EOF
@@ -600,8 +604,8 @@ done
 # version works fine against PG18's client binaries for plain querying
 # (libpq's wire protocol is compatible across these majors); callers that
 # need a SPECIFIC cluster already pass -p/-U explicitly, same as on ubuntu.
-if [[ "$OS" == "el8" ]]; then
-    log "symlinking PG18 client binaries onto PATH (el8 has no pg_wrapper)"
+if [[ "$OS" == "el8" || "$OS" == "el9" ]]; then
+    log "symlinking PG18 client binaries onto PATH ($OS has no pg_wrapper)"
     for bin in psql pgbench pg_isready createdb dropdb; do
         ln -sf "/usr/pgsql-18/bin/$bin" "/usr/local/bin/$bin"
     done
@@ -674,7 +678,7 @@ case "$OS" in
         # etc.) headless Chromium needs, which a minimal server image lacks.
         python3 -m playwright install --with-deps chromium >/dev/null
         ;;
-    el8)
+    el8|el9)
         if ! command -v go >/dev/null 2>&1; then
             log "installing Go (golang, needs go.mod's 1.21+)"
             dnf install -y golang
@@ -823,7 +827,7 @@ EOF
 #      ephemeral-VM runner, a separate, --ephemeral registration).
 #    - labels self-hosted,linux,x64,gate-box ; name $RUNNER_NAME (default
 #      pgwt-gate, override with --runner-name/PGWT_RUNNER_NAME for a
-#      sibling box).
+#      sibling box); EL8 uses gate-box-el8 and defaults to pgwt-gate-el8.
 #    - one job at a time: config.sh's default (no extra flag needed) — the
 #      box is shared with agents running `make box-check`, and every timing
 #      test step already serialises on /tmp/pgwt-box-check.lock, but a
@@ -838,14 +842,9 @@ EOF
 #      re-registering is a deliberate, separate step, not something a bare
 #      re-run of this script does.
 # ---------------------------------------------------------------------------
-# Restored on review (#749 nit 9): a bare `-n "$RUNNER_TOKEN"` check would
-# register an el8 4.18 box into the SAME `self-hosted,linux,x64,gate-box`
-# pool as the ubuntu gate boxes, with identical labels -- CI treats every
-# box in that pool as interchangeable, and ci.yml has no el8 job at all
-# today (only a comment), so an el8 runner in that pool is pure risk with
-# no corresponding benefit yet. Re-add el8 (its own label set) only
-# alongside real el8 CI job support.
-if [[ "$OS" == "ubuntu" && -n "$RUNNER_TOKEN" ]]; then
+# EL8 must never enter the Ubuntu gate-box pool. Its separate label is
+# consumed only by box-tier-el8 in ci.yml; EL9 remains unregistered.
+if [[ ( "$OS" == "ubuntu" || "$OS" == "el8" ) && -n "$RUNNER_TOKEN" ]]; then
     RUNNER_HOME=/opt/actions-runner
     RUNNER_VERSION=2.337.0
     RUNNER_TARBALL="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
@@ -891,7 +890,11 @@ EOF
     if [[ -f "$RUNNER_HOME/.runner" ]]; then
         log "runner already registered — leaving registration alone (remove $RUNNER_HOME/.runner and re-run with a fresh token to re-register)"
     else
-        log "registering runner '$RUNNER_NAME' with GitHub (labels: self-hosted,linux,x64,gate-box)"
+        if [[ "$OS" == el8 ]]; then
+            log "registering runner '$RUNNER_NAME' with GitHub (labels: self-hosted,linux,x64,gate-box-el8)"
+        else
+            log "registering runner '$RUNNER_NAME' with GitHub (labels: self-hosted,linux,x64,gate-box)"
+        fi
         # Note: GitHub's documented config.sh invocation takes --token on
         # the command line, so the registration token is briefly visible to
         # anyone who can read /proc/*/cmdline on this box while config.sh
@@ -900,13 +903,23 @@ EOF
         # this script can avoid; the token is single-use and expires in
         # ~1h (minted just before this script is invoked — see the comment
         # at the top of this block).
-        sudo -u runner "$RUNNER_HOME/config.sh" \
-            --unattended \
-            --url "$RUNNER_REPO_URL" \
-            --token "$RUNNER_TOKEN" \
-            --name "$RUNNER_NAME" \
-            --labels self-hosted,linux,x64,gate-box \
-            --work _work
+        if [[ "$OS" == el8 ]]; then
+            sudo -u runner "$RUNNER_HOME/config.sh" \
+                --unattended \
+                --url "$RUNNER_REPO_URL" \
+                --token "$RUNNER_TOKEN" \
+                --name "$RUNNER_NAME" \
+                --labels self-hosted,linux,x64,gate-box-el8 \
+                --work _work
+        else
+            sudo -u runner "$RUNNER_HOME/config.sh" \
+                --unattended \
+                --url "$RUNNER_REPO_URL" \
+                --token "$RUNNER_TOKEN" \
+                --name "$RUNNER_NAME" \
+                --labels self-hosted,linux,x64,gate-box \
+                --work _work
+        fi
     fi
 
     # `|| true`: under set -e/pipefail, `systemctl list-unit-files` exits 1
@@ -936,16 +949,14 @@ EOF
     systemctl --no-pager status 'actions.runner.*.service' 2>/dev/null || true
 else
     if [[ -n "$RUNNER_TOKEN" ]]; then
-        log "skipping GitHub Actions runner install/registration: OS=$OS, not ubuntu (see the OS guard above)"
+        log "skipping GitHub Actions runner install/registration: OS=$OS, not ubuntu/el8 (see the OS guard above)"
     else
         log "no --runner-token / PGWT_RUNNER_TOKEN given — skipping GitHub Actions runner install/registration"
     fi
 fi
 
-# Real finding from review (#749 nit 6): `provision-runner.sh el8
-# --runner-token` exits 0 having only logged the skip above, mid-output --
-# a reader scanning just the final summary line would see a plain success
-# with no sign the runner was never touched. Repeat it here.
+# Repeat an unsupported registration request in the final summary so it
+# cannot be mistaken for a registered runner (EL9 has no CI runner pool).
 runner_summary=""
-[[ "$OS" != "ubuntu" && -n "$RUNNER_TOKEN" ]] && runner_summary=" (runner registration skipped: OS=$OS, not ubuntu)"
+[[ "$OS" != "ubuntu" && "$OS" != "el8" && -n "$RUNNER_TOKEN" ]] && runner_summary=" (runner registration skipped: OS=$OS, not ubuntu/el8)"
 log "provisioning complete ($OS) in $((SECONDS - PROVISION_START))s (lock wait ${LOCK_WAIT_SECONDS}s)$runner_summary"

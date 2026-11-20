@@ -5,6 +5,8 @@
 # otherwise a box-check "green" proves nothing about a ci_smoke-only gate
 # (issue #433), and every on-disk candidate test must have a runner. This
 # list applies to BOTH the ci_smoke reconciliation and the orphan scan.
+# box-tier-el8 uses the same box-tier.sh / run_all.sh membership as Ubuntu;
+# its runner-label/registration controls run in test_check_runner_registration.sh.
 # A deliberate exception or recorded registration gap goes here, one per line:
 #
 #   filename|reason
