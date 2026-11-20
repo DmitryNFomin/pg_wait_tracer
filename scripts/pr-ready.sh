@@ -75,7 +75,7 @@ printf 'pr-ready: web/static/ or tests/web_snapshots/ changed versus %s: %s\n' "
 printf '%s\n' 'pr-ready: UNCHECKED: required OS/PG coverage, box log provenance and live-UI-smoke verdict, gallery cell justifications, and fresh reviewer approval remain with the caller (CLAUDE.md).'
 
 # A stamp from a previous run must not turn an unavailable check into a pass.
-rm -f .pgwt-check.stamp || die "cannot remove previous check stamp"
+rm -f .pgwt-check.stamp .pgwt-check.mode || die "cannot remove previous check stamp"
 finish_target() {
     local target=$1 rc
     shift
@@ -117,10 +117,11 @@ printf 'pr-ready: check make exit %s (stamp is authoritative)\n' "${check_status
 tree_hash=$(scripts/tree-hash.sh)
 hash_rc=$?
 stamp=$(cat .pgwt-check.stamp 2>/dev/null) || stamp=''
-if [[ "$hash_rc" -eq 0 && -n "$tree_hash" && "$stamp" == "$tree_hash" ]]; then
+mode=$(cat .pgwt-check.mode 2>/dev/null) || mode=''
+if [[ "$hash_rc" -eq 0 && -n "$tree_hash" && "$stamp" == "$tree_hash" && "$mode" == full ]]; then
     printf 'pr-ready: check PASSED: .pgwt-check.stamp matches scripts/tree-hash.sh (%s)\n' "$tree_hash"
 else
-    printf 'pr-ready: check FAILED: stamp missing/mismatch or tree hash unavailable (stamp=%s, tree=%s, hash exit=%s)\n' "${stamp:-missing}" "${tree_hash:-unavailable}" "$hash_rc" >&2
+    printf 'pr-ready: check FAILED: stamp missing/mismatch, mode not full or tree hash unavailable (stamp=%s, mode=%s, tree=%s, hash exit=%s)\n' "${stamp:-missing}" "${mode:-missing}" "${tree_hash:-unavailable}" "$hash_rc" >&2
     failed=1
 fi
 if [[ "${check_status[1]}" -ne 0 ]]; then

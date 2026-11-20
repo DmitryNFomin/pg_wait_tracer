@@ -144,8 +144,10 @@ if ! "$CC_BIN" "${CFLAGS[@]}" -o "$work/head.o" "$TU"; then
     echo "FAIL: $TU does not compile at HEAD"; exit 1
 fi
 
-nm -u "$work/base.o" | sed 's/^ *//' | sort -u > "$work/base.txt"
-nm -u "$work/head.o" | sed 's/^ *//' | sort -u > "$work/head.txt"
+# BSD nm -u prints names alone; GNU nm prefixes them with the U type.
+# Compare names in both formats so Linux allowlist lookups receive a symbol.
+nm -u "$work/base.o" | awk '{print $NF}' | sort -u > "$work/base.txt"
+nm -u "$work/head.o" | awk '{print $NF}' | sort -u > "$work/head.txt"
 
 # POSITIVE CONTROL. Two empty symbol sets compare equal, so a TU that was
 # compiled away to nothing — wrong file, or its whole body behind an #ifdef

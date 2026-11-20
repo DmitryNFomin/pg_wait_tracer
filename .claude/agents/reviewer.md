@@ -12,8 +12,10 @@ ONLY that, so it must stand alone.
 Steps, in order:
 1. `git log --oneline master..HEAD` and `git diff master...HEAD --stat`. Read
    every changed file fully, not just the hunks.
-2. Confirm `.pgwt-check.stamp` equals `scripts/tree-hash.sh` output. If not,
-   run `make check` yourself.
+2. Confirm `.pgwt-check.stamp` equals `scripts/tree-hash.sh` output
+   and `.pgwt-check.mode` records `fast` or `full`.
+   Either mode satisfies the push guard; PR readiness requires `full`.
+   If the tree hash differs or full-mode evidence is missing, run `make check`.
 3. Find the latest `tests/results/box-check-*.log`; confirm it is newer than
    the last commit and ends with a passing run_all summary. If missing or
    stale, run `make box-check` (needs `$PGWT_BOX`); if no box is configured,
