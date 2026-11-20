@@ -1,4 +1,5 @@
 #include "counter_vector.h"
+#include <errno.h>
 
 const char *const pgwt_counter_component_names[PGWT_COUNTER_COMPONENTS] = {
     "lifecycle_fork_drop", "lifecycle_init_drop", "lifecycle_exit_drop",
@@ -56,8 +57,13 @@ struct pgwt_counter_vector pgwt_read_counter_vector(
                 s->lifecycle_init_lost_total, s->init_state_read_fail_total == 0};
         else if (i == PGWT_C_WRITER_PUSH_FAIL)
             v.components[i] = (struct pgwt_counter_value){s->writer_push_fail_total, true};
-        else
+        else {
+            int previous_errno = errno;
+            errno = 0;
             v.components[i] = pgwt_read_percpu_counter(fds[i], slots[i], s->ncpu, lookup);
+            if (!v.components[i].valid) v.read_errno[i] = errno;
+            if (!errno) errno = previous_errno;
+        }
     }
     v.components[PGWT_C_STATE_MAP_UPDATE_FAIL] = pgwt_counter_add(
         v.components[PGWT_C_STATE_MAP_UPDATE_FAIL], s->state_map_full_total);

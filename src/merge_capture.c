@@ -1,3 +1,6 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -10,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 struct retained {
     ma_envelope envelope;
@@ -1053,7 +1057,6 @@ void pgwt_capture_dump_destroy(struct pgwt_capture_dump *dump)
 #include "capture_counters.h"
 #include "event_stream.h"
 #include <fcntl.h>
-#include <time.h>
 #include <unistd.h>
 
 int pgwt_merge_capture_snapshot(struct pgwt_daemon *d, ma_snapshot *s, uint64_t *now)
@@ -1067,6 +1070,7 @@ int pgwt_merge_capture_snapshot(struct pgwt_daemon *d, ma_snapshot *s, uint64_t 
     memset(s, 0, sizeof(*s)); s->valid = v.valid;
     for (size_t i = 0; i < PGWT_MERGE_COUNTERS; ++i) {
         s->value[i] = v.components[i].value; s->component_valid[i] = v.components[i].valid;
+        d->merge_counter_errno[i] = v.read_errno[i];
     }
     if (d->merge_capture) d->merge_capture->last_checkpoint_at = *now;
     return 0;
@@ -1159,7 +1163,18 @@ int pgwt_merge_capture_open(struct pgwt_daemon *d)
         baseline.counters.value[i] = initial.value[i];
         baseline.counters.known &= initial.component_valid[i];
     }
-    if (!baseline.counters.known) return -EIO;
+    if (!baseline.counters.known) {
+        size_t i = 0;
+        while (i < PGWT_MERGE_COUNTERS && initial.component_valid[i]) ++i;
+        const char *component = i < PGWT_MERGE_COUNTERS ? pgwt_counter_component_names[i] : "snapshot";
+        int error = i < PGWT_MERGE_COUNTERS ? d->merge_counter_errno[i] : 0;
+        if (error)
+            fprintf(stderr, "exact-perf: startup refused: counter %s is unreadable: errno=%d (%s)\n",
+                    component, error, strerror(error));
+        else
+            fprintf(stderr, "exact-perf: startup refused: counter %s is unreadable: errno=unknown\n", component);
+        return -EIO;
+    }
     const char *premise = getenv("PGWT_TEST_EXACT_ATTACH_PREMISE");
     bool assumed = premise && !strcmp(premise, "1");
     if (assumed)

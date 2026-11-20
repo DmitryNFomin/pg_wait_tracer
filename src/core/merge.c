@@ -240,8 +240,8 @@ static pgwt_merge_status fault(pgwt_merge *m, pgwt_merge_reason reason,
         m->identity_repair_needed = true;
     m->observed = obs.counters;
     pgwt_merge_output out = {.kind = PGWT_MERGE_OUT_VOID, .d = obs.d,
-        .epoch = m->report.epoch, .counters = obs.counters, .reason = reason,
-        .allocation = reason == PGWT_MERGE_ALLOCATION_FAIL ? m->diagnostics.allocation : (pgwt_allocation_failure){0}};
+        .epoch = m->report.epoch, .counters = obs.counters, .reason = reason};
+    if (reason == PGWT_MERGE_ALLOCATION_FAIL) out.allocation = m->diagnostics.allocation;
     if (!m->config.sink(m->config.sink_context, &out, &obs))
         m->report.void_failed = true;
     return m->report.status;

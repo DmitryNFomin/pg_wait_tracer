@@ -1,5 +1,6 @@
 """Harness-only cut/terminal-discard stimulus; no installed binary uses it."""
 from contextlib import contextmanager
+import hashlib
 import os
 import json
 import re
@@ -21,7 +22,8 @@ def replace_once(source, before, after):
 def bpf_source(source, victim, uncounted=False):
     # Same reservation/give-up shape as the existing odd-PID INIT stimulus,
     # but a withdrawn attempt is counted as a discard, never as a failure.
-    # No maps, rodata fields, wire layouts or skeleton member layouts change.
+    # Map definitions, rodata fields and wire layouts stay the same. LLVM may
+    # reorder maps in the object, changing the generated skeleton's members.
     stimulus = '''
     /* CUTDISCARD TEST BUILD ONLY: main thread admitted for one syscall. */
     if (tid == (u32)(id >> 32)) {
@@ -72,16 +74,42 @@ static void cd_positions(struct linux_transport *, const uint64_t [2], const uin
     return replace_once(source, anchor, '#include "transport_cutdiscard.h"\n' + anchor)
 
 
+def fingerprint(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def stamp_object(obj, dependencies, skeleton):
+    """Record compiler dependencies and the bytes used by this build."""
+    headers = shlex.split(Path(dependencies).read_text().replace('\\\n', ' '))[1:]
+    for header in headers:
+        if Path(header).name == 'pg_wait_tracer.skel.h' and Path(header).resolve() != skeleton.resolve():
+            raise Refused(f'skeleton mismatch: {obj} compiled against {header}, expected {skeleton}')
+    Path(str(obj) + '.skeleton.json').write_text(json.dumps({
+        'object': fingerprint(obj), 'skeleton': fingerprint(skeleton)}))
+
+
+def guard_objects(objects, skeleton):
+    """Refuse unproven/stale objects, including a product object substituted
+    for one compiled against the regenerated test skeleton.
+    """
+    for obj in objects:
+        try:
+            stamp = json.loads(Path(str(obj) + '.skeleton.json').read_text())
+        except (OSError, ValueError) as error:
+            raise Refused(f'skeleton mismatch: {obj} has no valid build provenance') from error
+        if stamp != {'object': fingerprint(obj), 'skeleton': fingerprint(skeleton)}:
+            raise Refused(f'skeleton mismatch: {obj} was built against different object/skeleton bytes')
+
+
 def build(directory, victim, uncounted=False):
-    """Build only on Linux, in scratch. Reuse the project objects except the
-    instrumented reader and daemon.c (which embeds the test BPF skeleton).
-    The test BPF has exactly the product's map/prog/rodata member layouts,
-    so the remaining objects use the same skeleton ABI.
+    """Linux-only scratch build. Rebuild all userspace objects with the test
+    skeleton first on the include path, including every skeleton consumer.
+    Compiler dependencies and byte fingerprints guard the final link.
     """
     name = 'cutdiscard-uncounted' if uncounted else 'cutdiscard'
     target = directory / name
     target.mkdir()
-    variables = ('CC', 'CFLAGS', 'LDFLAGS', 'USER_OBJS', 'CLANG', 'BPF_CFLAGS', 'BPFTOOL')
+    variables = ('CC', 'CFLAGS', 'LDFLAGS', 'USER_SRCS', 'USER_OBJS', 'CLANG', 'BPF_CFLAGS', 'BPFTOOL')
     recipe = '.PHONY: pgwt-cd-config\npgwt-cd-config:\n\t@:\n'
     recipe += ''.join(f'$(info PGWT_CONFIG_{key}=$({key}))\n' for key in variables)
     output = checked(['make', '-s', '--no-print-directory', '-f', 'Makefile', '-f', '-',
@@ -98,23 +126,32 @@ def build(directory, victim, uncounted=False):
     checked([*config['CLANG'], *config['BPF_CFLAGS'], '-I', str(ROOT / 'src/bpf'),
              '-c', str(source), '-o', str(obj)], cwd=ROOT)
     skeleton = checked([*config['BPFTOOL'], 'gen', 'skeleton', str(obj)], cwd=ROOT)
-    (target / 'pg_wait_tracer.skel.h').write_text(skeleton + '\n')
-    replacements = {}
-    for unit in ('daemon', 'percpu_transport'):
-        source = (ROOT / f'src/{unit}.c').read_text()
-        if unit == 'percpu_transport':
-            source = reader_source(source)
-            source = ('#define PGWT_CUTDISCARD_READY ' + json.dumps(str(target / 'ready')) + '\n' +
-                      f'#define PGWT_CUTDISCARD_UNCOUNTED {int(uncounted)}\n' + source)
-        path = target / f'{unit}.c'
-        path.write_text(source)
-        compiled = target / f'{unit}.o'
+    skeleton_path = target / 'pg_wait_tracer.skel.h'
+    skeleton_path.write_text(skeleton + '\n')
+    assert len(config['USER_SRCS']) == len(config['USER_OBJS'])
+    objects = []
+    for source_name, product_obj in zip(config['USER_SRCS'], config['USER_OBJS']):
+        original = ROOT / source_name
+        path = original
+        if original.name in ('daemon.c', 'percpu_transport.c'):
+            source = original.read_text()
+            path = target / original.name
+            if original.name == 'percpu_transport.c':
+                source = reader_source(source)
+                source = ('#define PGWT_CUTDISCARD_READY ' + json.dumps(str(target / 'ready')) + '\n' +
+                          f'#define PGWT_CUTDISCARD_UNCOUNTED {int(uncounted)}\n' + source)
+            path.write_text(source)
+        # Preserve subdirectories so equal basenames cannot alias objects.
+        compiled = target / 'objects' / product_obj
+        compiled.parent.mkdir(parents=True, exist_ok=True)
+        dependencies = compiled.with_suffix('.d')
         checked([*config['CC'], '-I', str(target), '-I', str(ROOT / 'tests'),
-                 *config['CFLAGS'], '-c', str(path), '-o', str(compiled)], cwd=ROOT)
-        replacements[f'{unit}.o'] = str(compiled)
-    objects = [replacements.get(Path(item).name, item) for item in config['USER_OBJS']]
-    assert sum(Path(item).name in replacements for item in config['USER_OBJS']) == 2
+                 *config['CFLAGS'], '-MMD', '-MF', str(dependencies),
+                 '-c', str(path), '-o', str(compiled)], cwd=ROOT)
+        stamp_object(compiled, dependencies, skeleton_path)
+        objects.append(str(compiled))
     binary = target / 'pg_wait_tracer'
+    guard_objects(objects, skeleton_path)
     checked([*config['CC'], *config['CFLAGS'], *objects, '-o', str(binary), *config['LDFLAGS']], cwd=ROOT)
     print(f'BUILT {name}: {binary}', flush=True)
     return binary

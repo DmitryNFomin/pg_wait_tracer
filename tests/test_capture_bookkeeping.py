@@ -117,6 +117,18 @@ with tempfile.TemporaryDirectory(prefix="pgwt-capture-bookkeeping-") as temporar
             if legacy:
                 data = (BASE / name).read_bytes()
                 dest.write_bytes(data)
+                # Keep the pinned migration files intact. GCC 8 diagnoses the
+                # conditional zero compound literal in a designated initializer;
+                # use the equivalent assignment in this temporary build only.
+                if name in ("src/merge_capture.c", "src/core/merge.c"):
+                    text = dest.read_text()
+                    owner, variable = ("c", "in") if name.endswith("merge_capture.c") else ("m", "out")
+                    before = (",\n        .allocation = reason == PGWT_MERGE_ALLOCATION_FAIL ? "
+                              f"{owner}->diagnostics.allocation : (pgwt_allocation_failure){{0}}}};")
+                    after = ("};\n    if (reason == PGWT_MERGE_ALLOCATION_FAIL) "
+                             f"{variable}.allocation = {owner}->diagnostics.allocation;")
+                    assert text.count(before) == 1, name
+                    dest.write_text(text.replace(before, after))
             else:
                 shutil.copy2(ROOT / name, dest)
         if not legacy:

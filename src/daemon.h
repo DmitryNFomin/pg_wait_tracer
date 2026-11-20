@@ -308,6 +308,7 @@ struct pgwt_daemon {
     struct pgwt_percpu_transport *percpu_transport;
     struct pgwt_transport_callbacks transport;
     struct pgwt_merge_capture *merge_capture;
+    int merge_counter_errno[PGWT_MERGE_COUNTERS]; /* last snapshot, diagnostics only */
     pgwt_attach_report_fn attach_report;
     void *attach_report_ctx;
     struct pgwt_merge_capture_sink merge_sink;

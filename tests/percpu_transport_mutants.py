@@ -236,7 +236,7 @@ for name, guard, _, _ in mutations:
                                              'finish_cap_check','cut_cap_check'}:
         deadline_assertions[name] = 'd->outputs[0].reason==PGWT_MERGE_COUNTER_CHANGE'
 mutations.append(('EXIT-diagnostics-not-normalized', 'exit_disposition', 'src/merge_capture.c',
-                  [('adapter_input = &semantic;', 'adapter_input = e;')]))
+                  [('semantic.bytes = exit_payload;', 'semantic.bytes = e->bytes;')]))
 flags = ['-std=c11', '-Wall', '-Wextra', '-Werror', '-DPGWT_TRANSPORT_HOST_TEST']
 flags += shlex.split(os.environ.get('CFLAGS', ''))
 cc = shlex.split(os.environ.get('CC', 'cc'))

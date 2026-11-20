@@ -1136,3 +1136,6 @@ test_attach_timeline.py
 
 # PG13 bounded bulk row lookup, shared miss cache and built mutants.
 test_pgbs_resolver.py
+
+# Portable startup refusal messages and regenerated-skeleton link provenance.
+test_transport_startup.py

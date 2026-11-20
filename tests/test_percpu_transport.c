@@ -1,4 +1,7 @@
 /* Frozen answers stay in contracts/. These tests supply bytes and schedules. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "../src/percpu_transport.h"
 #include "../src/merge_capture.h"
 #include "../src/daemon.h"

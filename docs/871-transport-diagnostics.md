@@ -1077,3 +1077,22 @@ $ wc -l src/attach_timeline.h tests/test_attach_timeline.py
      665 total
 ```
 <!-- /ATTACH-TIMELINE-DIFFSTAT -->
+
+## Exact transport startup refusals
+
+Exact-perf requires transport helpers running with `SCHED_OTHER`. Starting
+the tracer with real-time scheduling (for example, `chrt -f 1`) is not supported
+yet: startup prints the cause on stderr and exits non-zero. This diagnostic
+does not change the scheduling policy or the existing refusal.
+
+An unreadable initial loss-counter vector also refuses startup. Its stderr
+line names the first unreadable component and its lookup errno when available;
+`errno=unknown` means that the failing observation supplied no errno. Later
+successful lookups cannot replace that component's error.
+
+The cut/discard harness regenerates a BPF skeleton whose map member order can
+differ from the product skeleton. It rebuilds userspace objects against that
+header and refuses the final link if compiler dependencies or object/header
+fingerprints disagree. Portable diagnostic and link-guard tests run with
+`python3 -B tests/test_transport_startup.py`; Linux kernel execution remains
+part of the live transport tests.

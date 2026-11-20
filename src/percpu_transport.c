@@ -1065,6 +1065,8 @@ static void *helper_loop(void *ctx)
     int policy; struct sched_param param;
     if (!error) {
         int rc = pthread_getschedparam(pthread_self(), &policy, &param);
+        if (!rc && policy != SCHED_OTHER)
+            fprintf(stderr, "exact-perf: startup refused: real-time scheduling of the tracer is not supported yet (helper policy=%d; requires SCHED_OTHER)\n", policy);
         if (rc || policy != SCHED_OTHER) error = rc ? rc : EINVAL;
     }
     pthread_mutex_lock(&h->mutex);
