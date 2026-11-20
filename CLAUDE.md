@@ -38,7 +38,7 @@ Not tag-blockers: process tooling/dashboards, coverage for unshipped defects, do
 
 | Command | Runs where / evidence | When |
 |---|---|---|
-| `make check` (`check-fast` = seconds) | Mac: builders, Go, Python, UI/chaos vs mock server | Before every push; guard enforces stamp |
+| `make check-fast` | Mac: builders, Go, Python; stamp satisfies pre-push hook | Before every push; full suite runs in CI's `full-check`, required to merge |
 | `make box-check [OS=el8\|el9\|ubuntu] [PG=13\|16\|17\|18]` | x86 Linux: build, C, synthetic, protocol, real PG + live UI | Before every PR; CI runs EL8 box tier for `src/` PRs on the EL8 box; `EPHEMERAL=1` only by VM rules below |
 | `make ui-gallery [BASE=ref]` | Mac: `tests/results/ui_gallery/index.html` + `summary.json` | Every PR touching `web/` |
 
@@ -77,7 +77,8 @@ Sweep is only for stale VMs (>6h default): never persistent boxes, very young or
 Never use sweep cutoffs to remove your VM. Never commit local PNGs to `tests/web_snapshots/`; only CI regenerates baselines.
 Never mask runner noise with retries/tolerances/confirmation loops; real filed product bugs alone qualify for KNOWN_FAILING; review every xpass.
 Add C tests to `tests/unit_tests.list`, pure UI builder tests to `tests/web_unit/`; `[skip ci]` is docs-only.
-Push only with a passing make check stamp; never bypass push guard or machine-wide check lock (override variables are human-only).
+Push only with a passing make check-fast stamp; CI's full-check must pass to merge.
+Never bypass push guard or machine-wide check lock (override variables are human-only).
 Read [testing/push procedures](docs/agent-procedures/testing-and-push.md) for branch naming (`agent/<slug>`), KNOWN_FAILING scopes, evidence reuse, cleanup and guard details.
 
 ## Claude hooks

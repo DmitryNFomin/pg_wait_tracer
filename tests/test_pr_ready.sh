@@ -68,9 +68,16 @@ case "$1" in
             [[ ! -f "$PR_STATE/box-finished" ]] || exit 95
         fi
         case "${PR_STAMP:-good}" in
-            good) scripts/tree-hash.sh > .pgwt-check.stamp ;;
-            wrong) echo fabricated-wrong-stamp > .pgwt-check.stamp ;;
-            empty) : > .pgwt-check.stamp ;;
+            good|fast|missing-mode|garbled-mode)
+                printf '%s\n' "$(scripts/tree-hash.sh)" > .pgwt-check.stamp
+                case "${PR_STAMP:-good}" in
+                    good) echo full > .pgwt-check.mode ;;
+                    fast) echo fast > .pgwt-check.mode ;;
+                    missing-mode) ;;
+                    garbled-mode) echo 'full extra' > .pgwt-check.mode ;;
+                esac ;;
+            wrong) echo fabricated-wrong-stamp > .pgwt-check.stamp; echo full > .pgwt-check.mode ;;
+            empty) : > .pgwt-check.stamp; echo full > .pgwt-check.mode ;;
             none) ;;
         esac
         echo check-finish >> "$PR_STATE/events"
@@ -115,7 +122,7 @@ new_case() {
         "$fixture/tests/web_snapshots" "$PR_STATE"
     cp "$REPO_ROOT/scripts/pr-ready.sh" "$fixture/scripts/"
     cp "$REPO_ROOT/scripts/tree-hash.sh" "$fixture/scripts/"
-    printf '.pgwt-check.stamp\n*.ignored\n' > "$fixture/.gitignore"
+    printf '.pgwt-check.stamp\n.pgwt-check.mode\n*.ignored\n' > "$fixture/.gitignore"
     printf '.PHONY: box-check check ui-gallery\nbox-check:\ncheck:\nui-gallery:\n' > "$fixture/Makefile"
     echo baseline > "$fixture/web/static/app.js"
     echo baseline > "$fixture/tests/web_snapshots/baseline.png"
@@ -173,11 +180,11 @@ export PR_CHECK_RC=7
 run_ready
 report "valid final stamp wins over check exit 7" passed
 report "nonzero check exit is reported honestly" grep -Fq 'check make exit 7' "$PR_STATE/output"
-for stamp_mode in wrong empty none; do
+for stamp_mode in wrong empty none fast missing-mode garbled-mode; do
     new_case
     export PR_STAMP=$stamp_mode
     # In the 'none' case this would falsely pass if the old stamp survived.
-    (cd "$fixture" && scripts/tree-hash.sh > .pgwt-check.stamp)
+    (cd "$fixture" && printf '%s\n' "$(scripts/tree-hash.sh)" > .pgwt-check.stamp && echo full > .pgwt-check.mode)
     run_ready
     report "$stamp_mode stamp fails despite make check exiting zero" failed_with 'check FAILED: stamp missing/mismatch'
 done

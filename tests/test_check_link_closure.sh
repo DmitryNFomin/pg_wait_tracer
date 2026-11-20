@@ -162,6 +162,23 @@ report "$ok" "the acceptance is PRINTED, not silent"
 grep -q 'tu_core\|test_c' <<<"$out" && ok=false || ok=true
 report "$ok" "a -DPGWT_SERVER consumer of the same source is not implicated"
 
+# GNU nm's undefined-symbol rows include a U type; BSD nm -u emits only
+# the name. Exercise GNU-shaped rows even on a Mac, through the real guard.
+mkdir -p "$tmp/nm-bin"
+real_nm=$(command -v nm)
+cat > "$tmp/nm-bin/nm" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == -u ]]; then
+    "$PGWT_TEST_REAL_NM" "$@" | awk '{name=$NF; sub(/^_/, "", name); print "                 U " name}'
+else
+    exec "$PGWT_TEST_REAL_NM" "$@"
+fi
+EOF
+chmod +x "$tmp/nm-bin/nm"
+out=$(PATH="$tmp/nm-bin:$PATH" PGWT_TEST_REAL_NM="$real_nm" run "$base"); rc=$?
+[[ $rc -eq 0 && "$out" == *'ALLOWED: some_daemon_symbol'* ]] && ok=true || ok=false
+report "$ok" "GNU nm undefined-symbol format preserves verified allowlist acceptance (rc=$rc)"
+
 # (a) the provider named does not exist in any link line.
 sed -i.bak 's/^some_daemon_symbol  prov/some_daemon_symbol  somethingelse/' \
     "$repo/scripts/link-closure-allow.txt"

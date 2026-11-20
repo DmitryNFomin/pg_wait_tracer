@@ -58,8 +58,21 @@ print("true" if d.get("stop_hook_active") is True else "false",
 ' 2>/dev/null)
 [ "$stop_active" = "true" ] || stop_active=false
 
+# GNU stat may print filesystem data even when BSD's flags fail. Capture
+# each attempt separately so failed-command output never enters arithmetic.
+file_mtime() {
+  local mtime
+  if mtime=$(stat -f %m "$1" 2>/dev/null); then
+    printf '%s\n' "$mtime"
+  elif mtime=$(stat -c %Y "$1" 2>/dev/null); then
+    printf '%s\n' "$mtime"
+  else
+    printf '0\n'
+  fi
+}
+
 age=999999
-[ -s "$CACHE" ] && age=$(( $(date +%s) - $(stat -f %m "$CACHE" 2>/dev/null || echo 0) ))
+[ -s "$CACHE" ] && age=$(( $(date +%s) - $(file_mtime "$CACHE") ))
 
 if [ "$age" -ge "$MAXAGE" ]; then
   start=$(date -u +%H:%M:%SZ)
@@ -175,7 +188,7 @@ fi
 ESC_N=3
 DQ="$D/.dispatch-queue"
 dq_age=999999
-[ -s "$DQ" ] && dq_age=$(( $(date +%s) - $(stat -f %m "$DQ" 2>/dev/null || echo 0) ))
+[ -s "$DQ" ] && dq_age=$(( $(date +%s) - $(file_mtime "$DQ") ))
 if [ "$dq_age" -ge "$MAXAGE" ]; then
   echo "DISPATCH QUEUE: STALE or missing (>= ${MAXAGE}s old) -- escalation suspended until a fresh sweep succeeds"
 else
