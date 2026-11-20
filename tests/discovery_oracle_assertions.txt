@@ -1,0 +1,102 @@
+Discovery oracle assertion inventory (Refs #988)
+
+Run: python3 tests/test_discovery_admission.py --mutants
+The two expected tables are transcribed from the frozen contract, not from
+product output. The runner verifies all IDs, verbatim inputs/answers, and the
+complete structured output sequences against EXPECTED.md before executing C.
+
+Every row: full_state compares every successful DATA identity, source/position,
+rank, raw payload byte, U/T mark and output order; every FRONTIER and its entire
+C0 vector; every VOID's time, full counter vector/label and reason. It checks
+semantic and persisted gap closing times (C and C+1), open/close/reopen order,
+pending count, census completeness/fence, exact lower bound, route and ordered
+fresh-record position. Final epoch status, invalidation and exit requirements
+are checked. Rejected publication is absent from successful outputs.
+
+Prose facts encoded on the consumer side:
+D01: numerical authority returns X=3 ns/1 completion; Y's uncertified completion
+at 12 contributes no count. The coverage reader refuses [12,13) and permits the
+next ns, using decoded GAP records with the conservative C+1 endpoint.
+D02a: checkpoint before strict completeness retains P=1; S(13) commits quiet
+b=12 and closes the gap; X=3/1 follows through the numerical authority.
+D02b: no DATA, quiet confirmation or numerical baseline from a reread.
+D02c: the first fresh record, not the reread, sets b=9. X is open at 10, with
+no subsequent closed X interval or supplied open-wait snapshot; duration and
+completion metrics are unavailable, with no invented recorded contribution.
+D02d: no accepted confirmation/lower bound after contradictory coherence.
+D02e: no lower bound, invented DATA or closure following exhausted attempts.
+D03: no release/frontier before AD; validated release order sets b=12.
+D04a-install/state/binding/address/cookie: false/unknown supplied facts fault;
+no trusted DATA/frontier/lower bound. INIT cannot repair an invalid admission.
+D04b: no admission/record/bound follows the unqualified start-time observation.
+D04c: absent binding faults; no admitted numerical evidence or lower bound.
+D04d: no matching delivered terminal witness: no output or discharge.
+D04e: Cf is exactly fork_state_update_fail=1; no discovery DATA/closure.
+D04f: allocation_fail/C0, with open gap and unresolved lifetime.
+D04g: Cs is exactly state_map_update_fail=1; no attachment/lower bound.
+D07a: both quiet bounds (12 and 20), no pending lifetimes, C=max(...)=20.
+D07b: S(21) establishes both bounds/P=0 but cannot close at fence 25;
+S(26) commits C=25. A supplemental S(25) rejects equality too.
+D08a: H remains pending at S(18); matching EXIT releases only at S(19),
+discharging at x=18. Exact output admits no terminal TRANS or UNTRACED.
+D08b: absent terminal proof leaves H pending. A supplemental false terminal
+control plus EXIT demonstrates that ESRCH alone cannot authorize discharge.
+D09: every delayed D record retains its original cookie despite R's arrival;
+R22 remains U under Decision 25c; D keeps b=12 after its EXIT.
+D10: original outputs followed by F30; reopen at boot_start with detection 40,
+P=1 and unknown census, without invented DATA/VOID. The same reader window
+that was complete before revocation is incomplete afterwards.
+D13a: Ce counter_change with D12 unreleased; admission cannot recover a fault.
+D13b: otherwise complete base coverage cannot admit a discovery identity to
+the A2 population. Zero contribution to N_k; the population gate returns
+Unavailable/untraced_invalid for the supplied pre-boot omission and also for
+a forged in-boot discovery omission. Positive FORK and cohort-boundary controls
+ensure this is not an always-rejecting or always-zero test. The gate does not
+claim to implement the separate A2 finality, limits or omission-note evaluator.
+D13c: discovery cannot admit a post-start birth; its FORK is not released.
+D13d: rejected D12 yields Cw/writer_push_fail, no F12/bound/closure. Also check
+that failure of a supporting record cannot commit a pending quiet bound.
+D13e: unqualified Q admission faults with C0/unknown_evidence.
+Q01: quiet b=12, D15[T]; numerical authority returns X=3 ns/1, CPU clip=1 ns.
+Q02: no quiet bound; fresh b=15; incoming duration, count and CPU unavailable.
+Q03: running S1 rejected; incoming quantities unavailable with fresh b=15.
+Q04/Q04b: state/counter-only and schedstat-only observations rejected.
+Q05: denied S1 rejected without a synthetic loss increment.
+Q06: two-thread bracket rejected; independently admitted final attachment uses
+the fresh-record route without a quiet confirmation.
+Q07: retained seed has wait word 0, on_cpu_ts=0, numeric accumulator/base 0
+and validity=true. Certified CPU is the supplied 1 ns, not 0 or wall time 3.
+Q08: address mismatch supplies no confirmation, ADMIT or lower bound.
+Q09: after each release, final generation 3 keeps quiet seed/b=11 and v=9;
+earlier D9 is U and cannot rebase it. D15 supplies X=4 ns/1 completion.
+
+Additional schedules: an unknown empty census stays open with pending 0;
+an explicitly complete empty census closes only beyond its fence and permits
+ordinary reader windows; rejected gap-close publication leaves it open and
+preserves the writer fault. Discovery-disabled T-cov runs its unchanged schedules
+and expected results, including empty population and legacy EXIT closure.
+
+NOT ENCODED: physical producer operations excluded by this consumer brief.
+These are remaining oracle facts, not passing assertions or qualifications:
+- D04a-install/state/address/cookie and D04c: actual FD-install ordering,
+  concurrent producer-state overwrite, unobserved pointer relocation, allocator
+  authority, and task/FD/PID binding races. Consumers test the supplied facts.
+- D04d: kernel EXIT accounting/tombstoning without mutable state, persistent
+  tombstone presence, and BPF_NOEXIST returning EEXIST.
+- D04e: both insertion attempts encountering the tombstone and R receiving
+  no discovery cookie following failed fork allocation.
+- D04f: actual allocator reservations 2^63-1 and 2^64-1, exhaustion allocating
+  nothing, partition boundaries, and no wrap.
+- D04g: advanced CPU/query/command fields remaining intact across physical
+  identity insertion, plus physical insertion failure accounting (Cs delivery
+  and refusal are asserted, but the map operation is not run).
+- D09: delayed physical cleanup preserving R and physical reinsertion of D
+  encountering EEXIST. Adapter/core cookie retention is tested independently.
+- Q02: actual provisional producer CPU/query/command advances surviving bracket
+  rejection. Consumer input immutability and rejected seed retention are tested;
+  they do not qualify concurrent producer state preservation.
+- D02e/Q09: physical TRY counts, seed-word reads, disabled/enabled history,
+  complete inter-attempt fences, and attachment-generation allocation/reuse.
+The producer unit also owns physical quiet bracket ordering. No host
+proof-boolean mutation is represented
+as evidence for those physical operations or for actual kernel qualification.

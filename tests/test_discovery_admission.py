@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Portable discovery consumer oracle and mutants; no producer qualification.
+"""Discovery full consumer outputs, numerical authority and population mutants.
 
-The frozen table includes all 39 row IDs and verbatim inputs/answers. AOP rows
-exercise consumption of the supplied producer facts, not physical BPF operations.
-D13b's coverage-a2-v1 UNTRACED verdict is explicitly deferred: that evaluator is
-not present in this tree. Do not interpret this host result as all oracle output
-assertions or producer/EL8 qualification passing.
+Physical AOP facts excluded from the consumer unit are enumerated in
+discovery_oracle_assertions.txt. They are not claimed as producer qualification.
 """
 import argparse
 import json
@@ -20,7 +17,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 FLAGS = ['-std=c11', '-Wall', '-Wextra', '-Werror', '-DPGWT_TRANSPORT_HOST_TEST', '-Isrc']
 SOURCES = ['tests/discovery_admission_host.c', 'src/percpu_transport.c',
-           'src/core/merge_adapter.c', 'src/core/merge.c', 'src/coverage.c']
+           'src/core/merge_adapter.c', 'src/core/merge.c', 'src/coverage.c', 'src/core/wait_metrics.c']
 # Each mutation is an executable product change, checked for successful build,
 # a reached named oracle row, and the intended assertion. Physical producer
 # mutants remain the producer unit's obligation; abstract proof tests do not
@@ -97,6 +94,45 @@ MUTANTS = [
      'return fault(m, PGWT_MERGE_WRITER_PUSH_FAIL, obs);\n        /* DECISION 25c:',
      '{ /* incorrectly continue after failed publication */ }\n        /* DECISION 25c:',
      'D13d', 'exact merge outputs'),
+    ('discovery_as_a2_birth', 'src/merge_capture.c',
+     'if (pgwt_a2_observed_birth(&birth, c->coverage_boot_start) &&\n'
+     '            from <= birth.fork_ns && birth.fork_ns < to) ++n;',
+     'if ((birth.discovery && from <= c->coverage_boot_start && c->coverage_boot_start < to) ||\n'
+     '            (pgwt_a2_observed_birth(&birth, c->coverage_boot_start) &&\n'
+     '             from <= birth.fork_ns && birth.fork_ns < to)) ++n;',
+     'D13b', 'discovery contributes zero to N_k'),
+    ('discovery_as_a2_omission', 'src/merge_capture.c',
+     'return pgwt_a2_omission_population(&l, c->coverage_boot_start, u);',
+     'if (l.discovery) return PGWT_A2_POPULATION_OK;\n'
+     '    return pgwt_a2_omission_population(&l, c->coverage_boot_start, u);',
+     'D13b', 'A2 result Unavailable/untraced_invalid for discovery omission'),
+    ('ignore_census_fence', 'src/merge_capture.c',
+     'uint64_t close = c->census_fence;', 'uint64_t close = c->coverage_boot_start;',
+     'D07b', 'startup closure commitment'),
+    ('equal_census_completeness', 'src/merge_capture.c',
+     'report.frontier < close || close == UINT64_MAX',
+     'report.frontier + 1 < close || close == UINT64_MAX',
+     'D07b', 'census completeness must be strictly beyond closure'),
+    ('terminal_on_receipt', 'src/core/merge.c',
+     'a->terminal_at = d->terminal_time;',
+     'a->terminal_at = d->terminal_time; a->discovery.terminal_released = true; '
+     'a->discovery.terminal_time = d->terminal_time;',
+     'D08a', 'unresolved lifetime count'),
+    ('esrch_terminal_proof', 'src/core/merge.c',
+     'if (d->terminal_binding_proved) {', 'if (true) {',
+     'D08b', 'ESRCH cannot authorize matching EXIT'),
+    ('queued_cookie_current_lifetime', 'src/core/merge_adapter.c',
+     'record.g = e->cookie_present && e->cookie ? e->cookie : 0;',
+     'record.g = t->lifetime_count ? t->lifetimes[t->lifetime_count - 1].g : 0;',
+     'D09', 'exact merge outputs'),
+    ('cpu_replaced_by_wall', 'src/window_clip.h',
+     'uint64_t share = fb - fa, wall = b - a;',
+     'uint64_t share = fb - fa, wall = b - a; share = wall;',
+     'Q07', 'measured CPU is one, not zero or elapsed time'),
+    ('zero_wait_infers_on_cpu', 'src/core/merge.c',
+     'a->discovery.baseline = *w;',
+     'a->discovery.baseline = *w; if (!w->wait_word) a->discovery.baseline.on_cpu_ts = w->t;',
+     'Q07', 'valid zero CPU base and off-CPU seed'),
 ]
 
 
@@ -127,6 +163,21 @@ def check_oracle_inventory():
     assert len(ids) == len(set(ids)) == 39
     assert set(ids) == set(rows) == set(answers), 'oracle row IDs drifted'
     assert all(inputs == rows[key] and answer == answers[key] for key, inputs, answer in table)
+    expected_text = (ROOT / 'tests/discovery_oracle_expected.h').read_text()
+    structured_rows = re.findall(r'^    \{"([DQ][^"]+)", "([^"]*)",', expected_text, re.M)
+    structured = dict(structured_rows)
+    assert len(structured_rows) == len(structured) == len(rows), 'duplicate or missing structured row'
+    assert set(structured) == set(rows), 'structured expected row IDs drifted'
+    for key, answer in answers.items():
+        sequences = [code for code in re.findall(r'`([^`]+)`', answer)
+                     if re.match(r'(?:D\d+\[|F\d+\b|VOID\d+)', code)]
+        sequence = sequences[0] if sequences else ''
+        if key == 'D10':
+            sequence = structured['D01'] + ' F30[C0]'
+        else:
+            sequence = ' '.join(sequence.replace('→', ' ').split())
+            sequence = re.sub(r'\bF(\d+)\b', r'F\1[C0]', sequence)
+        assert structured[key] == sequence, (key, structured[key], sequence)
     print('discovery frozen table: 39/39 IDs and verbatim inputs/answers match', flush=True)
 
 
@@ -139,7 +190,7 @@ def main():
         tree = Path(temporary)
         shutil.copytree(ROOT / 'src', tree / 'src')
         (tree / 'tests').mkdir()
-        for name in ['discovery_admission_host.c', 'discovery_oracle_rows.h', 'test_percpu_transport.c',
+        for name in ['discovery_admission_host.c', 'discovery_oracle_rows.h', 'discovery_oracle_expected.h', 'test_percpu_transport.c',
                      'test_core_merge_adapter.c', 'test_core_merge_contract.c', 'merge_adapter_goldens.h']:
             shutil.copy2(ROOT / 'tests' / name, tree / 'tests' / name)
         print(run([str(build(tree))], tree).stdout, end='', flush=True)
@@ -158,7 +209,7 @@ def main():
                     print(f'MUTANT {name}: RED on {row} ({assertion})', flush=True)
                 finally:
                     file.write_text(source)
-    print('PARTIAL: physical AOP assertions, numerical interval assertions, and D13b A2 verdict remain outside this consumer harness', flush=True)
+    print('Physical producer assertions not encoded: see tests/discovery_oracle_assertions.txt', flush=True)
 
 
 if __name__ == '__main__':

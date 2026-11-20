@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "core/pgwt_merge_adapter.h"
+#include "core/pgwt_a2_population.h"
 #include "transport_budget.h"
 
 struct pgwt_daemon;
@@ -115,14 +116,18 @@ struct pgwt_capture_config {
      * attachment proof of every fork-seeded lifetime at FORK consumption.
      * Without unit A2 no proof exists and every such generation VOIDs. */
     bool test_attach_premise;
+    /* Enable DECISION 41 before coverage_begin. The producer must supply an
+     * explicit complete census, including when its inventory is empty.
+     * A capture without discovery retains the existing T-cov protocol. */
+    bool discovery_enabled;
     /* Checked, synchronous startup coverage publication. Success includes
      * flushing the supporting records and durable coverage evidence. */
     bool (*publish_startup_gap)(void *, const struct pgwt_capture_gap *);
 };
 struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *);
-/* Begin boot coverage before advertising it. PID-only scan entries remain
- * unresolved until the producer supplies their retained lifetime binding.
- * Neither an empty scan nor a received cookie-less EXIT proves completeness. */
+/* Begin boot coverage before advertising it. With discovery_enabled, PID-only
+ * entries await lifetime binding and an explicit census; a cookie-less EXIT
+ * cannot discharge them. Otherwise the existing T-cov scan/EXIT rules apply. */
 int pgwt_capture_coverage_begin(struct pgwt_merge_capture *, uint64_t boot_start,
                                  const uint32_t *pids, size_t count,
                                  void (*persist)(void *, const struct pgwt_capture_gap *));
@@ -139,6 +144,14 @@ int pgwt_capture_discovery_census(struct pgwt_merge_capture *, uint64_t fence,
 int pgwt_capture_discovery_control(struct pgwt_merge_capture *, const pgwt_discovery_attempt *,
                                    uint64_t d, const ma_snapshot *);
 pgwt_capture_discovery_report pgwt_capture_discovery_status(const struct pgwt_merge_capture *);
+/* Population only: an observed-birth count is not a finalized A2_BUCKET.
+ * The A2 owner still proves finality, terminal omission proof and limits. */
+bool pgwt_capture_a2_lifetime(const struct pgwt_merge_capture *, uint64_t pid,
+                              uint64_t cookie, pgwt_a2_lifetime *);
+uint64_t pgwt_capture_a2_observed_births(const struct pgwt_merge_capture *,
+                                        uint64_t from, uint64_t to);
+pgwt_a2_population_verdict pgwt_capture_a2_omission_population(
+    const struct pgwt_merge_capture *, const pgwt_a2_omission *);
 void pgwt_capture_startup_publisher(struct pgwt_merge_capture *,
                                      bool (*)(void *, const struct pgwt_capture_gap *));
 /* Exclusive certified-through bound, read BEFORE publishing the trace. */

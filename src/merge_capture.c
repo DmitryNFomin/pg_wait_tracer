@@ -68,9 +68,10 @@ struct pgwt_merge_capture {
     uint64_t last_service_at;
     struct pgwt_transport_budget budget;
     struct discovery_inventory *inventory;
-    size_t inventory_count;
+    size_t inventory_count, inventory_capacity;
     bool census_complete, startup_closed, startup_open_published;
     uint64_t census_fence, startup_closure;
+    uint64_t preexisting_last_exit; /* T-cov, discovery disabled */
     uint64_t coverage_boot_start, feeding_t;
     bool coverage_begun, feeding_data, preexisting_tracking_failed;
 
@@ -378,7 +379,8 @@ static struct pgwt_merge_capture *capture_create(const struct pgwt_capture_confi
     c->observation = cfg->baseline;
     retain_snapshot(c);
     c->last_checkpoint_at = cfg->baseline.d;
-    c->inventory = calloc(cfg->capacity, sizeof(*c->inventory));
+    c->inventory_capacity = cfg->discovery_enabled ? cfg->capacity : MAX_BACKENDS;
+    c->inventory = calloc(c->inventory_capacity, sizeof(*c->inventory));
     c->lifetimes = calloc(cfg->capacity, sizeof(*c->lifetimes));
     c->fresh_proofs = calloc(cfg->capacity, sizeof(*c->fresh_proofs));
     c->bindings = calloc(cfg->capacity, sizeof(*c->bindings));
@@ -487,7 +489,7 @@ pgwt_capture_discovery_report pgwt_capture_discovery_status(const struct pgwt_me
 }
 static int discovery_progress(struct pgwt_merge_capture *c)
 {
-    if (!c->coverage_begun || c->startup_closed || !c->census_complete ||
+    if (!c->config.discovery_enabled || !c->coverage_begun || c->startup_closed || !c->census_complete ||
         c->preexisting_tracking_failed || pgwt_capture_report(c).status != PGWT_MERGE_OK)
         return 0;
     uint64_t close = c->census_fence;
@@ -533,15 +535,20 @@ int pgwt_capture_coverage_begin(struct pgwt_merge_capture *c, uint64_t boot_star
                                  const uint32_t *pids, size_t count,
                                  void (*persist)(void *, const struct pgwt_capture_gap *))
 {
-    if (!c || c->coverage_begun || count > c->config.capacity || (count && !pids)) return -EINVAL;
+    if (!c || c->coverage_begun || count > c->inventory_capacity || (count && !pids)) return -EINVAL;
     if (persist) c->config.coverage_gap = persist;
     c->coverage_boot_start = boot_start;
     c->coverage_begun = true;
     c->inventory_count = count;
     for (size_t i = 0; i < count; ++i) c->inventory[i].pid = pids[i];
-    c->startup_open_published = startup_publish(c,
-        (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_PREEXISTING,
+    if (c->config.discovery_enabled) {
+        c->startup_open_published = startup_publish(c,
+            (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_PREEXISTING,
+                .at = boot_start, .detected = boot_start});
+    } else if (count) {
+        coverage_gap(c, (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_PREEXISTING,
             .at = boot_start, .detected = boot_start});
+    }
     if (pgwt_capture_report(c).status != PGWT_MERGE_OK) {
         struct pgwt_capture_gap gap = c->last_void;
         gap.at = boot_start;
@@ -557,15 +564,51 @@ static ma_table table(struct pgwt_merge_capture *c)
         .lifetime_index = c->lifetime_index, .binding_index = c->binding_index,
         .index_slots = c->arrival_slots};
 }
+bool pgwt_capture_a2_lifetime(const struct pgwt_merge_capture *c, uint64_t pid,
+                              uint64_t cookie, pgwt_a2_lifetime *out)
+{
+    if (!c || !out) return false;
+    ma_table t = {.lifetimes = c->lifetimes, .lifetime_index = c->lifetime_index,
+        .index_slots = c->arrival_slots};
+    size_t slot = ma_lifetime_bucket(&t, pid, cookie, NULL);
+    if (!c->lifetime_index[slot]) return false;
+    const ma_lifetime *l = &c->lifetimes[c->lifetime_index[slot] - 1];
+    *out = (pgwt_a2_lifetime){.pid = pid, .cookie = cookie, .fork_ns = l->fork_ns,
+        .fork_observed = l->fork_observed, .discovery = cookie >= PGWT_DISCOVERY_COOKIE_MIN};
+    return true;
+}
+uint64_t pgwt_capture_a2_observed_births(const struct pgwt_merge_capture *c,
+                                        uint64_t from, uint64_t to)
+{
+    uint64_t n = 0;
+    if (!c || !c->coverage_begun) return 0;
+    for (size_t i = 0; i < c->lifetime_count; ++i) {
+        const ma_lifetime *l = &c->lifetimes[i];
+        pgwt_a2_lifetime birth = {.pid = l->pid, .cookie = l->g, .fork_ns = l->fork_ns,
+            .fork_observed = l->fork_observed, .discovery = l->g >= PGWT_DISCOVERY_COOKIE_MIN};
+        if (pgwt_a2_observed_birth(&birth, c->coverage_boot_start) &&
+            from <= birth.fork_ns && birth.fork_ns < to) ++n;
+    }
+    return n;
+}
+pgwt_a2_population_verdict pgwt_capture_a2_omission_population(
+    const struct pgwt_merge_capture *c, const pgwt_a2_omission *u)
+{
+    pgwt_a2_lifetime l;
+    if (!c || !c->coverage_begun || !u ||
+        !pgwt_capture_a2_lifetime(c, u->pid, u->cookie, &l)) return PGWT_A2_UNTRACED_INVALID;
+    return pgwt_a2_omission_population(&l, c->coverage_boot_start, u);
+}
 int pgwt_capture_discovery_inventory(struct pgwt_merge_capture *c, uint64_t pid, uint64_t cookie)
 {
-    if (!c || !pid || cookie < PGWT_DISCOVERY_COOKIE_MIN || c->finished) return -EINVAL;
+    if (!c || !c->config.discovery_enabled || !pid ||
+        cookie < PGWT_DISCOVERY_COOKIE_MIN || c->finished) return -EINVAL;
     size_t i;
     for (i = 0; i < c->inventory_count; ++i)
         if (c->inventory[i].pid == pid &&
             (c->inventory[i].cookie == cookie || !c->inventory[i].cookie)) break;
     if (i == c->inventory_count) {
-        if (c->inventory_count == c->config.capacity) {
+        if (c->inventory_count == c->inventory_capacity) {
             c->preexisting_tracking_failed = true;
             return -ENOMEM;
         }
@@ -592,7 +635,8 @@ int pgwt_capture_discovery_inventory(struct pgwt_merge_capture *c, uint64_t pid,
 int pgwt_capture_discovery_census(struct pgwt_merge_capture *c, uint64_t fence,
                                   bool proved, uint64_t d, const ma_snapshot *s)
 {
-    if (!c || !c->coverage_begun || c->finished || fence < c->coverage_boot_start) return -EINVAL;
+    if (!c || !c->config.discovery_enabled || !c->coverage_begun || c->finished ||
+        fence < c->coverage_boot_start) return -EINVAL;
     c->census_complete = proved;
     c->census_fence = fence;
     ma_envelope check = {.version = 1, .kind = MA_CHECK};
@@ -601,7 +645,7 @@ int pgwt_capture_discovery_census(struct pgwt_merge_capture *c, uint64_t fence,
 int pgwt_capture_discovery_control(struct pgwt_merge_capture *c, const pgwt_discovery_attempt *a,
                                    uint64_t d, const ma_snapshot *s)
 {
-    if (!c || !a) return -EINVAL;
+    if (!c || !c->config.discovery_enabled || !a) return -EINVAL;
     if (a->cookie >= PGWT_DISCOVERY_COOKIE_MIN) {
         int rc = pgwt_capture_discovery_inventory(c, a->pid, a->cookie);
         if (rc < 0) return rc;
@@ -710,13 +754,15 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
             if (i == c->inventory_count) {
                 /* Observation alone is no merge fault or terminal proof. */
                 c->census_complete = false;
-                if (c->startup_closed) {
-                    c->startup_open_published = startup_publish(c,
-                        (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_PREEXISTING,
-                            .at = c->coverage_boot_start, .detected = now});
+                struct pgwt_capture_gap gap = {.kind = PGWT_CAPTURE_GAP_PREEXISTING,
+                    .at = c->coverage_boot_start, .detected = now};
+                if (c->config.discovery_enabled) {
+                    if (c->startup_closed) c->startup_open_published = startup_publish(c, gap);
+                } else if (!c->inventory_count && !c->preexisting_tracking_failed) {
+                    coverage_gap(c, gap);
                 }
                 c->startup_closed = false;
-                if (c->inventory_count == c->config.capacity) {
+                if (c->inventory_count == c->inventory_capacity) {
                     c->preexisting_tracking_failed = true;
                     return -ENOMEM;
                 }
@@ -726,6 +772,22 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
     }
     else if (dropped) {
         ++c->dropped_records;
+    }
+    /* Unchanged T-cov receipt protocol when discovery is not enabled. The
+     * discovery inventory instead requires a bound, strictly released EXIT. */
+    if (!c->config.discovery_enabled && uncovered && e->kind == MA_LIFECYCLE &&
+        get_le(e->bytes, 2) == PGWT_LIFECYCLE_EXIT) {
+        uint32_t pid = (uint32_t)get_le(e->bytes + 4, 4);
+        for (size_t i = 0; i < c->inventory_count; ++i) {
+            if (c->inventory[i].pid != pid) continue;
+            c->inventory[i] = c->inventory[--c->inventory_count];
+            uint64_t exit_at = get_le(e->bytes + 16, 8);
+            if (exit_at > c->preexisting_last_exit) c->preexisting_last_exit = exit_at;
+            if (!c->inventory_count && !c->preexisting_tracking_failed)
+                coverage_gap(c, (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_PREEXISTING_END,
+                    .at = c->preexisting_last_exit, .detected = now});
+            break;
+        }
     }
     if (!uncovered && !dropped) {
         size_t duplicate = e->source < c->source_count &&
@@ -769,6 +831,14 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
                     return -EIO;
             }
         }
+        ma_lifetime *birth = &c->lifetimes[c->lifetime_index[slot] - 1];
+        uint64_t fork_ns = get_le(e->bytes + 16, 8);
+        if (birth->fork_observed && birth->fork_ns != fork_ns) {
+            ma_snapshot snap = pgwt_capture_last_snapshot(c);
+            return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, now, &snap);
+        }
+        birth->fork_observed = true;
+        birth->fork_ns = fork_ns;
     }
     uint64_t query = uncovered ? 0 : e->kind == MA_TRACE ? get_le(e->bytes + 32, 8) :
                      e->kind == MA_TEXT ? get_le(e->bytes + 8, 8) : 0;

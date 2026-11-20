@@ -46,6 +46,9 @@ typedef struct {
     uint64_t pid, g, facts_known, facts_true;
     bool identity_bound, fork_forwarded, failure_reported;
     ma_proof proof;
+    /* Retained observed-birth ledger. Discovery controls never populate it. */
+    uint64_t fork_ns;
+    bool fork_observed;
 } ma_lifetime;
 typedef struct {
     uint64_t query_id, dependency_id;
