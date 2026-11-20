@@ -1,6 +1,7 @@
 # CI safety net (Phase B1 of docs/ROADMAP_AND_STATUS.md)
 #
 # Core jobs:
+#   full-check      — complete portable check.sh tier; required before merge
 #   build-and-unit  — full build (BPF tracer + pgwt-server), C unit tests,
 #                     Python synthetic-data correctness tests
 #   box-tier-ubuntu — full box-check build, require-live suite and live UI smoke
@@ -98,6 +99,46 @@ concurrency:
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
+  full-check:
+    name: full-check
+    runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN at the top of this file
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # History and origin/master are required by the history/link guards.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: web/go.mod
+          cache-dependency-path: web/go.sum
+
+      - name: Install portable build and browser dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential zlib1g-dev liblz4-dev perl lsof
+          python3 -m pip install playwright==1.60.0 websockets pillow numpy
+          python3 -m playwright install --with-deps chromium
+
+      - name: Run full check and require its full-mode verdict
+        run: |
+          set -euo pipefail
+          check_log="$RUNNER_TEMP/pgwt-full-check.log"
+          scripts/check-lock.sh scripts/check.sh | tee "$check_log"
+          grep -F 'CHECK PASSED (full)' "$check_log"
+          if grep -F 'CHECK PASSED (fast)' "$check_log"; then
+            echo 'full-check refused a fast-mode result' >&2
+            exit 1
+          fi
+
   core-status:
     name: core-status
     runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN at the top of this file

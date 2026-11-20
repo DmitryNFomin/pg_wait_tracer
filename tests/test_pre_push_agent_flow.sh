@@ -27,7 +27,7 @@ make_repo() { # make_repo <branch>
     mkdir -p "$d/scripts"
     printf '#!/bin/sh\necho SAME\n' > "$d/scripts/tree-hash.sh"
     chmod +x "$d/scripts/tree-hash.sh"
-    printf 'SAME\n' > "$d/.pgwt-check.stamp"
+    printf 'SAME fast\n' > "$d/.pgwt-check.stamp"
     git -C "$d" add -A >/dev/null 2>&1
     git -C "$d" commit -qm init >/dev/null 2>&1
     git -C "$d" checkout -q -b "$1" 2>/dev/null

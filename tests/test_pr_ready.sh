@@ -68,7 +68,8 @@ case "$1" in
             [[ ! -f "$PR_STATE/box-finished" ]] || exit 95
         fi
         case "${PR_STAMP:-good}" in
-            good) scripts/tree-hash.sh > .pgwt-check.stamp ;;
+            good) printf '%s full\n' "$(scripts/tree-hash.sh)" > .pgwt-check.stamp ;;
+            fast) printf '%s fast\n' "$(scripts/tree-hash.sh)" > .pgwt-check.stamp ;;
             wrong) echo fabricated-wrong-stamp > .pgwt-check.stamp ;;
             empty) : > .pgwt-check.stamp ;;
             none) ;;
@@ -173,11 +174,11 @@ export PR_CHECK_RC=7
 run_ready
 report "valid final stamp wins over check exit 7" passed
 report "nonzero check exit is reported honestly" grep -Fq 'check make exit 7' "$PR_STATE/output"
-for stamp_mode in wrong empty none; do
+for stamp_mode in wrong empty none fast; do
     new_case
     export PR_STAMP=$stamp_mode
     # In the 'none' case this would falsely pass if the old stamp survived.
-    (cd "$fixture" && scripts/tree-hash.sh > .pgwt-check.stamp)
+    (cd "$fixture" && printf '%s full\n' "$(scripts/tree-hash.sh)" > .pgwt-check.stamp)
     run_ready
     report "$stamp_mode stamp fails despite make check exiting zero" failed_with 'check FAILED: stamp missing/mismatch'
 done

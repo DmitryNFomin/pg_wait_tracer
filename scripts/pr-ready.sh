@@ -117,7 +117,7 @@ printf 'pr-ready: check make exit %s (stamp is authoritative)\n' "${check_status
 tree_hash=$(scripts/tree-hash.sh)
 hash_rc=$?
 stamp=$(cat .pgwt-check.stamp 2>/dev/null) || stamp=''
-if [[ "$hash_rc" -eq 0 && -n "$tree_hash" && "$stamp" == "$tree_hash" ]]; then
+if [[ "$hash_rc" -eq 0 && -n "$tree_hash" && "$stamp" == "$tree_hash full" ]]; then
     printf 'pr-ready: check PASSED: .pgwt-check.stamp matches scripts/tree-hash.sh (%s)\n' "$tree_hash"
 else
     printf 'pr-ready: check FAILED: stamp missing/mismatch or tree hash unavailable (stamp=%s, tree=%s, hash exit=%s)\n' "${stamp:-missing}" "${tree_hash:-unavailable}" "$hash_rc" >&2

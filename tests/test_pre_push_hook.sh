@@ -87,8 +87,8 @@ make_fixture() {
 # scripts/tree-hash.sh (relative-to-script resolution, same as the hook).
 tree_hash_of() { ( cd "$1" && ./scripts/tree-hash.sh ); }
 
-stamp_correctly() { tree_hash_of "$1" > "$1/.pgwt-check.stamp"; }
-stamp_stale()     { echo "0000000000000000000000000000000000000000" > "$1/.pgwt-check.stamp"; }
+stamp_correctly() { printf '%s %s\n' "$(tree_hash_of "$1")" "${2:-fast}" > "$1/.pgwt-check.stamp"; }
+stamp_stale()     { echo "0000000000000000000000000000000000000000 fast" > "$1/.pgwt-check.stamp"; }
 
 do_push() {
     # $1 = worktree dir, $2 = branch, rest = extra env assignments (VAR=val)
@@ -121,6 +121,20 @@ check "$([[ $rc -eq 0 ]] && echo true || echo false)" \
     "correct stamp: push succeeds"
 check_contains "$out" "new branch" \
     "correct stamp: the ref actually landed on the remote"
+
+base="$tmproot/c3full"; make_fixture "$base"
+stamp_correctly "$base/main" full
+out=$(do_push "$base/main" main); rc=$?
+check "$([[ $rc -eq 0 ]] && echo true || echo false)" \
+    "full-mode stamp: push succeeds"
+
+for mode in unknown 'fast extra' ''; do
+    base="$tmproot/c3invalid"; make_fixture "$base"
+    printf '%s %s\n' "$(tree_hash_of "$base/main")" "$mode" > "$base/main/.pgwt-check.stamp"
+    out=$(do_push "$base/main" main); rc=$?
+    check "$([[ $rc -ne 0 && "$out" == *'stamp mode invalid'* ]] && echo true || echo false)" \
+        "invalid mode '$mode': matching hash cannot approve push"
+done
 
 # ── Cases 1-3, repeated from the LINKED WORKTREE (the case #203/#241 got
 #    wrong: resolving the main checkout's tree/stamp instead of the

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check.sh — the DETERMINISTIC test tier, runnable on a developer Mac with no
-# Linux, no PostgreSQL, no root. This is what `make check` runs and what the
-# push guard (scripts/hooks/push-guard.sh) requires before `git push`.
+# PostgreSQL, no root. CI's full-check runs the full tier on Linux; the
+# pre-push hook accepts either mode's passing stamp before `git push`.
 #
 #   make check        full local tier (~4 min: adds the Playwright UI suite)
 #   make check-fast   node + go + python compile only (seconds)
@@ -9,8 +9,8 @@
 # Everything that needs the Linux build (C units, synthetic-data tests against
 # pgwt-server, protocol drift, live capture) runs via `make box-check`.
 #
-# On success writes .pgwt-check.stamp = hash of the exact working tree that
-# passed, so the guard can tell whether the tree changed since.
+# On success writes .pgwt-check.stamp = "<tree hash> <fast|full>" for the
+# exact working tree that passed, so the guard can detect later changes.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
@@ -169,6 +169,7 @@ run bash tests/test_gitignore_build_products.sh
 
 step "bash: push-guard denylist and executable pre-push proofs (#719)"
 run bash tests/test_push_guard_denylist.sh
+run python3 -B tests/test_check_stamp.py
 
 step "bash: commit-msg attribution hook fails open and derives Generated-with (#771)"
 run bash tests/test_commit_msg_hook.sh
@@ -317,6 +318,10 @@ run python3 tests/test_frame_verify_probes.py
 
 step "runner-image pin guard (this tree)"
 run bash scripts/check-runner-pin.sh
+
+step "CI full-check job guard and mutants"
+run python3 -B scripts/check-ci-full-check.py
+run python3 -B scripts/test-ci-full-check.py
 
 # tests/results/ evidence-directory ignore rule (companion to this guard's
 # own commit, same failure class as the tree-hash guards above): an agent
@@ -565,7 +570,14 @@ if [[ $fail -ne 0 ]]; then
 fi
 
 # Stamp the exact tree (tracked + untracked, minus ignored) that passed.
-scripts/tree-hash.sh > .pgwt-check.stamp
-echo; echo "CHECK PASSED ($( [[ $FAST -eq 1 ]] && echo fast || echo full )) — stamp $(cat .pgwt-check.stamp)"
+mode=full
+[[ $FAST -eq 0 ]] || mode=fast
+if ! tree_hash=$(scripts/tree-hash.sh) || [[ -z "$tree_hash" ]] ||
+   ! printf '%s %s\n' "$tree_hash" "$mode" > .pgwt-check.stamp; then
+    echo "CHECK FAILED: cannot write tree/mode stamp"
+    rm -f .pgwt-check.stamp
+    exit 1
+fi
+echo; echo "CHECK PASSED ($mode) — stamp $tree_hash"
 [[ $FAST -eq 1 ]] && echo "note: --fast skips the UI suite; the push guard accepts it, CI does not."
 exit 0
