@@ -66,7 +66,7 @@ export function isSampledOnlyTransitionNode(node) {
 
 function enteredOnlyText(node) {
     return node.count === 0 && node.sampled_ms === 0 && node.entered > 0
-        ? 'entered ' + node.entered.toLocaleString() + '×; no dwell closed in this window/filter'
+        ? 'entered ' + node.entered.toLocaleString() + '×'
         : null;
 }
 
@@ -578,7 +578,9 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides, hide
             // Tooltips render as HTML — escape the (server-derived) name too,
             // same bug class as the timeline query-text injection (UI-6).
             tooltip: { formatter: '<b>' + escHtml(nd.name) + '</b><br/>' +
-                (enteredOnlyText(info) ? timeStr : 'Total time: ' + timeStr) },
+                (enteredOnlyText(info)
+                    ? timeStr + '; no dwell closed in this window/filter'
+                    : 'Total time: ' + timeStr) },
             value: ms,
         };
     });

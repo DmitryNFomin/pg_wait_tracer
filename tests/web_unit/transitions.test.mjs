@@ -1895,7 +1895,7 @@ test('#982 entered-only target renders an entry disclosure without zero dwell', 
     const built = buildTransitionsOption(data, 0, { width: 800, height: 550 }, null, false);
     const target = built.option.series[0].data.find(n => n.name === 'CPU*');
     const disclosure = 'entered 7×; no dwell closed in this window/filter';
-    assert.ok(target.label.formatter.includes(disclosure));
+    assert.equal(target.label.formatter, 'CPU*\nentered 7×');
     assert.ok(target.tooltip.formatter.includes(disclosure));
     assert.doesNotMatch(target.label.formatter, /0\s*ms/);
     assert.doesNotMatch(target.tooltip.formatter, /0\s*ms|Total time/);

@@ -151,12 +151,12 @@ function div(cls, parent) {
     return el;
 }
 
-function makeChart(host, option, height, renderer = 'canvas') {
-    host.style.width = CHART_W + 'px';
+function makeChart(host, option, height, renderer = 'canvas', width = CHART_W) {
+    host.style.width = width + 'px';
     host.style.height = height + 'px';
     const chart = echarts.init(host, 'dark', {
         renderer, devicePixelRatio: 1,
-        width: CHART_W, height,
+        width, height,
     });
     // Register the completion listener BEFORE begin()/setOption so a
     // same-tick synchronous 'finished' (unlikely, but not guaranteed absent)
@@ -558,7 +558,11 @@ function renderTransitions(body, foot, state) {
         factLine(foot, 'visibleCount: 0');
         return;
     }
-    makeChart(div('chart', body), m.option, state.opts.dims.height, state.renderer);
+    const { width, height } = state.opts.dims;
+    // Wide/tall fixtures must show their entire chart, at the builder's size.
+    if (width > CHART_W) body.closest('.cell').style.width = (width + 30) + 'px';
+    if (height > 500) body.style.maxHeight = 'none';
+    makeChart(div('chart', body), m.option, height, state.renderer, width);
     // #436: the gallery footer carries the SAME disclosure text the live
     // view shows (buildTransitionsDisclosure) — idle/threshold/server-
     // truncation stay three distinct, named reasons here too.

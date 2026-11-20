@@ -12,6 +12,18 @@
 
 const DIMS = { width: 620, height: 460 };
 
+// Event drill-down: the wait closes into CPU*, whose dwell never closes here.
+const ENTERED_ONLY = {
+    total: 7,
+    nodes: [
+        { name: 'Lock:relation', class: 'Lock', idle: false,
+          total_ms: 12, count: 7, sampled_ms: 0, entered: 0 },
+        { name: 'CPU*', class: 'CPU', idle: false,
+          total_ms: 0, count: 0, sampled_ms: 0, entered: 7 },
+    ],
+    links: [{ source: 'Lock:relation', target: 'CPU*', value: 7, duration_ms: 12 }],
+};
+
 /* 18 nodes across 9 classes, 27 links incl. self-loops — a rich DFG. */
 function denseDfg() {
     const nodes = [
@@ -200,6 +212,20 @@ export const states = {
             links: [{ source: 'CPU*', target: 'CPU*', value: 120, duration_ms: 700 }],
         },
         opts: { threshold: 0, dims: DIMS },
+    },
+    'entered-only': {
+        description: 'Entered-only CPU* after an event drill-down: short entry count below the node; the tooltip explains that no dwell closed in this window/filter.',
+        tags: ['SEMANTICS', 'OCCLUSION'],
+        renderer: 'svg',
+        data: ENTERED_ONLY,
+        opts: { threshold: 0, dims: DIMS },
+    },
+    'entered-only-800x550': {
+        description: 'Entered-only CPU* at 800×550: the short entry label must fit beside the neighbouring Lock:relation circle.',
+        tags: ['SEMANTICS', 'OCCLUSION'],
+        renderer: 'svg',
+        data: ENTERED_ONLY,
+        opts: { threshold: 0, dims: { width: 800, height: 550 } },
     },
     'dense-dfg': {
         description: '18 nodes / 34 links across 9 classes with self-loops, threshold 0: label overlap and edge clutter at full density.',
