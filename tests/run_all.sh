@@ -127,6 +127,7 @@ excluded=0
 known_failing=0
 xpass=0
 known_failing_results=()
+failed_results=()
 
 # KNOWN_FAILING: name|issue|os[@kernel-major.minor]|exit=NN (or |@kernel alone).
 # Both supplied predicates must match; scoped entries MUST specify an exit.
@@ -258,6 +259,13 @@ known_failing_issue() {
     return 1
 }
 
+# Record failures in execution order. Preflight failures which never launch a
+# test use exit 1 and retain the reason; command failures keep the actual exit.
+record_failure() {
+    failed=$((failed + 1))
+    failed_results+=("$1" "$2" "${3:-}")
+}
+
 run_test() {
     local name="$1"
     shift
@@ -267,8 +275,9 @@ run_test() {
     echo "════════════════════════════════════════"
     local rc=0
     local capture; capture=$(mktemp "${TMPDIR:-/tmp}/pgwt_run_test_XXXXXX") || {
-        echo "  FAILED (cannot capture test output)"
-        failed=$((failed + 1))
+        rc=$?
+        echo "  FAILED (exit $rc; cannot capture test output)"
+        record_failure "$name" "$rc" "cannot capture test output"
         return
     }
     "$@" 2>&1 | tee "$capture"
@@ -283,7 +292,7 @@ run_test() {
         # like any other test, not disappear into known_failing.
         if [[ "$rc" -eq 126 || "$rc" -eq 127 ]]; then
             echo "  FAILED TO RUN (exit $rc) — expected exit ${expected:-nonzero except 126/127} for issue #$issue; counts as a real failure"
-            failed=$((failed + 1))
+            record_failure "$name" "$rc"
         elif [[ "$rc" -eq 0 ]]; then
             echo "  UNEXPECTED PASS (issue #$issue) — intermittent or fixed; check the issue"
             known_failing=$((known_failing + 1))
@@ -295,7 +304,7 @@ run_test() {
             classified=1
         else
             echo "  FAILED (exit $rc, expected exit $expected for issue #$issue) — different failure; counts as a real failure"
-            failed=$((failed + 1))
+            record_failure "$name" "$rc"
         fi
         if [[ "$classified" -eq 1 ]]; then
             local deviations
@@ -312,12 +321,13 @@ run_test() {
             refused=$((refused + 1))
         else
             echo "  FAILED (exit 78:$missing)"
-            failed=$((failed + 1))
+            record_failure "$name" "$rc"
         fi
     elif [[ "$rc" -eq 0 ]]; then
         passed=$((passed + 1))
     else
-        failed=$((failed + 1))
+        echo "  FAILED (exit $rc)"
+        record_failure "$name" "$rc"
     fi
     rm -f "$capture"
 }
@@ -343,7 +353,7 @@ skip_live_test() {
         echo "════════════════════════════════════════"
         echo "  $name — FAILED (--require-live set, but: $reason)"
         echo "════════════════════════════════════════"
-        failed=$((failed + 1))
+        record_failure "$name" 1 "--require-live set, but: $reason"
     else
         skip_test "$name" "$reason"
     fi
@@ -363,7 +373,7 @@ undeclared_phase_test() {
     echo "════════════════════════════════════════"
     echo "  $name — FAILED (undeclared phase-marker expectation: $reason)"
     echo "════════════════════════════════════════"
-    failed=$((failed + 1))
+    record_failure "$name" 1 "undeclared phase-marker expectation: $reason"
 }
 
 # A test whose documented/known minimum PostgreSQL major is above the one
@@ -948,7 +958,8 @@ fi
 python3 - "$gate_ok" "$KNOWN_FAILING_OS" "$KNOWN_FAILING_KERNEL" \
     "$executed" "$passed" "$failed" "$refused" "$skipped" "$excluded" \
     "$known_failing" "$xpass" "$total" \
-    ${known_failing_results[@]+"${known_failing_results[@]}"} <<'PYEOF'
+    ${known_failing_results[@]+"${known_failing_results[@]}"} \
+    ${failed_results[@]+"${failed_results[@]}"} <<'PYEOF'
 import json
 import re
 import sys
@@ -958,7 +969,8 @@ counts = dict(zip(("executed", "passed", "failed", "refused", "skipped",
                    "excluded", "known_failing_count", "xpass", "total"),
                   map(int, sys.argv[4:13])))
 results = []
-for record in sys.argv[13:]:
+failed_start = 13 + counts["known_failing_count"]
+for record in sys.argv[13:failed_start]:
     name, issue, rc, deviations = record.split("|", 3)
     result = dict(test=name, issue=int(issue), exit=int(rc), xpass=rc == "0")
     measured = {}
@@ -971,10 +983,22 @@ for record in sys.argv[13:]:
           + ("UNEXPECTED PASS" if rc == "0" else f"exit {rc}") + ")"
           + ("; deviations (pp): " + ", ".join(f"{rate}Hz={delta:.1f}" for rate, delta in measured.items())
              if measured else ""))
+failed_tests = []
+for offset in range(failed_start, len(sys.argv), 3):
+    name, rc, reason = sys.argv[offset:offset + 3]
+    result = dict(test=name, exit=int(rc))
+    if reason:
+        result["reason"] = reason
+    failed_tests.append(result)
+if failed_tests:
+    print("  Failed: " + ", ".join(
+        f"{r['test']} (exit {r['exit']})"
+        + (f" [{r['reason']}]" if "reason" in r else "")
+        for r in failed_tests))
 issues = sorted({r["issue"] for r in results})
 status = "PASS" if ok else "FAIL"
 summary = dict(ok=ok, status=status, os=sys.argv[2], kernel=sys.argv[3],
-               known_failing=results, issues=issues, **counts)
+               known_failing=results, failed_tests=failed_tests, issues=issues, **counts)
 print("RUN_ALL_SUMMARY " + json.dumps(summary, sort_keys=True))
 if ok and results:
     status += (f" with {counts['known_failing_count']} known-failing (issues: "

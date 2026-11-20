@@ -294,7 +294,7 @@ run scripts/check-section-registration.sh
 step "exact-window mask gate bypass suite (#591)"
 run tests/test_uprobe_mask_gate.py
 
-step "runner known-failing scope and summary self-test (#760)"
+step "runner known-failing scope, failed names and summary self-test (#760/#987)"
 run python3 -B tests/test_run_all_known_failing.py
 
 # Runner-image pin guard (2026-10-22). GitHub rolled `ubuntu-latest` to Ubuntu
