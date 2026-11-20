@@ -462,6 +462,9 @@ int pgwt_reader_coverage_record(struct pgwt_event_reader *r, int block_idx,
         return -2;
     if (fread(buf, 1, bh.compressed_size, r->fp) != bh.compressed_size)
         return -1;
+    /* Decode A2 reason-5 pairs and kind 7 as valid carrier records. Data
+     * readers skip every COVERAGE block; they neither expand the A2 gap
+     * to watermark floors nor derive a verdict from A2_BUCKET. */
     return pgwt_coverage_decode(buf, bh.compressed_size, rec) == PGWT_COVD_OK
          ? 0 : -2;
 }

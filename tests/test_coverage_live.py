@@ -46,7 +46,8 @@ FILE_HDR = struct.Struct("<IHHIQQQ")        # v4/v6: 36 bytes
 BLOCK_HDR = struct.Struct("<QQIIIHHQQ")     # v4/v6: 48 bytes
 FLAG_CLOSED_CLEAN = 0x0004
 FLAG_RECOVERED = 0x0010
-KINDS = {1: "BOOT", 2: "WATERMARK", 3: "GAP_OPEN", 4: "GAP_CLOSE", 5: "SEAL"}
+KINDS = {1: "BOOT", 2: "WATERMARK", 3: "GAP_OPEN", 4: "GAP_CLOSE", 5: "SEAL",
+         7: "A2_BUCKET"}
 
 
 def crc32c(data):
@@ -148,6 +149,7 @@ def coverage_records(path, scan=None, data_window=None):
             assert len(p) in (48, 80), len(p)
             pm, schema, kind, reason, a, b, c, d = struct.unpack_from("<IHBBQQQQ", p)
             assert pm == 0x43574750 and schema == 1 and kind in KINDS, (pm, kind)
+            assert (1 <= reason <= 5) if kind == 3 else reason == 0, (kind, reason)
             crc, pad = struct.unpack_from("<II", p, len(p) - 8)
             assert crc == crc32c(p[:len(p) - 8]) and pad == 0, "COVERAGE CRC"
             assert (len(p) == 80) == (kind == 1), "BOOT is 80 bytes, others 48"
@@ -264,7 +266,8 @@ def watermarks(recs):
             if k == "WATERMARK"]
 
 
-REASONS = {0: "none", 1: "pause", 2: "drop", 3: "revoked", 4: "counters_unknown"}
+REASONS = {0: "none", 1: "pause", 2: "drop", 3: "revoked", 4: "counters_unknown",
+           5: "untraced_lifetime"}
 
 
 def boot_files(directory, nonce=None):
@@ -366,6 +369,8 @@ def assert_load_coverage(recs, start_ns, end_ns, delta, label):
           f"kinds={dict(kinds)} gap_reasons={dict(reasons)}; branch={branch}", flush=True)
     assert delta >= 0, "drop counter monotone"
     opened, pairs = {}, []
+    # Reason-5 pairs are decoded and paired without expanding their bounds;
+    # A2_BUCKET is a no-op for this base-coverage gate, which has no A2 verdict.
     for r in recs:
         if r[1] == "GAP_OPEN":
             assert r[5] not in opened, ("unique gap id", r)
@@ -449,8 +454,8 @@ def self_test():
     import contextlib
     import io
 
-    def rec(t, kind, a=0, c=0, reason=0, b=0, nonce=None):
-        return (int(t * SEC), kind, reason, int(a * SEC), b, c, 0, nonce)
+    def rec(t, kind, a=0, c=0, reason=0, b=0, nonce=None, d=0):
+        return (int(t * SEC), kind, reason, int(a * SEC), b, c, d, nonce)
 
     quiet = [rec(0, "BOOT")] + [rec(t, "WATERMARK", t - 1) for t in range(1, 5)]
     clean = quiet + [rec(t, "WATERMARK", t - 1) for t in range(5, 17)]
@@ -530,7 +535,8 @@ def self_test():
     def block(r):
         obs, kind, reason, a, b, c, d, nonce = r
         payload = struct.pack("<IHBBQQQQ", 0x43574750, 1,
-                              list(KINDS.values()).index(kind) + 1, reason, a, b, c, d)
+                              next(k for k, name in KINDS.items() if name == kind),
+                              reason, a, b, c, d)
         if kind == "BOOT":
             payload += nonce + bytes(16)
         payload += struct.pack("<II", crc32c(payload), 0)
@@ -552,6 +558,12 @@ def self_test():
         current_blob = (directory / "current.trace").read_bytes()
         (directory / "current.trace").unlink()
         assert boot_files(directory, n1)[0] == first + second, "rotation without current.trace"
+        (directory / "current.trace").write_bytes(current_blob)
+        a2 = [rec(7, "GAP_OPEN", a=5, b=4321, c=2, d=7 * SEC, reason=5),
+              rec(8, "GAP_CLOSE", a=6, b=17, c=2, d=5 * SEC),
+              rec(9, "A2_BUCKET", a=5, b=6 * SEC, c=10, d=1)]
+        (directory / "current.trace").write_bytes(current_blob + b"".join(map(block, a2)))
+        assert coverage_records(directory / "current.trace")[0] == latest + a2, "A2 carrier decodes"
         (directory / "current.trace").write_bytes(current_blob)
         corrupt = bytearray((directory / "current.trace").read_bytes())
         corrupt[-8] ^= 1

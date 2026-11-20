@@ -377,14 +377,15 @@ int  pgwt_trace_file_closure(const char *path, enum pgwt_closure_status *out);
  * `observation_ns` is the block's first/last timestamp (mono at write).
  * Each call writes one COVERAGE block straight to the file and flushes it to
  * the OS (fflush) without cutting the pending data buffers; a file is opened
- * lazily (BOOT first) when none is open. Returns 0, or -1 when nothing was
- * written (writer disabled or failed, an inconsistent record, an I/O error).
+ * lazily (BOOT first) when none is open. Returns 0 on success, or -1 for a
+ * disabled/failed writer, an inconsistent record or an I/O error. An I/O
+ * error may leave appended bytes; it makes the writer refuse later calls.
  *
  * configure ENABLES coverage for this writer session and sets what BOOT
  * says; call it before the first write. From then on the writer itself
  * writes BOOT as the first block of every file it opens. A session that
  * never calls it (library and unit-test writers) writes no COVERAGE block at
- * all, and the three calls below refuse: such a v6 file carries no coverage
+ * all, and the append calls below refuse: such a v6 file carries no coverage
  * claim, which a coverage reader must treat as not captured. */
 void pgwt_writer_coverage_configure(struct pgwt_event_writer *w,
                                     uint64_t boot_start_ns,
@@ -402,6 +403,22 @@ int  pgwt_writer_coverage_watermark(struct pgwt_event_writer *w,
 int  pgwt_writer_coverage_gap(struct pgwt_event_writer *w,
                               uint64_t observation_ns, bool open,
                               uint64_t gap_id, uint64_t t_ns, uint8_t reason);
+/* A2 pair member, preserving all four payload fields:
+ * open:  a=fork_ns, b=pid, c=gap_id, d=detection_ns (reason 5);
+ * close: a=exit_ns, b=g,   c=gap_id, d=receive_ns (reason 0).
+ * observation_ns remains the block write time, independent of d.
+ * GAP_OPEN is durable (fflush + fsync) before return. Pair consistency and
+ * certificate policy belong to the caller, not this carrier API. */
+int  pgwt_writer_coverage_untraced_lifetime(struct pgwt_event_writer *w,
+                                            uint64_t observation_ns, bool open,
+                                            uint64_t t_ns, uint64_t pid_or_g,
+                                            uint64_t gap_id,
+                                            uint64_t detection_or_receive_ns);
+/* A2_BUCKET (kind 7, reason 0): a=start, b=end, c=N_k, d=U_k. */
+int  pgwt_writer_coverage_a2_bucket(struct pgwt_event_writer *w,
+                                    uint64_t observation_ns,
+                                    uint64_t start_ns, uint64_t end_ns,
+                                    uint64_t births, uint64_t untraced);
 /* SEAL(W_final): clean shutdown only, immediately before pgwt_writer_close.
  * Opens a new file only when this session has already opened one (a
  * session that never wrote anything has nothing to seal). */

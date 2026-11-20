@@ -86,7 +86,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_core_merge_adapter \
             test_transport_wire test_transport_producers test_percpu_transport \
             test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure \
-            test_coverage_verdict test_coverage_writer
+            test_coverage_verdict test_coverage_writer test_coverage_a2_codec \
+            test_coverage_a2_writer_io
 
 .PHONY: all clean check
 
@@ -1273,6 +1274,17 @@ test_coverage_writer: test_coverage_writer.c ../src/open_snapshot.c ../src/event
                       $(BUILD)/server_cJSON.o \
                       ../src/coverage_record.h ../src/open_snapshot.h
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $(filter %.c %.o,$^) -llz4 -lz -lm
+
+test_coverage_a2_codec: test_coverage_a2_codec.c ../src/coverage_record.h
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $<
+
+# Redirect only the writer's system calls, so the host test observes actual
+# flush/fsync ordering and can exercise both error paths without a daemon.
+coverage_a2_writer_io.o: ../src/event_writer.c ../src/event_writer.h ../src/coverage_record.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -Dfflush=pgwt_a2_test_fflush -Dfsync=pgwt_a2_test_fsync -c -o $@ $<
+
+test_coverage_a2_writer_io: test_coverage_a2_writer_io.c coverage_a2_writer_io.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
 # Pilot helpers are built in an external temporary directory by the registered
 # Python route test; no generated fixtures or helper binaries enter the tree.

@@ -21,6 +21,11 @@
  *   3 GAP_OPEN    start       0            gap_id          detection
  *   4 GAP_CLOSE   end         0            gap_id          0
  *   5 SEAL        W_final     0            0               0
+ *   3 GAP_OPEN    fork_ns     pid          gap_id          detection_ns
+ *                 (reason 5 UNTRACED_LIFETIME)
+ *   4 GAP_CLOSE   exit_ns     g            gap_id          receive_ns
+ *                 (reason 0, matching an untraced lifetime)
+ *   7 A2_BUCKET   J_k.start   J_k.end      N_k             U_k
  *
  * Every time except BOOT's postmaster start is CLOCK_MONOTONIC (the clock the
  * trace's records use). Header-only and pure: the writer (event_writer.c),
@@ -46,6 +51,8 @@ enum pgwt_coverage_kind {
     PGWT_COVK_GAP_OPEN  = 3,
     PGWT_COVK_GAP_CLOSE = 4,
     PGWT_COVK_SEAL      = 5,
+    /* 6 is reserved; there is no A2_POLICY record. */
+    PGWT_COVK_A2_BUCKET = 7,
 };
 
 /* GAP_OPEN reasons (the u8 `reason` byte; 0 on every other kind). */
@@ -55,6 +62,7 @@ enum pgwt_coverage_gap_reason {
     PGWT_COVR_DROP             = 2,   /* the counter vector moved */
     PGWT_COVR_REVOKED          = 3,
     PGWT_COVR_COUNTERS_UNKNOWN = 4,   /* the counter vector could not be read */
+    PGWT_COVR_UNTRACED_LIFETIME = 5,
 };
 
 /* BOOT `d`: the capture mode. Low byte = enum pgwt_mode (src/provider.h);
@@ -79,6 +87,7 @@ enum pgwt_coverage_decode_rc {
     PGWT_COVD_BAD_SIZE,     /* size does not match the kind */
     PGWT_COVD_BAD_CRC,
     PGWT_COVD_BAD_PAD,      /* trailing u32 not zero */
+    PGWT_COVD_BAD_REASON,   /* unknown reason or reason on the wrong kind */
 };
 
 /* CRC-32C (Castagnoli, reflected polynomial 0x82F63B78, init and final xor
@@ -133,16 +142,25 @@ static inline size_t pgwt_coverage_payload_size(uint8_t kind)
 
 static inline bool pgwt_coverage_kind_valid(uint8_t kind)
 {
-    return kind >= PGWT_COVK_BOOT && kind <= PGWT_COVK_SEAL;
+    return (kind >= PGWT_COVK_BOOT && kind <= PGWT_COVK_SEAL) ||
+           kind == PGWT_COVK_A2_BUCKET;
+}
+
+static inline bool pgwt_coverage_reason_valid(uint8_t kind, uint8_t reason)
+{
+    return kind == PGWT_COVK_GAP_OPEN
+         ? reason >= PGWT_COVR_PAUSE && reason <= PGWT_COVR_UNTRACED_LIFETIME
+         : reason == PGWT_COVR_NONE;
 }
 
 /* Encode `r` into `out` (at least PGWT_COVERAGE_BOOT_PAYLOAD_SIZE bytes).
- * Returns the payload size, or 0 for an unknown kind. Explicit byte order,
+ * Returns the payload size, or 0 for an invalid kind/reason. Explicit byte order,
  * never a struct copy: the bytes are the format, the struct is not. */
 static inline size_t pgwt_coverage_encode(const struct pgwt_coverage_record *r,
                                           uint8_t *out)
 {
-    if (!pgwt_coverage_kind_valid(r->kind))
+    if (!pgwt_coverage_kind_valid(r->kind) ||
+        !pgwt_coverage_reason_valid(r->kind, r->reason))
         return 0;
     size_t n = pgwt_coverage_payload_size(r->kind);
     memset(out, 0, n);
@@ -190,6 +208,8 @@ pgwt_coverage_decode(const uint8_t *buf, size_t len,
         return PGWT_COVD_BAD_CRC;
     if (pgwt_cov_get_u32(buf + off + 4) != 0)
         return PGWT_COVD_BAD_PAD;
+    if (!pgwt_coverage_reason_valid(kind, buf[7]))
+        return PGWT_COVD_BAD_REASON;
     r->kind = kind;
     r->reason = buf[7];
     r->a = pgwt_cov_get_u64(buf + 8);

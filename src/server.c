@@ -2883,7 +2883,9 @@ static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
         }
         /* #947: a COVERAGE block is not data. Before this skip it fell to
          * the TRANSITIONS branch below and added an exact span at its write
-         * time -- the reason trace v6 needed a version bump at all. */
+         * time -- the reason trace v6 needed a version bump at all.
+         * This reader has no A2 verdict: reason-5 pairs remain unexpanded
+         * gaps in the carrier, and kind-7 A2_BUCKET is a no-op here. */
         if (bi.block_type == PGWT_BLOCK_COVERAGE)
             continue;
         fc->data_blocks++;
