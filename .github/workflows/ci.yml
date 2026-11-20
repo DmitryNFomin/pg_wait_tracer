@@ -102,6 +102,7 @@ jobs:
   full-check:
     name: full-check
     runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN at the top of this file
+    timeout-minutes: 120    # 2x the longest measured Mac full check (53m55s, 2026-11-20), rounded up
     steps:
       - uses: actions/checkout@v4
         with:
