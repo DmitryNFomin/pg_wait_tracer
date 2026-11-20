@@ -1,7 +1,14 @@
-# pg_wait_tracer on-disk trace format (v4)
+# pg_wait_tracer on-disk trace format (v6)
 
-Status: authoritative spec for trace format version 4 (what a current build
-writes) and the sidecar files in a trace directory. v2/v3 files remain
+**v6 (#947):** the v4 layout below, byte for byte, plus block type 3
+COVERAGE (see "COVERAGE (type 3, v6)"). A v6 reader reads v2, v3, v4 and v6
+and refuses v5, the evidence-v1 codec's number. Older builds refuse v6 files
+(they read up to v4), which is the intended downgrade behaviour (coverage spec
+r2 Q2).
+
+Status: authoritative spec for trace format version 6 (what a current build
+writes), including COVERAGE blocks, and the sidecar files in a trace
+directory. v2/v3 files remain
 READABLE (v2 TRANSITIONS records surface `cpu_ns = PGWT_CPU_NS_UNKNOWN`
 and fall back to gap-inference; v3 retains its measured CPU column); v1 stays rejected.
 Written for Phase T5 of the Trust Milestone (DUR-5/6: the format and its
@@ -47,7 +54,7 @@ captured at file creation; readers derive the mono→wall mapping per file
 ## Trace file layout
 
 ```
-[file header — 36 bytes in v4; 28 in v2/v3]
+[file header — 36 bytes in v4/v6; 28 in v2/v3]
 [block 0][block 1]...[block N-1]
 [footer: block index — N × 16 bytes][block count — u32]
 ```
@@ -55,17 +62,17 @@ captured at file creation; readers derive the mono→wall mapping per file
 `current.trace` has no footer while being written; archives always do
 (rotation and startup recovery both append one).
 
-### File header (v4: 36 bytes; v2/v3: 28 bytes)
+### File header (v4/v6: 36 bytes; v2/v3: 28 bytes)
 
 | off | size | field | value |
 |---|---|---|---|
 | 0 | 4 | magic | `0x54574750` ("PGWT" as LE bytes) |
-| 4 | 2 | version | 4 (v2/v3 still read) |
+| 4 | 2 | version | 6 (v2/v3/v4 still read; v5 refused) |
 | 6 | 2 | flags | bit 0: LZ4-compressed blocks |
 | 8 | 4 | pg_version | PostgreSQL major version |
 | 12 | 8 | start_time_ns | CLOCK_REALTIME at file creation |
 | 20 | 8 | clock_offset_ns | CLOCK_MONOTONIC at file creation |
-| 28 | 8 | nominal_sample_period_ns (**v4 only**) | configured `1e9 / sample_rate_hz`; 0 = unknown |
+| 28 | 8 | nominal_sample_period_ns (**v4/v6**) | configured `1e9 / sample_rate_hz`; 0 = unknown |
 
 The first 28 bytes are `struct pgwt_trace_file_header`; the v4 extension is
 one little-endian u64. The daemon sets the nominal period before the first
@@ -83,7 +90,7 @@ measured mean rather than configured nominal cadence.
 Summary files reuse the **28-byte prefix only**, without the v4 extension, with magic `0x53574750`
 ("PGWS") and their own version (currently 2; v1 files remain readable).
 
-### Block header (v4: 48 bytes; v2/v3: 40 bytes)
+### Block header (v4/v6: 48 bytes; v2/v3: 40 bytes)
 
 | off | size | field |
 |---|---|---|
@@ -187,6 +194,33 @@ spanning at least one second at the end of a push, publication, rotation and
 close. A production push is one tick; bulk callers can supply multiple ticks
 with a common weight. The per-block maximum includes the first weight and
 all subsequent effective tick weights.
+
+**COVERAGE (type 3, v6)** — one coverage fact per block, never a wait
+record. Not compressed: `compressed_size = uncompressed_size` = 48 bytes (80
+for BOOT), `num_events = 1`, `first_ts = last_ts =` observation (mono at
+write), `sample_period_ns = 0`, v4 extension 0. Payload (little-endian):
+`u32 magic "PGWC"`, `u16 schema = 1`, `u8 kind`, `u8 reason`,
+`u64 a, b, c, d`, BOOT only `u8 boot_nonce[16]`, `u8 kernel_boot_id[16]`, then
+`u32 crc32c(all prior bytes)` (Castagnoli) and `u32 0`.
+
+| kind | a | b | c | d |
+|---|---|---|---|---|
+| 1 BOOT | boot_start | file_no | postmaster start (wall, 0 = unknown) | mode |
+| 2 WATERMARK | W | floor_db (<= W) | floor_idle (<= floor_db) | 0 |
+| 3 GAP_OPEN | start | 0 | gap_id | detection |
+| 4 GAP_CLOSE | end | 0 | gap_id | 0 |
+| 5 SEAL | W_final | 0 | 0 | 0 |
+
+A writer session that enables coverage (the daemon always does) writes BOOT
+as the first block of every file and file_no runs on across rotation. The
+daemon writes a WATERMARK every second. W advances to the oldest pending
+publish point P once the consumer crosses its reservation-position fence,
+sampled after P on the single event ring, and the counters and publication
+succeed. Until then W repeats as a heartbeat. Sampled mode has no event ring
+and its empty fence is always crossed. The daemon writes GAP records when the
+capture counter vector moves or cannot be read, and SEAL only on a clean
+shutdown. Every data path skips type 3 (`tests/test_block_type_sites.py`
+enumerates the sites); recovery keeps it. Codec: `src/coverage_record.h`.
 
 ### Markers
 

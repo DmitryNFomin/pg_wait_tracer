@@ -281,6 +281,8 @@ int main(int argc, char **argv)
                 REFUSE("block_header_unreadable:file%d:block%d", fi, b);
                 continue;
             }
+            if (info.block_type == PGWT_BLOCK_COVERAGE)
+                continue;
             header_records += info.num_events;
             struct pgwt_trace_event *ev =
                 calloc(info.num_events ? info.num_events : 1, sizeof(*ev));

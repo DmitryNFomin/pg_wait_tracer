@@ -51,6 +51,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <math.h>
+#include <dirent.h>
 
 static int checks = 0;
 static int failures = 0;
@@ -854,7 +855,8 @@ static void test_graph_node_population(const char *dir, uint64_t base)
           "10 exits (got %.0f)", g.link_count);
     cJSON_Delete(out);
 
-    /* 4b. CLASS FILTER: the node population must narrow with the edges. */
+    /* 4b. CLASS FILTER: dwell narrows with the edges; the entered-only
+     * target survives without dwell from its excluded outgoing records. */
     struct pgwt_request freq = {0};
     freq.from_ns = srv->earliest_wall_ns;
     freq.to_ns   = srv->latest_wall_ns + 1;
@@ -869,14 +871,15 @@ static void test_graph_node_population(const char *dir, uint64_t base)
           fg.n_links);
     CHECK(fabs(fg.link_count - 10.0) < 1e-6,
           "4b. …carrying the 10 Lock->IO records (got %.0f)", fg.link_count);
-    CHECK(fg.n_nodes == 1,
-          "4b. and exactly ONE node (got %d) -- the parent tree published 2, "
-          "the second attached to no edge in the response", fg.n_nodes);
+    CHECK(fg.n_nodes == 2,
+          "4b. source and entered-only target nodes (got %d)", fg.n_nodes);
     CHECK(has_node(fout, "Lock:relation"),
           "4b. the surviving node is Lock:relation (the filtered class)");
-    CHECK(!has_node(fout, "IO:DataFileRead"),
-          "4b. and IO:DataFileRead is GONE -- its 200 ms of dwell belonged to "
-          "records this response excluded");
+    cJSON *target = row_by_name(cJSON_GetObjectItem(fout, "nodes"), "IO:DataFileRead");
+    CHECK(target && json_num(target, "total_ms") == 0 &&
+          json_num(target, "count") == 0 && json_num(target, "sampled_ms") == 0 &&
+          json_num(target, "entered") == 10,
+          "4b. entered-only IO target has no dwell from excluded records");
     CHECK(fabs(fg.node_ms - 100.0) < 1e-6,
           "4b. Σ node dwell is the filtered 100 ms, not the unfiltered 300 "
           "(got %.3f)", fg.node_ms);
@@ -903,6 +906,192 @@ static void test_graph_node_population(const char *dir, uint64_t base)
     }
 
     free(srv);
+}
+
+/* #982: exercise the real trace loader, occurrence/filter gate, accumulator,
+ * serializer and idle classification together. Select filter/edge separately
+ * so each requested mutant must reach and fail BOTH groups. */
+static void check_endpoint_identities(cJSON *out, const char *scenario, int capped)
+{
+    cJSON *nodes = cJSON_GetObjectItem(out, "nodes");
+    cJSON *links = cJSON_GetObjectItem(out, "links");
+    CHECK(cJSON_IsArray(nodes) && cJSON_GetArraySize(nodes) >= 2 &&
+          cJSON_IsArray(links) && cJSON_GetArraySize(links) > 0,
+          "982 %s: nonempty graph premise", scenario);
+    cJSON *link;
+    cJSON_ArrayForEach(link, links) {
+        cJSON *src = cJSON_GetObjectItem(link, "source");
+        cJSON *dst = cJSON_GetObjectItem(link, "target");
+        CHECK(cJSON_IsString(src) && row_by_name(nodes, src->valuestring),
+              "982 %s: source endpoint is a node", scenario);
+        CHECK(cJSON_IsString(dst) && row_by_name(nodes, dst->valuestring),
+              "982 %s: target endpoint is a node", scenario);
+    }
+    cJSON *node;
+    cJSON_ArrayForEach(node, nodes) {
+        CHECK(is_json_number(node, "entered"), "982 %s: numeric entered", scenario);
+        CHECK(is_json_number(node, "event_id") &&
+              cJSON_IsString(cJSON_GetObjectItem(node, "class")) &&
+              cJSON_IsBool(cJSON_GetObjectItem(node, "idle")),
+              "982 %s: normal identity and idle metadata", scenario);
+        if (capped) continue;
+        const char *name = cJSON_GetObjectItem(node, "name")->valuestring;
+        double entered = 0, exited = 0;
+        cJSON_ArrayForEach(link, links) {
+            if (!strcmp(cJSON_GetObjectItem(link, "source")->valuestring, name))
+                exited += json_num(link, "value");
+            if (!strcmp(cJSON_GetObjectItem(link, "target")->valuestring, name))
+                entered += json_num(link, "value");
+        }
+        CHECK(entered == json_num(node, "entered"),
+              "982 %s: sum incoming links == entered(%s)", scenario, name);
+        CHECK(exited == json_num(node, "count"),
+              "982 %s: sum outgoing links == count(%s)", scenario, name);
+    }
+}
+
+/* The production aggregate route remains conservatively gated off. Exercise
+ * its actual response builder with build+merge over the counted fixture
+ * records, without changing that routing guard or its filter restrictions. */
+static const struct pgwt_block_agg *endpoint_aggregate;
+static void emit_endpoint_aggregate(struct pgwt_server *srv, struct pgwt_request *req)
+{
+    emit_transitions_response(srv, req->from_ns, req->to_ns, req,
+        PGWT_FIDELITY_EXACT, req->num_buckets, NULL, 0, endpoint_aggregate, 1, 0, NULL);
+}
+
+static void test_transition_endpoints(const char *group)
+{
+    const char *names[] = { "filter-event", "filter-class", "edge-open",
+        "edge-exit", "edge-hidden", "edge-marker", "edge-right-open", "edge-close", "edge-cap", "edge-idle", "edge-unknown-idle", "edge-cpu-open" };
+    for (int k = 0; k < 12; k++) {
+        if (group && ((k < 2 && strcmp(group, "filter")) ||
+                      (k >= 2 && strcmp(group, "edge")))) continue;
+        char dir[] = "/tmp/pgwt_982_XXXXXX";
+        CHECK(mkdtemp(dir) != NULL, "982 %s: temp trace", names[k]);
+        struct pgwt_event_writer w;
+        CHECK(pgwt_writer_init(&w, dir, 18, 0, NULL) == 0,
+              "982 %s: writer init", names[k]);
+        uint32_t target_id = k == 11 ? 0 :
+            (k >= 9 ? WEI(PG_WAIT_TIMEOUT, k == 9 ? 1 : 31) : EV_IO);
+        struct pgwt_trace_event ev = {
+            .timestamp_ns = fixture_base + 100 * MS,
+            .pid = 1701, .old_event = EV_LOCK, .new_event = target_id,
+            .duration_ns = 20 * MS, .cpu_ns = PGWT_CPU_NS_UNKNOWN,
+        };
+        CHECK(pgwt_writer_push_event(&w, &ev) == 0,
+              "982 %s: entry written", names[k]);
+        struct pgwt_trace_event records[2] = { ev };
+        ev.timestamp_ns = fixture_base + 300 * MS;
+        ev.old_event = target_id;
+        ev.new_event = EV_LOCK;
+        ev.duration_ns = 200 * MS;
+        if (k == 3 || k >= 9) ev.new_event = PGWT_EVENT_EXIT;
+        if (k == 4) ev.new_event = WEI(PG_WAIT_ACTIVITY, 0);
+        if (k == 5) ev.new_event = PGWT_MARKER_EXEC_END;
+        if (k == 8) { ev.old_event = EV_LOCK; ev.new_event = EV_LWLOCK; }
+        if (k != 2)  /* Truly open: no closing record for the entered state. */
+            CHECK(pgwt_writer_push_event(&w, &ev) == 0,
+                  "982 %s: later close written", names[k]);
+        records[1] = ev;
+        pgwt_writer_close(&w);
+        struct pgwt_server *srv = calloc(1, sizeof(*srv));
+        CHECK(srv && server_init(srv, dir) == 0, "982 %s: server init", names[k]);
+        if (!srv) return;
+        int64_t off = srv->cov[0].canon_offset;
+        struct pgwt_request req = {0};
+        req.from_ns = (uint64_t)((int64_t)fixture_base + off);
+        req.to_ns = req.from_ns + 400 * MS;
+        req.num_buckets = 100;
+        if (k == 0) { req.filter.has_event_filter = 1; req.filter.event_id = EV_LOCK; }
+        if (k == 1) snprintf(req.filter.class_name, sizeof(req.filter.class_name), "Lock");
+        if (k == 2 || k == 6 || k == 11) req.to_ns = req.from_ns + 200 * MS;
+        if (k == 7) req.to_ns = req.from_ns + 300 * MS;
+        if (k == 8) req.num_buckets = 1;
+        if (k == 6) {
+            int n = 0, flagged = 0;
+            struct pgwt_load_info info = {0};
+            struct pgwt_trace_event *loaded = server_load_events_fi(srv,
+                req.from_ns, req.to_ns, 0, &n, &info);
+            for (int j = 0; j < n; j++)
+                if (loaded[j].old_event == EV_IO &&
+                    (loaded[j].flags & PGWT_EVENT_FLAG_RIGHT_OPEN)) {
+                    flagged++;
+                    CHECK(!pgwt_transition_record_counts(&req.filter, &loaded[j]),
+                          "982 edge-right-open: flagged close is excluded");
+                }
+            CHECK(flagged == 1, "982 edge-right-open: loader supplied flagged record");
+            free(loaded);
+        }
+        cJSON *out = call_handler(handle_transitions, srv, &req);
+        CHECK(out && !cJSON_GetObjectItem(out, "error"), "982 %s: response", names[k]);
+        if (out) {
+            check_endpoint_identities(out, names[k], k == 8);
+            if (k == 8)
+                CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(out, "nodes")) == 3 &&
+                      cJSON_GetArraySize(cJSON_GetObjectItem(out, "links")) == 1 &&
+                      cJSON_IsTrue(cJSON_GetObjectItem(out, "truncated")),
+                      "982 edge-cap: full node catalog survives max_rows=1");
+            char target_name[64];
+            if (target_id == 0) snprintf(target_name, sizeof(target_name), "CPU*");
+            else pgwt_event_full_name(target_id, target_name, sizeof(target_name));
+            cJSON *target = row_by_name(cJSON_GetObjectItem(out, "nodes"), target_name);
+            CHECK(target && json_num(target, "total_ms") == 0 &&
+                  json_num(target, "count") == 0 && json_num(target, "sampled_ms") == 0 &&
+                  json_num(target, "entered") == 1,
+                  "982 %s: entered-only target has entry without closed dwell", names[k]);
+            CHECK(node_ms(out, "Lock:relation") == (k == 8 ? 220 : 20),
+                  "982 %s: existing source dwell stays unchanged", names[k]);
+            if (k == 9 || k == 10) {
+                CHECK(cJSON_IsTrue(cJSON_GetObjectItem(out, "idle_classification_complete")) == (k == 9),
+                      "982 %s: completeness includes entered-only Timeout", names[k]);
+                CHECK(cJSON_IsTrue(cJSON_GetObjectItem(target, "idle")) == (k == 9),
+                      "982 %s: entered-only target receives normal idle verdict", names[k]);
+            }
+            struct pgwt_block_identity id = {
+                .trace = { .trace_version = PGWT_TRACE_VERSION, .pg_version = 18,
+                    .start_time_ns = srv->earliest_wall_ns, .clock_offset_ns = fixture_base },
+                .num_events = k == 8 ? 2 : 1, .file_offset = 4096,
+                .first_timestamp_ns = records[0].timestamp_ns,
+                .last_timestamp_ns = records[k == 8 ? 1 : 0].timestamp_ns,
+            };
+            struct pgwt_block_agg block, merged;
+            CHECK(pgwt_block_agg_build(&block, &id, PGWT_BLOCK_TRANSITIONS, 1,
+                                       records, (int)id.num_events) == PGWT_BAGG_OK,
+                  "982 %s: build aggregate of counted records", names[k]);
+            pgwt_block_agg_init_window(&merged);
+            CHECK(pgwt_block_agg_merge(&merged, &block) == PGWT_BAGG_OK,
+                  "982 %s: merge aggregate", names[k]);
+            endpoint_aggregate = &merged;
+            cJSON *aggregate_out = call_handler(emit_endpoint_aggregate, srv, &req);
+            CHECK(aggregate_out &&
+                  cJSON_Compare(cJSON_GetObjectItem(out, "nodes"),
+                                cJSON_GetObjectItem(aggregate_out, "nodes"), 1),
+                  "982 %s: aggregate serialization matches raw node catalog", names[k]);
+            if (aggregate_out) {
+                check_endpoint_identities(aggregate_out, names[k], k == 8);
+                CHECK(cJSON_Compare(cJSON_GetObjectItem(out, "idle_classification_complete"),
+                                    cJSON_GetObjectItem(aggregate_out, "idle_classification_complete"), 1),
+                      "982 %s: aggregate idle completeness matches raw", names[k]);
+            }
+            cJSON_Delete(aggregate_out);
+            endpoint_aggregate = NULL;
+            pgwt_block_agg_free(&merged);
+            pgwt_block_agg_free(&block);
+            cJSON_Delete(out);
+        }
+        free(srv);
+        DIR *d = opendir(dir);
+        struct dirent *de;
+        while (d && (de = readdir(d))) {
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+            unlink(path);
+        }
+        if (d) closedir(d);
+        rmdir(dir);
+    }
 }
 
 /* ── 5. bypass suite: the ways these sections could stop seeing ───────── */
@@ -997,6 +1186,13 @@ int main(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     fixture_base = ((uint64_t)ts.tv_sec * ONE_SEC + (uint64_t)ts.tv_nsec);
     fixture_base = (fixture_base / ONE_SEC) * ONE_SEC;
+    const char *endpoint_group = getenv("PGWT_TEST_982_CASE");
+    if (endpoint_group) {
+        test_transition_endpoints(endpoint_group);
+        printf("982 %s: %d checks, %d failures\n", endpoint_group, checks, failures);
+        return failures ? 1 : 0;
+    }
+
 
     char dir_a[] = "/tmp/pgwt_semwire_a_XXXXXX";
     if (!mkdtemp(dir_a)) { printf("FATAL: mkdtemp a\n"); return 2; }
@@ -1028,11 +1224,12 @@ int main(void)
     build_fixture_b(dir_b, fixture_base);
     test_graph_node_population(dir_b, fixture_base);
     test_bypass(dir_b);
+    test_transition_endpoints(NULL);
 
     /* A suite that ran no assertions proved nothing, and a FLOOR that does
      * not move with the suite lets a whole section stop running unnoticed.
-     * 92 assertions today. */
-    if (checks < 92) {
+     * At least 500 assertions, including the endpoint scenarios above. */
+    if (checks < 500) {
         printf("FAIL: only %d assertions ran -- the suite did not execute\n",
                checks);
         return 1;

@@ -4,7 +4,7 @@
 The opt-in arm lasts 30 seconds. A new, tagged backend sleeps and exits; the
 production codec/replay test binary inspects its file, and the pilot server
 route must return the documented refusals. Other arms exercise opt-out, the
-size bound and actual publication failure, while reading each arm's v4 bytes.
+size bound and actual publication failure, while reading each arm's v6 bytes.
 All captures/logs live in a temporary directory, outside the repository.
 """
 import argparse
@@ -86,15 +86,15 @@ def metric_refusal(response, expected):
     assert storage["replay_stop"] is None and storage["capture_ambiguous"] is False, response
 
 
-def v4_readable(directory, pid):
+def v6_readable(directory, pid):
     path = directory / "current.trace"
     header = path.read_bytes()[:6]
-    assert header[:4] == b"PGWT" and int.from_bytes(header[4:6], "little") == 4, path
+    assert header[:4] == b"PGWT" and int.from_bytes(header[4:6], "little") == 6, path
     with ServerHarness(str(directory)) as server:
         response = server.query("top_events", filters={"pid": pid}, timeout=10)
         assert "error" not in response and response.get("rows"), response
         assert any("PgSleep" in row.get("name", "") for row in response["rows"]), response
-    print("same-run v4 header/reader/PgSleep: PASS", flush=True)
+    print("same-run v6 header/reader/PgSleep: PASS", flush=True)
 
 
 def run_arm(pm_pid, unknown_pid, label):
@@ -157,7 +157,7 @@ def run_arm(pm_pid, unknown_pid, label):
                 reason = "size cap reached" if label == "tiny" else "evidence output directory unwritable"
                 assert "EVIDENCE CAPTURE REFUSED: " + reason in text, text
                 print("capture live explicit refusal: " + reason, flush=True)
-        v4_readable(directory, pid)
+        v6_readable(directory, pid)
         print(f"capture live {label}: PASS", flush=True)
 
 

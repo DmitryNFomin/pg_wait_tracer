@@ -86,7 +86,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_core_merge_adapter \
             test_transport_wire test_transport_producers test_percpu_transport \
             test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure \
-            test_coverage_verdict
+            test_coverage_verdict test_coverage_writer
 
 .PHONY: all clean check
 
@@ -1261,6 +1261,18 @@ test_coverage_verdict: test_coverage_verdict.c ../src/coverage.c ../src/coverage
 	mkdir -p $(COVERAGE_CASES_DIR)
 	python3 -B gen_coverage_cases.py --output $(COVERAGE_CASES_DIR)/coverage_cases.h
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -I$(COVERAGE_CASES_DIR) -o $@ test_coverage_verdict.c ../src/coverage.c
+
+# Coverage label U1 (Refs #947): trace v6 COVERAGE records -- codec golden
+# bytes, the writer API, the master-path tracker and floor fold (the pure half
+# of open_snapshot.c, hence -DPGWT_SERVER) and the v4-era read paths. Server
+# objects only: runs on any host.
+test_coverage_writer: test_coverage_writer.c ../src/open_snapshot.c ../src/event_reader.c \
+                      replay_accum.o replay_compute_core.o map_reader_core.o \
+                      $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
+                      $(BUILD)/server_idle_rule.o $(BUILD)/server_spawn.o \
+                      $(BUILD)/server_cJSON.o \
+                      ../src/coverage_record.h ../src/open_snapshot.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $(filter %.c %.o,$^) -llz4 -lz -lm
 
 # Pilot helpers are built in an external temporary directory by the registered
 # Python route test; no generated fixtures or helper binaries enter the tree.

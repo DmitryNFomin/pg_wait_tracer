@@ -58,7 +58,7 @@ void pgwt_reader_close(struct pgwt_event_reader *r);
 
 /* Per-block metadata surfaced to consumers (trace format v2). */
 struct pgwt_block_info {
-    enum pgwt_block_type block_type;   /* TRANSITIONS or SAMPLES */
+    enum pgwt_block_type block_type;   /* TRANSITIONS, SAMPLES or COVERAGE */
     uint64_t sample_period_ns;         /* first weight (v4), stored mean (v2/v3) */
     uint64_t max_sample_weight_ns;     /* safe header-only lookahead */
     uint64_t nominal_sample_period_ns; /* capture cadence, never a weight */
@@ -91,6 +91,17 @@ int pgwt_reader_decode_block(struct pgwt_event_reader *r, int block_idx,
 int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
                                    struct pgwt_trace_event *out, int max_events,
                                    struct pgwt_block_info *info);
+
+/* #947: read block `block_idx` as a COVERAGE record (trace v6).
+ * Returns 0 with *rec decoded and verified (magic, schema, kind, size, CRC),
+ * 1 when the block is not a COVERAGE block, -1 when it cannot be read,
+ * -2 when it is a COVERAGE block whose payload does not verify (the coverage
+ * verdict's hole). *observation_ns (optional) receives the block timestamp.
+ * Data consumers never call this; the coverage model builder (U2b) does. */
+struct pgwt_coverage_record;
+int pgwt_reader_coverage_record(struct pgwt_event_reader *r, int block_idx,
+                                struct pgwt_coverage_record *rec,
+                                uint64_t *observation_ns);
 
 /* Read just a block's header metadata (no decode). Returns 0 / -1. */
 int pgwt_reader_block_info(struct pgwt_event_reader *r, int block_idx,

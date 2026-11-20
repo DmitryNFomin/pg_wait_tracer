@@ -73,6 +73,32 @@ class ReplayComparisonTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'empty trace directory'):
                 trace_headers(tmp)
 
+    def test_transition_entered_only_label_uses_ws_count_and_keeps_other_units_strict(self):
+        for fields, label in [
+                (dict(count=0, sampled_ms=0, entered=7), 'entered 7×'),
+                (dict(count=0, sampled_ms=0, entered=1234), 'entered 1,234×'),
+                (dict(count=1, sampled_ms=0, entered=7), '0ms'),
+                (dict(count=0, sampled_ms=12, entered=7), '0ms'),
+                (dict(count=0, sampled_ms=0, entered=0), '0ms'),
+                ({}, '0ms')]:
+            with self.subTest(fields=fields):
+                data = dict(nodes=[dict(name='CPU*', total_ms=0, **fields)],
+                            links=[dict(source='CPU*', target='CPU*', value=7)])
+                point = dict(name='CPU*', value=0, label=dict(formatter='CPU*\n' + label))
+                option = dict(series=[dict(data=[point], links=data['links'])])
+                snapshot = dict(hideIdle=False, threshold=0)
+                self.assertEqual(compare_chart('transitions', option, data, snapshot, {}, 0), 1)
+                for wrong in {'0ms', 'entered 8×', 'entered 7×',
+                              'entered 7×; no dwell closed in this window/filter',
+                              'entered 7× 0ms', '0ms\nentered 7×'} - {label}:
+                    point['label']['formatter'] = 'CPU*\n' + wrong
+                    with self.subTest(wrong=wrong), self.assertRaisesRegex(AssertionError, 'node units'):
+                        compare_chart('transitions', option, data, snapshot, {}, 0)
+                point['label']['formatter'] = 'CPU*\n' + label
+                point['value'] = 1
+                with self.assertRaisesRegex(AssertionError, 'node ms'):
+                    compare_chart('transitions', option, data, snapshot, {}, 0)
+
     def test_header_identity_is_exact_decimal_not_float(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'current.trace'

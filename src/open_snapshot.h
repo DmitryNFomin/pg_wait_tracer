@@ -431,4 +431,116 @@ struct pgwt_daemon;
 void pgwt_collect_open_intervals(struct pgwt_daemon *d,
                                  struct pgwt_open_snapshot *s);
 
+/* ── #947 coverage watermark, master path (trace v6, spec r2 §1) ─────────
+ *
+ * Every 1 s coverage tick the daemon (1) reads the state map and folds the
+ * two FLOORS, (2) reads the capture counter vector BEFORE publish_from,
+ * (3) drains the event ring (bounded) and publishes the writer, and hands the
+ * results to the tracker, which decides what to write. The tracker and the
+ * floor fold are PURE (no BPF, no daemon): tests/test_coverage_writer.c
+ * drives them against the real writer on any host.
+ *
+ * W is the OLDEST pending publish point whose fixed reservation fence the
+ * event loop has consumed and successfully published. The coverage tick never
+ * consumes the ring. Newer traffic cannot move that fence; a busy head cannot
+ * be passed. Known, unchanged loss counters are also required. Until then a
+ * tick repeats the last written triple as a heartbeat (C4). The producer's
+ * timestamp-before-reservation window remains a measured residual. */
+
+#include "counter_vector.h"
+
+struct pgwt_event_writer;
+
+/* Floors (C1). floor_idle covers every attached backend; floor_db leaves out
+ * a backend whose current wait is idle (pgwt_is_idle_event) while no command
+ * is open. A backend whose state cannot be read counts for BOTH, at the
+ * caller's fail-closed bound (its watchpoint attach instant). */
+struct pgwt_cov_floors {
+    uint64_t snap_ns;
+    uint64_t floor_db_ns;
+    uint64_t floor_idle_ns;
+};
+void pgwt_cov_floors_begin(struct pgwt_cov_floors *f, uint64_t snap_ns);
+void pgwt_cov_floors_add(struct pgwt_cov_floors *f, bool readable,
+                         uint64_t last_ts_ns, uint32_t last_event,
+                         bool cmd_open, uint64_t unreadable_bound_ns);
+
+enum pgwt_cov_cv_state {
+    PGWT_COV_CV_UNCHANGED = 0,
+    PGWT_COV_CV_CHANGED,
+    PGWT_COV_CV_UNKNOWN,
+};
+/* `cur` NULL, invalid, or with any invalid component is UNKNOWN. */
+enum pgwt_cov_cv_state
+pgwt_cov_cv_compare(const struct pgwt_counter_vector *base,
+                    const struct pgwt_counter_vector *cur);
+
+struct pgwt_cov_tick_in {
+    uint64_t observation_ns;     /* mono at write */
+    uint64_t publish_from_ns;    /* mono before the reservation fence */
+    bool     floors_known;       /* false: no watchpoint intervals (sampled
+                                  * tier, de-escalated tiered): floors = W */
+    uint64_t floor_db_ns, floor_idle_ns;
+    bool     positions_known;
+    uint64_t producer_pos, consumer_pos; /* libbpf reservation byte positions */
+    bool     publish_ok;
+    const struct pgwt_counter_vector *cv;   /* NULL = unreadable */
+};
+
+/* Floors, counters, P, producer fence, consumer position, publish, observation.
+ * A loss after the counter read belongs to the NEXT tick's gap, ending after
+ * that loss. The ops deliberately expose no ring consume operation. */
+struct pgwt_cov_tick_ops {
+    struct pgwt_counter_vector (*counters)(void *ctx);
+    uint64_t (*clock)(void *ctx);
+    void (*positions)(void *ctx, struct pgwt_cov_tick_in *in);
+    bool (*publish)(void *ctx);
+};
+void pgwt_cov_collect_tick(struct pgwt_cov_tick_in *in,
+                           struct pgwt_counter_vector *cv, void *ctx,
+                           const struct pgwt_cov_tick_ops *ops);
+
+struct pgwt_cov_tracker {
+    bool     watermarks;         /* false (lightweight, exact_perf): SEAL only */
+    bool     consume_failed;     /* unexpected callback/consume error: fail closed */
+    uint64_t boot_start_ns;
+    /* last WRITTEN watermark triple (boot_start until the first one) */
+    uint64_t w_ns, fd_ns, fi_ns;
+    /* oldest pending triple and its FIXED producer reservation fence */
+    bool     has_pending;
+    uint64_t p_ns, pfd_ns, pfi_ns, p_fence;
+    bool     base_known;
+    struct pgwt_counter_vector base;
+    bool     gap_open;
+    uint64_t gap_id;             /* id of the open gap, or the last one */
+    /* measurements (box test, status) */
+    uint64_t ticks, good_ticks, heartbeats, gaps, write_failures;
+    uint64_t promotions, fence_pos, consumer_pos;
+    uint64_t tick_cpu_ns;        /* daemon thread CPU inside coverage ticks */
+    uint64_t drain_cpu_ns;       /* retained cost field: always zero */
+};
+
+/* `base` is the counter vector at boot_start (NULL or invalid: unknown, so
+ * the first known reading opens and closes a counters_unknown gap). */
+void pgwt_cov_tracker_init(struct pgwt_cov_tracker *t, uint64_t boot_start_ns,
+                           bool watermarks,
+                           const struct pgwt_counter_vector *base);
+/* One coverage tick. Returns 0, or -1 if a coverage write failed. */
+int  pgwt_cov_tracker_tick(struct pgwt_cov_tracker *t,
+                           struct pgwt_event_writer *w,
+                           const struct pgwt_cov_tick_in *in);
+/* Clean shutdown, after the final drain, the open-interval flush and a
+ * publish, immediately before pgwt_writer_close: one last tick (a good one
+ * writes its pending watermark), then SEAL(last written W). Never called on
+ * any other exit path: a boot without SEAL is how a crash reads. */
+int  pgwt_cov_tracker_seal(struct pgwt_cov_tracker *t,
+                           struct pgwt_event_writer *w,
+                           const struct pgwt_cov_tick_in *in);
+
+/* Daemon side (src/open_snapshot.c, Linux build only). */
+void pgwt_coverage_start(struct pgwt_daemon *d,
+                          const struct pgwt_counter_vector *base);
+void pgwt_coverage_tick(struct pgwt_daemon *d);
+void pgwt_coverage_shutdown(struct pgwt_daemon *d);
+
 #endif /* PGWT_OPEN_SNAPSHOT_H */

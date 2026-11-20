@@ -212,10 +212,10 @@ pair_slot(struct pgwt_block_agg_pair *tab, int cap, uint32_t from, uint32_t to)
     }
 }
 
-/* Sample-only nodes have count == 0, but still occupy a slot. */
+/* Sample-only and entered-only nodes have count == 0, but occupy a slot. */
 static int node_occupied(const struct pgwt_block_agg_node *node)
 {
-    return node->count != 0 || node->sampled_ns != 0;
+    return node->count != 0 || node->sampled_ns != 0 || node->entered != 0;
 }
 
 static struct pgwt_block_agg_node *
@@ -328,6 +328,19 @@ static int node_add(struct pgwt_block_agg *a, uint32_t id,
     s->total_ns += total_ns;
     a->node_records += count;
     a->node_total_ns += total_ns;
+    return PGWT_BAGG_OK;
+}
+
+/* Count targets at accumulation time, before response row caps are applied. */
+static int node_enter(struct pgwt_block_agg *a, uint32_t id, uint64_t entered)
+{
+    if (entered == 0)
+        return PGWT_BAGG_OK;
+    struct pgwt_block_agg_node *s;
+    int rc = node_prepare(a, id, &s);
+    if (rc != PGWT_BAGG_OK)
+        return rc;
+    s->entered += entered;
     return PGWT_BAGG_OK;
 }
 
@@ -473,6 +486,8 @@ int pgwt_block_agg_build(struct pgwt_block_agg *out,
         if (pgwt_block_agg_record_counts(ev)) {
             int rc = pair_add(out, ev->old_event, ev->new_event, 1,
                               ev->duration_ns);
+            if (rc == PGWT_BAGG_OK)
+                rc = node_enter(out, ev->new_event, 1);
             if (rc != PGWT_BAGG_OK) {
                 pgwt_block_agg_free(out);
                 return rc;              /* refuse whole, never partial */
@@ -508,6 +523,8 @@ int pgwt_block_agg_add_event(struct pgwt_block_agg *a,
         return PGWT_BAGG_REFUSED_INVALID;
     if (pgwt_block_agg_record_counts(ev)) {
         int rc = pair_add(a, ev->old_event, ev->new_event, 1, ev->duration_ns);
+        if (rc == PGWT_BAGG_OK)
+            rc = node_enter(a, ev->new_event, 1);
         if (rc != PGWT_BAGG_OK)
             return rc;
     }
@@ -606,10 +623,12 @@ int pgwt_block_agg_merge(struct pgwt_block_agg *dst,
             return rc;
     }
     for (int i = 0; i < src->node_cap; i++) {
-        if (src->nodes[i].count == 0)
+        if (!node_occupied(&src->nodes[i]))
             continue;
         rc = node_add(dst, src->nodes[i].event_id, src->nodes[i].count,
                       src->nodes[i].total_ns);
+        if (rc == PGWT_BAGG_OK)
+            rc = node_enter(dst, src->nodes[i].event_id, src->nodes[i].entered);
         if (rc != PGWT_BAGG_OK)
             return rc;
     }
@@ -833,6 +852,12 @@ int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
             rc = PGWT_BAGG_REFUSED_INVALID;   /* cannot see => refuse */
             break;
         }
+
+        /* #947: a COVERAGE block (trace v6) holds no record. It is neither
+         * aggregated nor a reason to refuse the fast path, which is what the
+         * non-TRANSITIONS branch below would make of it. */
+        if (bi.block_type == PGWT_BLOCK_COVERAGE)
+            continue;
 
         int overlaps = pgwt_block_agg_file_can_contribute(
             bi.first_timestamp_ns, bi.last_timestamp_ns,

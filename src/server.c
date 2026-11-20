@@ -228,6 +228,11 @@ struct pgwt_file_cov {
     uint64_t hdr_mono_ns;          /* the daemon restarts + truncates */
     int64_t  own_offset;           /* this file's mono→wall offset */
     uint64_t mono_first, mono_last;
+    /* #947: mono_first/last span DATA blocks only. A v6 file's COVERAGE
+     * blocks carry write times, not records, and must not move generation
+     * assignment or window pruning; a file holding only them is not valid. */
+    int      have_data_span;
+    int      data_blocks;          /* blocks scanned that are not COVERAGE */
     int      has_samples, has_transitions;
     uint64_t sample_period_ns;
     uint64_t max_sample_period_ns; /* SMP-3 lookahead, not reported cadence */
@@ -350,6 +355,10 @@ struct cur_cache_block {
     uint64_t nominal_sample_period_ns;
     uint64_t last_ts;            /* pgwt_block_info.last_timestamp_ns */
     uint8_t  is_sample;          /* block_type == PGWT_BLOCK_SAMPLES */
+    /* #947: a COVERAGE block, held as a zero-record descriptor only so the
+     * cached run stays contiguous across the coverage block written every
+     * second; the scan skips it before any data branch. */
+    uint8_t  is_coverage;
 };
 
 struct cur_trace_cache {
@@ -1540,6 +1549,7 @@ static int cur_cache_store(struct pgwt_server *srv, struct cur_trace_cache *cc,
     cb->nominal_sample_period_ns = bi->nominal_sample_period_ns;
     cb->last_ts = bi->last_timestamp_ns;
     cb->is_sample = (bi->block_type == PGWT_BLOCK_SAMPLES);
+    cb->is_coverage = (bi->block_type == PGWT_BLOCK_COVERAGE);
     cc->count += n;
     return 1;
 }
@@ -1619,11 +1629,10 @@ get_cached_immutable(struct pgwt_server *srv, const char *path)
     ce->events = malloc(cap * sizeof(*ce->events));
     struct pgwt_trace_event block_buf[PGWT_BLOCK_EVENTS];
 
-    /* Store time range for this file (monotonic) */
-    if (reader.num_blocks > 0) {
-        ce->first_mono_ns = reader.block_index[0].timestamp_ns;
-        ce->last_mono_ns = reader.block_index[reader.num_blocks - 1].timestamp_ns;
-    }
+    /* Store time range for this file (monotonic): the first and the last
+     * DATA block's index timestamp. #947: a v6 file's COVERAGE blocks are
+     * write times (its BOOT leads every file), never a record's time. */
+    int have_range = 0;
 
     for (int b = 0; b < reader.num_blocks; b++) {
         struct pgwt_block_info bi;
@@ -1636,6 +1645,13 @@ get_cached_immutable(struct pgwt_server *srv, const char *path)
             trace_bad_note(srv, path, 1);
             continue;
         }
+        if (bi.block_type == PGWT_BLOCK_COVERAGE)
+            continue;           /* #947: no records; not part of the range */
+        if (!have_range) {
+            ce->first_mono_ns = reader.block_index[b].timestamp_ns;
+            have_range = 1;
+        }
+        ce->last_mono_ns = reader.block_index[b].timestamp_ns;
 
         for (int i = 0; i < n; i++) {
             if (ce->count >= cap) {
@@ -2218,6 +2234,8 @@ static void load_file_range_mono(struct pgwt_server *srv,
         int cand;
         int sample_blk = 0;      /* known only when the header was read */
         int type_known = 0;
+        if (cb && cb->is_coverage)
+            continue;            /* #947: a coverage fact, no record */
         if (cb) {
             first_ts = cb->index_ts;
             last_ts  = cb->last_ts;
@@ -2262,6 +2280,17 @@ static void load_file_range_mono(struct pgwt_server *srv,
             if (cand >= 0) {
                 sample_blk = bi.block_type == PGWT_BLOCK_SAMPLES;
                 type_known = 1;
+            }
+            /* #947: a COVERAGE block is skipped here, before the straddler
+             * horizon (a coverage block past it is not a lost straddler)
+             * and before the TRANSITIONS branch below. While a cached run
+             * is growing, it is held as a zero-record descriptor so the run
+             * stays contiguous; it never STARTS or restarts a run. */
+            if (cand >= 0 && bi.block_type == PGWT_BLOCK_COVERAGE) {
+                if (cc && cc->n_blocks > 0 &&
+                    b == cc->lo_block + cc->n_blocks)
+                    cur_cache_store(srv, cc, b, &reader, block_buf, 0, &bi);
+                continue;
             }
         }
 
@@ -2780,7 +2809,7 @@ static int cov_file_unreadable(const char *path)
         return 0;               /* too short to hold a header: being created */
     if (hdr.magic != PGWT_TRACE_MAGIC)
         return 0;               /* not a trace file at all */
-    if (hdr.version < 2 || hdr.version > PGWT_TRACE_VERSION)
+    if (!pgwt_trace_version_readable(hdr.version))
         return 0;               /* unsupported version: skipped on purpose */
 
     char meta_path[600];
@@ -2845,18 +2874,26 @@ static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
         pgwt_reader_close(&reader);
         return;
     }
-    fc->valid = 1;
-    if (fc->blocks_scanned == 0) {
-        /* block-index timestamps are block FIRST timestamps; mono_last is
-         * extended block by block below (bi.last_timestamp_ns). */
-        fc->mono_first = reader.block_index[0].timestamp_ns;
-        fc->mono_last = reader.block_index[0].timestamp_ns;
-    }
 
     for (int b = fc->blocks_scanned; b < reader.num_blocks; b++) {
         struct pgwt_block_info bi;
-        if (pgwt_reader_block_info(&reader, b, &bi) != 0)
+        if (pgwt_reader_block_info(&reader, b, &bi) != 0) {
+            fc->data_blocks++;      /* counted as before: type unknown */
             continue;
+        }
+        /* #947: a COVERAGE block is not data. Before this skip it fell to
+         * the TRANSITIONS branch below and added an exact span at its write
+         * time -- the reason trace v6 needed a version bump at all. */
+        if (bi.block_type == PGWT_BLOCK_COVERAGE)
+            continue;
+        fc->data_blocks++;
+        if (!fc->have_data_span) {
+            /* block-index timestamps are block FIRST timestamps; mono_last
+             * is extended block by block (bi.last_timestamp_ns). */
+            fc->mono_first = reader.block_index[b].timestamp_ns;
+            fc->mono_last = reader.block_index[b].timestamp_ns;
+            fc->have_data_span = 1;
+        }
         if (bi.last_timestamp_ns > fc->mono_last)
             fc->mono_last = bi.last_timestamp_ns;
         if (bi.block_type == PGWT_BLOCK_SAMPLES) {
@@ -2905,6 +2942,9 @@ static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
         }
     }
     fc->blocks_scanned = reader.num_blocks;
+    /* A file is valid once it holds a data block: a v6 file with only its
+     * BOOT and watermarks (an idle capture) reads like an empty one. */
+    fc->valid = fc->have_data_span;
 
     /* Escalation markers matter only when the merge has samples to
      * arbitrate; structural markers only once a request has asked for
@@ -3232,7 +3272,9 @@ static void coverage_refresh(struct pgwt_server *srv)
         uint64_t lw = (uint64_t)((int64_t)fc->mono_last + fc->canon_offset);
         if (earliest == 0 || fw < earliest) earliest = fw;
         if (lw > latest) latest = lw;
-        total += (int64_t)fc->blocks_scanned * PGWT_BLOCK_EVENTS;
+        /* #947: data blocks only. A v6 capture writes a COVERAGE block
+         * every second; counting those would add 4096 phantom events each. */
+        total += (int64_t)fc->data_blocks * PGWT_BLOCK_EVENTS;
     }
     if (earliest) srv->earliest_wall_ns = earliest;
     if (latest) srv->latest_wall_ns = latest;
@@ -7658,7 +7700,8 @@ static int bagg_decode_block(void *ctx, struct pgwt_event_reader *r,
         d->cc ? cur_cache_get(d->cc, block_idx) : NULL;
     if (cb) {
         *out = d->cc->events + cb->start;
-        bi->block_type = cb->is_sample ? PGWT_BLOCK_SAMPLES
+        bi->block_type = cb->is_coverage ? PGWT_BLOCK_COVERAGE
+                       : cb->is_sample ? PGWT_BLOCK_SAMPLES
                                        : PGWT_BLOCK_TRANSITIONS;
         bi->sample_period_ns  = cb->sample_period_ns;
         bi->max_sample_weight_ns = cb->max_sample_weight_ns;
@@ -7908,17 +7951,11 @@ static void emit_transitions_response(const struct pgwt_server *srv,
         return;
     }
 
-    /* Classification status for the encountered Timeout NODE ids. No Timeout
-     * nodes means vacuously complete (nothing to classify), not "the catalog is
-     * good". The raw node pass applies the request filter, and
-     * pgwt_block_agg_add_event() accumulates old_event nodes, covering every
-     * link's source event; raw res link rows are request-filtered and capped.
-     * Link-only targets cannot reach a rendered graph unclassified:
-     * transitionsDataError() in web/static/lib/builders/transitions.js checks
-     * BOTH endpoints of every link against the node-name set and rejects the
-     * WHOLE payload with 'missing node: ' + name if either is absent, before
-     * any graph is built. Thus checking node ids suffices for the idle
-     * verdicts below. */
+    /* Classify the complete node table, including entered-only targets.
+     * Targets are accumulated with links before max_rows is applied, so
+     * every endpoint receives the same identity and idle metadata. The client
+     * still rejects incomplete graphs; it is not a classification backstop.
+     * No Timeout nodes means there is nothing to classify. */
     int idle_classification_complete = 1;
     for (int i = 0; i < n_nodes; i++) {
         uint32_t event_id = nodes_arr[i].event_id;
@@ -7985,6 +8022,7 @@ static void emit_transitions_response(const struct pgwt_server *srv,
          * total_ms == 0 cannot: zero-duration exact records still count
          * (test_window_clip case 6e-4, closing exactly at `to`). */
         cjson_add_uint64(node, "count", nodes_arr[i].count);
+        cjson_add_uint64(node, "entered", nodes_arr[i].entered);
         cJSON_AddNumberToObject(node, "sampled_ms",
                                 (double)nodes_arr[i].sampled_ns / 1e6);
         /* U2 / P3 wire 5: the UI's DFG node click pivots on the event —
