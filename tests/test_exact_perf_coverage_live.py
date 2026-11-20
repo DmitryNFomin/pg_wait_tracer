@@ -102,7 +102,7 @@ def incomplete_loss(result):
     assert result["verdict"] == "incomplete" and "capture_loss" in result["reasons"], result
 
 
-def start_daemon(binary, pm, trace, *, idle_round=False, debug=False):
+def start_daemon(binary, pm, trace, *, idle_round=True, debug=False):
     trace.mkdir()
     env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
     env["PGWT_TEST_EXACT_ATTACH_PREMISE"] = "1"
@@ -116,8 +116,8 @@ def start_daemon(binary, pm, trace, *, idle_round=False, debug=False):
     error = log.open("w")
     command = [str(binary), "--mode", "full", "--exact-perf", "--pid", str(pm),
                "-T", str(trace), "-i", "5", "-q"]
-    if idle_round:
-        command += ["--exact-perf-idle-round"]
+    if not idle_round:
+        command += ["--no-exact-perf-idle-round"]
     print("RUN " + shlex.join(command), flush=True)
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=error, env=env)
     try:
@@ -241,8 +241,11 @@ def preexisting_gate(pm, root, reader):
         try:
             # Measure a sustained quiet interval before making any assertion
             # about W. Reading the first heartbeat says nothing about progress.
-            time.sleep(10)
-            assert daemon.poll() is None, ("idle daemon exited", log.read_text())
+            progress = [w_now(trace)]
+            for _ in range(10):
+                time.sleep(1)
+                assert daemon.poll() is None, ("idle daemon exited", log.read_text())
+                progress.append(w_now(trace))
             records, _ = read_trace(trace)
             boot = records[0][3]
             w = max(r[3] for r in records if r[1] == "WATERMARK")
@@ -252,6 +255,9 @@ def preexisting_gate(pm, root, reader):
             latest = ticks[-1]
             print(f"IDLE-W: w_minus_boot_ns={w - boot} rounds_requested={latest['rounds_requested']} "
                   f"frontiers={latest['frontiers']} data_records={latest['data_records']}", flush=True)
+            assert all(a <= b for a, b in zip(progress, progress[1:])), "idle W never regresses"
+            assert all(progress[i + 3] > progress[i] for i in range(len(progress) - 3)), (
+                "default idle W advances at least every 3 s", progress, log.read_text())
             startup_gaps = [r for r in records if r[1] == "GAP_OPEN" and r[2] == 1 and r[3] == boot]
             assert startup_gaps, "startup PAUSE gap begins at boot_start"
             assert not any(r[1] == "GAP_CLOSE" for r in records), "startup auxiliaries keep PAUSE open"
@@ -259,13 +265,13 @@ def preexisting_gate(pm, root, reader):
             idle.stdin.close()
             idle.wait(timeout=5)
             exited = time.monotonic_ns()
-            # Default rounds are demand driven; a quiet box need not advance W.
-            # Observe the post-exit interval without adding a workload.
+            # Default idle certification also advances W after the client exits.
             time.sleep(3)
             assert daemon.poll() is None, ("idle daemon exited", log.read_text())
             after_w = w_now(trace)
             print(f"IDLE-W-AFTER-EXIT: before_ns={w} after_ns={after_w} "
                   f"advance_ns={after_w - w}", flush=True)
+            assert after_w > w, ("default idle W advances after exit", w, after_w, log.read_text())
             after = verdict(reader, trace, exited + SEC // 4, exited + SEC // 2)
             incomplete_loss(after)
             records, _ = read_trace(trace)
@@ -330,7 +336,7 @@ def idle_cost_gate(pm, root):
             assert not voids, ("idle cost capture VOID", voids, log.read_text())
             assert all(a <= b for a, b in zip(progress, progress[1:])), "idle W never regresses"
             if enabled:
-                assert progress[-1] > start_w, "opt-in idle rounds advance W"
+                assert progress[-1] > start_w, "default idle rounds advance W"
         finally:
             stop(daemon)
             error.close()

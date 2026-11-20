@@ -32,6 +32,12 @@ SOURCES = ["tests/exact_perf_coverage_host.c", "src/open_snapshot.c", "src/percp
            "src/core/merge_adapter.c", "src/core/merge.c", "src/event_reader.c",
            "src/coverage.c", "src/wait_event.c", "src/idle_rule.c", "src/cJSON.c"]
 MUTANTS = [
+    ("idle_default_off", "src/pg_wait_tracer.c",
+     "    bool idle_round = true;", "    bool idle_round = false;",
+     "idle_on", "idle round requests E/L"),
+    ("idle_opt_out_ignored", "src/pg_wait_tracer.c",
+     "            idle_round = false;", "            idle_round = true;",
+     "idle_off", "opted-out idle ticks neither wake helpers nor promote W"),
     ("cursor_after_publish", "src/open_snapshot.c",
      "    ops->positions(ctx, in);\n    in->publish_ok = (!in->exact_perf || in->capture_healthy) && ops->publish(ctx);",
      "    in->capture_healthy = true;\n    in->publish_ok = ops->publish(ctx);\n    ops->positions(ctx, in);",
@@ -118,7 +124,58 @@ def daemon_binding(tree):
     (tree / "tests/exact_perf_coverage_daemon.h").write_text("\n\n".join(bodies))
 
 
+def cli_binding(tree):
+    """Compile the production argument parser, stopping before discovery/BPF.
+
+    Feed its default and explicit opt-out into the daemon schedules, so a
+    changed CLI default cannot hide behind a hand-initialised test bool.
+    """
+    source = (tree / "src/pg_wait_tracer.c").read_text()
+    prefix = source[:source.index("    /* #500:")]
+    prefix += """
+    (void)pm_pid; (void)pgdata; (void)format_set; (void)view_set;
+    (void)replay_mode; (void)daemon_mode; (void)from_str; (void)to_str;
+    printf("%d %d\\n", d->exact_perf, d->exact_perf_idle_round);
+    free(d);
+    return 0;
+}
+int pgwt_percpu_transport_prepare(struct pgwt_daemon *d)
+{ (void)d; return 0; }
+"""
+    unit = tree / "cli.c"
+    unit.write_text(prefix)
+    binary = tree / "coverage-cli"
+    run([*CC, *FLAGS, str(unit), "-o", str(binary)], tree)
+    values = []
+    for options in (["--exact-perf"], ["--exact-perf", "--no-exact-perf-idle-round"]):
+        result = run([str(binary), *options], tree)
+        exact, idle = map(int, result.stdout.split())
+        assert exact == 1 and idle in (0, 1), result
+        values.append(idle)
+    (tree / "tests/exact_perf_coverage_cli.h").write_text(
+        f"#define TCOV_IDLE_DEFAULT {values[0]}\n#define TCOV_IDLE_OFF {values[1]}\n")
+    return binary
+
+
+def cli_controls(tree, binary):
+    on, off = "--exact-perf-idle-round", "--no-exact-perf-idle-round"
+    for options, expected in [([], "0 0\n"), (["--exact-perf"], "1 1\n"),
+                              (["--exact-perf", on], "1 1\n"),
+                              ([off, "--exact-perf"], "1 0\n"),
+                              (["--exact-perf", off, on], "1 1\n"),
+                              (["--exact-perf", on, off], "1 0\n")]:
+        assert run([str(binary), *options], tree).stdout == expected, options
+    for option in (on, off):
+        result = run([str(binary), option], tree, check=False)
+        assert result.returncode == 1 and f"{option} requires --exact-perf" in result.stderr, result
+    help_text = run([str(binary), "--help"], tree).stderr
+    assert any(on in line and "default on" in line for line in help_text.splitlines()), help_text
+    assert off in help_text, help_text
+    print("idle CLI: PASS (default, opt-out, compatibility flag, option order, exact_perf requirement, help)", flush=True)
+
+
 def build(tree):
+    cli_binding(tree)
     daemon_binding(tree)
     writer = tree / "writer.o"
     run([*CC, *FLAGS, "-Dfsync=coverage_test_fsync", "-c", "src/event_writer.c", "-o", str(writer)], tree)
@@ -162,6 +219,22 @@ def live_helpers(tree):
     measurement must report that value and exclude a busy reader thread.
     """
     source = ast.parse((ROOT / "tests/test_exact_perf_coverage_live.py").read_text())
+    start_function = next(node for node in source.body if isinstance(node, ast.FunctionDef)
+                          and node.name == "start_daemon")
+    commands = []
+    namespace = dict(os=os, shlex=shlex, w_now=lambda trace: 1,
+                     wait_for=lambda *args: None,
+                     subprocess=SimpleNamespace(DEVNULL=-3, Popen=lambda command, **kwargs: commands.append(command)))
+    exec(compile(ast.Module(body=[start_function], type_ignores=[]), "<live start controls>", "exec"), namespace)
+    with contextlib.redirect_stdout(io.StringIO()):
+        for option in (None, True, False):
+            trace = tree / f"live-start-{option}"
+            kwargs = {} if option is None else dict(idle_round=option)
+            _, error, _ = namespace["start_daemon"]("tracer", 1, trace, **kwargs)
+            error.close()
+            command = commands[-1]
+            assert "--exact-perf" in command and "--exact-perf-idle-round" not in command, command
+            assert ("--no-exact-perf-idle-round" in command) == (option is False), command
     functions = [node for node in source.body if isinstance(node, ast.FunctionDef)
                  and node.name in ("task_cpu_ticks", "idle_cost_gate")]
     assert len(functions) == 2
@@ -217,7 +290,7 @@ def live_helpers(tree):
     assert lines == ["IDLE-COST: option=off helper_cpu_pct_of_one_core=3.000000 w_advance_s=0.000000",
                      "IDLE-COST: option=on helper_cpu_pct_of_one_core=3.000000 w_advance_s=60.000000"], lines
     assert samples == [0, 60, 0, 60], samples
-    print("idle live helpers: PASS (stat fields, helper-only CPU, both 60 s arms, cost reported without threshold)", flush=True)
+    print("idle live helpers: PASS (default/opt-out commands, stat fields, helper-only CPU, both 60 s arms, cost reported without threshold)", flush=True)
 
 
 def main():
@@ -232,6 +305,7 @@ def main():
                      "test_core_merge_contract.c", "merge_adapter_goldens.h"]:
             shutil.copy2(ROOT / "tests" / name, tree / "tests" / name)
         binary = build(tree)
+        cli_controls(tree, tree / "coverage-cli")
         result = run([str(binary)], tree)
         print(result.stdout, end="", flush=True)
         reader_roundtrip(tree, binary)

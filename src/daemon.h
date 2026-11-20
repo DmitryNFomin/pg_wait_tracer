@@ -305,7 +305,7 @@ struct pgwt_daemon {
     struct ring_buffer *event_rb;    /* trace event ringbuf consumer */
     /* U1b: B owns the opaque state; calloc keeps the route off by default. */
     bool exact_perf;                /* --exact-perf, experimental opt-in */
-    bool exact_perf_idle_round;     /* opt-in certification demand on coverage ticks */
+    bool exact_perf_idle_round;     /* exact_perf idle certification; default on, CLI opt-out */
     bool test_fork_wakeup_adaptive; /* test-only paired control; default force */
     struct pgwt_percpu_transport *percpu_transport;
     struct pgwt_transport_callbacks transport;

@@ -10,6 +10,7 @@
 #include "event_reader.h"
 #include "coverage_record.h"
 #include "coverage.h"
+#include "exact_perf_coverage_cli.h"
 #include <dirent.h>
 #include <unistd.h>
 
@@ -586,14 +587,16 @@ static void sync_failure(void)
 /* Run the verbatim daemon coverage tick, including its idle policy binding.
  * Only kernel I/O is stubbed. The subsequent wire boundaries/acks pass through
  * the real portable transport and core before the writer can promote W. */
-static void idle_tick(struct fixture *h, bool enabled, uint64_t at)
+static void idle_tick(struct fixture *h, const char *option, uint64_t at)
 {
     transport_setup(h);
     h->d.topology = h->d.drained = true;
     binding_now = h->d.now = at;
     struct pgwt_daemon *d = calloc(1, sizeof(*d));
     C(d, "idle daemon allocation");
-    d->exact_perf = true; d->exact_perf_idle_round = enabled;
+    C(!option || !strcmp(option, "--no-exact-perf-idle-round"), "idle CLI option");
+    d->exact_perf = true;
+    d->exact_perf_idle_round = option ? TCOV_IDLE_OFF : TCOV_IDLE_DEFAULT;
     d->mode = PGWT_MODE_FULL;
     d->percpu_transport = h->d.transport; d->merge_capture = h->d.capture;
     d->event_writer = &h->writer; d->coverage_started = true;
@@ -626,10 +629,10 @@ static void idle_off(void)
 {
     struct fixture *h = coverage_setup(NULL, 0);
     for (unsigned i=1; i<=6; ++i) {
-        idle_tick(h, false, h->base + i * UINT64_C(1000000000));
-        C(pgwt_transport_poll(h->d.transport, false) == 0, "default idle poll");
+        idle_tick(h, "--no-exact-perf-idle-round", h->base + i * UINT64_C(1000000000));
+        C(pgwt_transport_poll(h->d.transport, false) == 0, "opted-out idle poll");
         C(h->tracker.w_ns == h->base && h->d.controls == 0,
-          "default idle ticks neither wake helpers nor promote W");
+          "opted-out idle ticks neither wake helpers nor promote W");
     }
     cleanup(h);
 }
@@ -638,8 +641,8 @@ static void idle_on(void)
     struct fixture *h = coverage_setup(NULL, 0);
     for (unsigned i=1; i<=6; ++i) {
         uint64_t before = h->tracker.w_ns;
-        idle_tick(h, true, h->base + i * UINT64_C(1000000000));
-        C(pgwt_transport_poll(h->d.transport, false) == 0, "opt-in idle poll");
+        idle_tick(h, NULL, h->base + i * UINT64_C(1000000000));
+        C(pgwt_transport_poll(h->d.transport, false) == 0, "default idle poll");
         if (i % 2) {
             C(h->tracker.w_ns == before, "request alone cannot promote W");
             idle_boundaries(h); idle_last_ack(h);
@@ -659,11 +662,11 @@ static void idle_on(void)
 static void idle_ack(void)
 {
     struct fixture *h = coverage_setup(NULL, 0);
-    idle_tick(h, true, h->base + UINT64_C(1000000000));
+    idle_tick(h, NULL, h->base + UINT64_C(1000000000));
     C(pgwt_transport_poll(h->d.transport, false) == 0, "request withheld-ack round");
     idle_boundaries(h);
     for (unsigned i=2; i<=5; ++i) {
-        idle_tick(h, true, h->base + i * UINT64_C(1000000000));
+        idle_tick(h, NULL, h->base + i * UINT64_C(1000000000));
         C(pgwt_transport_poll(h->d.transport, false) == 0, "poll withheld ack");
         C(h->tracker.w_ns == h->base, "withheld acknowledgement prevents W promotion");
         C(pgwt_transport_stats(h->d.transport).rounds_completed == 0,
@@ -672,21 +675,21 @@ static void idle_ack(void)
           "ticks coalesce with an outstanding round");
     }
     idle_last_ack(h);
-    idle_tick(h, true, h->base + UINT64_C(6000000000));
+    idle_tick(h, NULL, h->base + UINT64_C(6000000000));
     C(h->tracker.w_ns > h->base, "last acknowledgement permits pending W promotion");
     cleanup(h);
 }
 static void idle_counters(void)
 {
     struct fixture *h = coverage_setup(NULL, 0);
-    idle_tick(h, true, h->base + UINT64_C(1000000000));
+    idle_tick(h, NULL, h->base + UINT64_C(1000000000));
     C(pgwt_transport_poll(h->d.transport, false) == 0, "request counter-check round");
     idle_boundaries(h);
     h->d.snapshot.value[0] = 1;
     idle_last_ack(h);
     C(pgwt_capture_report(h->d.capture).status != PGWT_MERGE_OK,
       "idle completion checks counters after acknowledgements");
-    idle_tick(h, true, h->base + UINT64_C(2000000000));
+    idle_tick(h, NULL, h->base + UINT64_C(2000000000));
     C(h->tracker.w_ns == h->base, "failed idle counter check prevents W promotion");
     cleanup(h);
 }
@@ -704,7 +707,7 @@ static void idle_loaded(void)
         C(pgwt_transport_poll(h->d.transport, false) == 0, "loaded demand round");
         idle_boundaries(h); idle_last_ack(h);
         uint64_t rounds = pgwt_transport_stats(h->d.transport).rounds_requested;
-        idle_tick(h, true, h->d.now + 30);
+        idle_tick(h, NULL, h->d.now + 30);
         C(pgwt_transport_poll(h->d.transport, false) == 0, "loaded coverage tick");
         C(pgwt_transport_stats(h->d.transport).rounds_requested == rounds,
           "loaded ticks add zero rounds");

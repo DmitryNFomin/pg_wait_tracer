@@ -31,7 +31,8 @@ static void usage(const char *prog)
         "                       above that captures VOID (issue #932). A short-lived\n"
         "                       backend whose INIT is lost VOIDs capture (issue #933). At duration/stop,\n"
         "                       unfinished evidence is counted and VOID; cooperative finish budget 100 ms.\n"
-        "      --exact-perf-idle-round  Request idle coverage rounds (requires --exact-perf; default off)\n"
+        "      --exact-perf-idle-round  Enable idle coverage rounds (requires --exact-perf; default on)\n"
+        "      --no-exact-perf-idle-round  Disable idle coverage rounds (requires --exact-perf)\n"
         "      --attach-timeline  Log backend attachment timing (diagnostic; default off)\n"
         "      --test-fork-wakeup=force|adaptive  Test only: exact FORK wakeup (default force)\n"
         "\n"
@@ -260,12 +261,14 @@ static enum pgwt_mode parse_mode(const char *s)
 #define OPT_ATTACH_TIMELINE 283
 #define OPT_TEST_FORK_WAKEUP 284
 #define OPT_EXACT_PERF_IDLE_ROUND 285
+#define OPT_NO_EXACT_PERF_IDLE_ROUND 286
 
 static struct option long_opts[] = {
     {"test-fork-wakeup", required_argument, NULL, OPT_TEST_FORK_WAKEUP},
     {"attach-timeline", no_argument, NULL, OPT_ATTACH_TIMELINE},
     {"exact-perf", no_argument, NULL, OPT_EXACT_PERF},
     {"exact-perf-idle-round", no_argument, NULL, OPT_EXACT_PERF_IDLE_ROUND},
+    {"no-exact-perf-idle-round", no_argument, NULL, OPT_NO_EXACT_PERF_IDLE_ROUND},
     {"pid",        required_argument, NULL, 'p'},
     {"pgdata",     required_argument, NULL, 'D'},
     {"interval",   required_argument, NULL, 'i'},
@@ -359,6 +362,8 @@ int main(int argc, char **argv)
     bool view_set = false;
     bool replay_mode = false;
     bool daemon_mode = false;
+    bool idle_round = true;
+    const char *idle_round_option = NULL;
     const char *from_str = NULL;
     const char *to_str = NULL;
     int opt;
@@ -395,7 +400,14 @@ int main(int argc, char **argv)
         case OPT_SKIP_USDT:   d->skip_usdt = 1; break;
         case OPT_MODE:        d->mode = parse_mode(optarg); break;
         case OPT_EXACT_PERF:  d->exact_perf = true; break;
-        case OPT_EXACT_PERF_IDLE_ROUND: d->exact_perf_idle_round = true; break;
+        case OPT_EXACT_PERF_IDLE_ROUND:
+            idle_round = true;
+            idle_round_option = "--exact-perf-idle-round";
+            break;
+        case OPT_NO_EXACT_PERF_IDLE_ROUND:
+            idle_round = false;
+            idle_round_option = "--no-exact-perf-idle-round";
+            break;
         case OPT_ATTACH_TIMELINE: d->attach_timeline_enabled = true; break;
         case OPT_TEST_FORK_WAKEUP:
             if (!strcmp(optarg, "adaptive")) d->test_fork_wakeup_adaptive = true;
@@ -530,11 +542,12 @@ int main(int argc, char **argv)
 
     /* Refuse before discovery, privilege checks or any BPF side effects.
      * B fills prepare(), so no later unit needs to edit this CLI again. */
-    if (d->exact_perf_idle_round && !d->exact_perf) {
-        fprintf(stderr, "FATAL: --exact-perf-idle-round requires --exact-perf\n");
+    if (idle_round_option && !d->exact_perf) {
+        fprintf(stderr, "FATAL: %s requires --exact-perf\n", idle_round_option);
         free(d);
         return 1;
     }
+    d->exact_perf_idle_round = d->exact_perf && idle_round;
     if (d->exact_perf && pgwt_percpu_transport_prepare(d) != 0) {
         free(d);
         return 1;

@@ -233,16 +233,31 @@ def settings(pm):
 def await_ready(proc, log):
     selector = selectors.DefaultSelector()
     selector.register(proc.stdout, selectors.EVENT_READ)
+    ready = bytearray()
+
+    def timeout(message):
+        rc = proc.poll()
+        line = ready.decode(errors='replace').strip()
+        try:
+            lines = log.read_text(errors='replace').splitlines()
+            own = [line for line in lines if not line.startswith('libbpf: ')]
+            tail = '\n'.join((own or lines)[-80:])[-6000:] or '(empty probe stderr)'
+        except OSError as error:
+            tail = f'(cannot read {log}: {error})'
+        print(f'PROBE-READINESS-TIMEOUT: alive={rc is None} exit_status={rc} '
+              f'last_readiness_line={line!r} log={log}\n'
+              f'PROBE-STDERR-TAIL:\n{tail}', file=sys.stderr, flush=True)
+        raise RuntimeError(message)
+
     try:
         if not selector.select(60):
-            raise RuntimeError('probe did not become ready in 60s')
+            timeout('probe did not become ready in 60s')
         # Read exactly the ready line; TextIO.readline may prefetch the final
         # JSON of the short self-reuse arm, hiding it from communicate().
-        ready = bytearray()
         deadline = time.monotonic() + 60
         while not ready.endswith(b'\n'):
             if time.monotonic() >= deadline or not selector.select(max(0, deadline-time.monotonic())):
-                raise RuntimeError('partial probe readiness line timed out')
+                timeout('partial probe readiness line timed out')
             chunk = os.read(proc.stdout.fileno(), 1)
             if not chunk:
                 break

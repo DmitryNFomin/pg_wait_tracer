@@ -214,6 +214,70 @@ def check_probe_loop(directory):
     print(f'mutant reuse-before-teardown: KILLED ({assertion})')
 
 
+def check_probe_readiness(directory):
+    """Exercise timeout evidence without waiting or invoking BPF tools."""
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import test_transport_producers_live as live
+
+    log = directory / 'readiness.stderr'
+    # Probe diagnostics must survive a trailing flood of libbpf warnings.
+    log.write_text('PROBE-STAT: setup blocked\n' + 'libbpf: attach warning\n' * 100)
+    for partial, status, missing in ((b'', None, False), (b'PROBE-REA', None, False),
+                                     (b'PROBE-REA', 7, False), (b'', None, True)):
+        remaining = bytearray(partial)
+        waits = []
+
+        class Selector:
+            def register(self, stream, events):
+                pass
+
+            def select(self, timeout):
+                waits.append(timeout)
+                return [True] if remaining else []
+
+            def close(self):
+                self.closed = True
+
+        def read(fd, size):
+            assert fd == 42 and size == 1
+            chunk = bytes(remaining[:1])
+            del remaining[:1]
+            return chunk
+
+        selector = Selector()
+        proc = SimpleNamespace(stdout=SimpleNamespace(fileno=lambda: 42), poll=lambda: status)
+        output = io.StringIO()
+        selected_log = directory / 'missing.stderr' if missing else log
+        with patch.object(live.selectors, 'DefaultSelector', return_value=selector), \
+             patch.object(live.time, 'monotonic', return_value=0), \
+             patch.object(live.os, 'read', side_effect=read), contextlib.redirect_stderr(output):
+            try:
+                live.await_ready(proc, selected_log)
+            except RuntimeError as error:
+                expected = 'partial probe readiness line timed out' if partial else 'probe did not become ready in 60s'
+                assert str(error) == expected, error
+            else:
+                raise AssertionError('readiness timeout accepted')
+        detail = output.getvalue()
+        assert f'alive={status is None} exit_status={status}' in detail, detail
+        assert f'last_readiness_line={partial.decode()!r}' in detail, detail
+        assert ('cannot read' if missing else 'PROBE-STAT: setup blocked') in detail, detail
+        assert 'libbpf: ' not in detail, detail
+        assert waits[0] == 60 and max(waits) <= 60 and selector.closed, waits
+    # A real pipe verifies the successful short probe's final JSON is left
+    # for communicate(), rather than prefetched by readiness handling.
+    with subprocess.Popen([sys.executable, '-c',
+                           'import json; print("PROBE-READY host", flush=True); print(json.dumps(dict(ok=True)), flush=True)'],
+                          stdout=subprocess.PIPE, text=True) as proc:
+        with contextlib.redirect_stdout(io.StringIO()):
+            live.await_ready(proc, log)
+        out, _ = proc.communicate(timeout=10)
+        assert proc.returncode == 0 and json.loads(out) == {'ok': True}, out
+    print('probe readiness: PASS (silent/partial timeout, alive/exit status, stderr tail, unreadable log, exact ready-line read)')
+
+
 def main():
     # Pure live-driver checks run on the Mac too; no BPF tools are invoked.
     from test_transport_producers_live import (PG13_LAYOUT, Refused, assert_clean_pg, layout,
@@ -304,6 +368,7 @@ done
     source = (ROOT / 'src/bpf/pg_wait_tracer.bpf.c').read_text()
     with tempfile.TemporaryDirectory(prefix='pgwt-producers-host-') as tmp:
         directory = Path(tmp)
+        check_probe_readiness(directory)
         check_probe_loop(directory)
         result = run(source, directory)
         assert result.returncode == 0, result.stdout + result.stderr
