@@ -64,6 +64,12 @@ export function isSampledOnlyTransitionNode(node) {
     return !!node && node.count === 0 && node.sampled_ms > 0;
 }
 
+function enteredOnlyText(node) {
+    return node.count === 0 && node.sampled_ms === 0 && node.entered > 0
+        ? 'entered ' + node.entered.toLocaleString() + '×'
+        : null;
+}
+
 /* DEFINITIONS (contract 5, issues #436/#438 — RELEASE-PLAN.md "Transitions
  * and simplification"), recorded here because the server-side half of the
  * same contract lives at compute.c:2875 and the node/edge shapes below are
@@ -378,10 +384,10 @@ const DFG_LABEL_GAP = 6;        // ECharts' approximate symbol-to-label clearanc
  * needs so neither clips the canvas edge. `symbolSize` is the node's full
  * diameter (as built below, 15..120). Exported so the viewport-fit unit
  * tests can check the SAME estimate the layout itself uses. */
-export function estimateNodeFootprint(name, symbolSize) {
+export function estimateNodeFootprint(name, symbolSize, detail = '') {
     const radius = symbolSize / 2;
     const short = name.indexOf(':') > 0 ? name.substring(name.indexOf(':') + 1) : name;
-    const halfWidth = Math.max(radius, (short.length * DFG_CHAR_WIDTH) / 2);
+    const halfWidth = Math.max(radius, (Math.max(short.length, detail.length) * DFG_CHAR_WIDTH) / 2);
     return {
         halfWidth,
         top: radius,
@@ -521,7 +527,7 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides, hide
     // 80/60. Clamped so a pathologically small container degrades (same as
     // before the fix) instead of producing a negative cell size.
     const sizes = sortedNodes.map(nd => dfgSymbolSize(nd.ms, maxNodeMs));
-    const footprints = sortedNodes.map((nd, i) => estimateNodeFootprint(nd.name, sizes[i]));
+    const footprints = sortedNodes.map((nd, i) => estimateNodeFootprint(nd.name, sizes[i], enteredOnlyText(nodeMap[nd.name]) || ''));
     const padX = Math.min(
         Math.max(...footprints.map(f => f.halfWidth)) + 14,
         Math.max(cW / 2 - 1, 1));
@@ -545,7 +551,8 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides, hide
         // = same color" now holds against the AAS chart and every other view.
         const color = eventColor(info.class != null ? info.class : null, nd.name);
         const size = sizes[i];
-        const timeStr = ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms.toFixed(0) + 'ms';
+        const timeStr = enteredOnlyText(info) ||
+            (ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms.toFixed(0) + 'ms');
         const { col, row } = order[i];
         const ov = posOverrides ? posOverrides[nd.name] : null;
         const x = ov ? ov.x : padX + col * cellW;
@@ -570,7 +577,10 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides, hide
             },
             // Tooltips render as HTML — escape the (server-derived) name too,
             // same bug class as the timeline query-text injection (UI-6).
-            tooltip: { formatter: '<b>' + escHtml(nd.name) + '</b><br/>Total time: ' + timeStr },
+            tooltip: { formatter: '<b>' + escHtml(nd.name) + '</b><br/>' +
+                (enteredOnlyText(info)
+                    ? timeStr + '; no dwell closed in this window/filter'
+                    : 'Total time: ' + timeStr) },
             value: ms,
         };
     });

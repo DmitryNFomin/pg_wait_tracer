@@ -164,6 +164,8 @@ GALLERY_STATIC_CELLS = [
     "gallery-matrix-dense-top20",               # log-piecewise cells + top-N
     "gallery-transitions-idle-loop-dominant",   # #107: hideIdle OFF — the pre-fix bug
     "gallery-transitions-idle-loop-hidden",     # #107: hideIdle ON — the shipped default
+    "gallery-transitions-entered-only",         # entry count without closed dwell, default size
+    "gallery-transitions-entered-only-800x550",  # short label beside a neighbouring circle
     "gallery-table-configs-queries-hostile-sql",  # hostile SQL + event tints
     "gallery-table-configs-events-overflow-pctl",  # #103 ">=" overflow bounds
     "gallery-table-configs-compare-delta",        # U4: new/gone + change-floor row
@@ -237,6 +239,8 @@ GALLERY_EVIDENCE = {
     "gallery-matrix-dense-top20": [".chart"],
     "gallery-transitions-idle-loop-dominant": [".chart"],
     "gallery-transitions-idle-loop-hidden": [".chart"],
+    "gallery-transitions-entered-only": [("text", "^entered 7×$")],
+    "gallery-transitions-entered-only-800x550": [("text", "^entered 7×$")],
     "gallery-table-configs-queries-hostile-sql": [("text", "<script>document.title=\"pwned\"</script>")],
     "gallery-table-configs-events-overflow-pctl": [".cell-body"],
     "gallery-table-configs-compare-delta": [".cell-body"],

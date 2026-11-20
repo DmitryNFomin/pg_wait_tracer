@@ -15,7 +15,7 @@
  * blocks at each edge. Prediction: O(events in window) -> O(blocks x distinct
  * pairs). See docs/PAINT_LATENCY_PLAN.md.
  *
- * ── THE v1 CONTRACT ──────────────────────────────────────────────────────
+ * ── THE AGGREGATE CONTRACT ──────────────────────────────────────────────────────
  * PGWT_BLOCK_AGG_VERSION records WHICH RULE the precomputed numbers were
  * written under. Every clause below is true as of the commit that ships this
  * header (the #315 lesson: never ship a version whose stated contract is not
@@ -63,6 +63,9 @@
  *     the owner; no test pins a mixed-window node total, so this was decided
  *     by accident and must not stay that way. Do not turn this paragraph back
  *     into a justification.
+ *     v2 additionally retains each C4 target and counts transitions into it
+ *     in entered, independently of source dwell/count. An entered-only node
+ *     has count, total_ns and sampled_ns all zero.
  * C6. Durations are UNCLIPPED. A record is attributed in full to the block
  *     that contains it, exactly as pgwt_compute_transitions() does — it does
  *     no window clipping either. A transition is ONE record, so a pair can
@@ -146,9 +149,12 @@
  * header stays independent of the compute layer. */
 struct pgwt_filter;
 
-/* Version of the aggregate FORMAT AND RULES (the contract above). Bump on any
+/* In-memory cache only; no aggregate bytes are persisted in trace files.
+ * v2 adds entered counts, including target-only nodes. Old cache versions
+ * are refused and decoded from raw under C8.
+ * Version of the aggregate FORMAT AND RULES (the contract above). Bump on any
  * change to which records are counted or how they are attributed. */
-#define PGWT_BLOCK_AGG_VERSION 1u
+#define PGWT_BLOCK_AGG_VERSION 2u
 
 /* Every refusal has its own code so a caller (and a test) can tell WHY the
  * fast path declined. 0 is the only success value. */
@@ -208,6 +214,7 @@ struct pgwt_block_agg_pair {
 struct pgwt_block_agg_node {
     uint32_t event_id;
     uint64_t count;
+    uint64_t entered;     /* counted transitions into this event, C4 population */
     uint64_t total_ns;    /* exact-tier time only */
     uint64_t sampled_ns;  /* sampled-tier estimate; disjoint and additive
                           * with total_ns, including sample-only nodes */

@@ -1880,3 +1880,29 @@ test('#456 missing hostile endpoint is escaped in the visible error', t => {
     assert.match(h.root.innerHTML, /missing node: &lt;img/);
     assert.ok(!h.root.innerHTML.includes('<img'));
 });
+
+test('#982 entered-only target renders an entry disclosure without zero dwell', () => {
+    const data = { total: 7, truncated: false, idle_classification_complete: true,
+        nodes: [
+            { name: 'Lock:relation', event_id: 0x03000000, class: 'Lock', idle: false,
+                total_ms: 12, count: 7, sampled_ms: 0, entered: 0 },
+            { name: 'CPU*', event_id: 0, class: 'cpu', idle: false,
+                total_ms: 0, count: 0, sampled_ms: 0, entered: 7 },
+        ],
+        links: [{ source: 'Lock:relation', target: 'CPU*', value: 7, duration_ms: 12 }],
+    };
+    assert.equal(transitionsDataError(data), null);
+    const built = buildTransitionsOption(data, 0, { width: 800, height: 550 }, null, false);
+    const target = built.option.series[0].data.find(n => n.name === 'CPU*');
+    const disclosure = 'entered 7×; no dwell closed in this window/filter';
+    assert.equal(target.label.formatter, 'CPU*\nentered 7×');
+    assert.ok(target.tooltip.formatter.includes(disclosure));
+    assert.doesNotMatch(target.label.formatter, /0\s*ms/);
+    assert.doesNotMatch(target.tooltip.formatter, /0\s*ms|Total time/);
+    assert.equal(target.symbolSize, 15);
+    const { nodeMap } = transitionsContext(data);
+    for (const rank of [findDominantSourceDwellNode, findOmittedDominantNode]) {
+        assert.equal(rank(nodeMap, new Set()).name, 'Lock:relation');
+        assert.equal(rank({ 'CPU*': data.nodes[1] }, new Set()), null);
+    }
+});

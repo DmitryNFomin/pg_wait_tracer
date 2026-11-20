@@ -19,7 +19,10 @@
 /* v4: SAMPLES weights are the first weight plus differences between distinct
  * tick timestamps. File/header extensions store nominal cadence and maximum
  * effective block weight. v2/v3 retain their stored mean-weight semantics. */
-#define PGWT_TRACE_VERSION    4
+/* v6 (#947): the v4 layout plus block type 3 COVERAGE (src/coverage_record.h).
+ * Version 5 is the evidence-v1 codec's (src/core/evidence_codec.c) and is
+ * never a trace file this reader decodes: see pgwt_trace_version_readable. */
+#define PGWT_TRACE_VERSION    6
 #define PGWT_FLAG_LZ4         0x0001
 /* The remaining bits of the header `flags` field carry the closure status
  * (#424 deliverable 1): PGWT_FLAG_CLOSURE_TRACKED / _CLOSED_CLEAN / _ROTATED
@@ -69,10 +72,24 @@
  *                 emitted id 0, so old traces read back unchanged; old
  *                 readers decode id 0 as the CPU pseudo-event they already
  *                 knew from transitions. No layout change. */
+/*   COVERAGE    — (v6, #947) one raw coverage fact, never a wait record:
+ *                 BOOT / WATERMARK / GAP_OPEN / GAP_CLOSE / SEAL, payload in
+ *                 src/coverage_record.h. Type 2 stays reserved for the
+ *                 evidence-v1 codec. Every consumer of data blocks must skip
+ *                 a COVERAGE block before it reaches a TRANSITIONS branch;
+ *                 tests/test_block_type_sites.py enumerates every site. */
 enum pgwt_block_type {
     PGWT_BLOCK_TRANSITIONS = 0,
     PGWT_BLOCK_SAMPLES     = 1,
+    PGWT_BLOCK_COVERAGE    = 3,
 };
+
+/* Trace versions this build reads: 2, 3, 4 and 6. Never 5 (the evidence
+ * codec's number), never anything newer (unknown layout). */
+static inline int pgwt_trace_version_readable(unsigned version)
+{
+    return version >= 2 && version <= PGWT_TRACE_VERSION && version != 5;
+}
 
 /* File header (28 bytes) */
 struct pgwt_trace_file_header {
@@ -189,6 +206,24 @@ struct pgwt_event_writer {
      * identity is the file's start stamps — a seq from a previous file could
      * never be compared against this one's. */
     uint64_t      ckpt_seq;
+
+    /* #947 coverage label (trace v6). One writer session is one BOOT: a
+     * fresh random nonce, set at init. Every file it opens starts with a
+     * BOOT COVERAGE block; file_no counts files within the session, so it
+     * runs on across rotation. */
+    bool          cov_enabled;            /* set by coverage_configure */
+    uint8_t       cov_boot_nonce[16];
+    uint8_t       cov_kernel_boot_id[16]; /* all zero = unknown */
+    uint64_t      cov_boot_start_ns;      /* mono; init time unless configured */
+    uint64_t      cov_postmaster_start_wall_ns; /* 0 = unknown */
+    uint64_t      cov_mode;               /* BOOT d (coverage_record.h) */
+    uint64_t      cov_next_file_no;       /* file_no of the NEXT file opened */
+    uint64_t      cov_records_written;    /* COVERAGE blocks, this session */
+    uint64_t      cov_bytes_written;      /* their bytes incl. header */
+    /* BOOT observation clock. NULL = CLOCK_MONOTONIC. A fixture generator
+     * whose records live in a synthetic clock sets its own (U2b). */
+    uint64_t    (*cov_clock)(void *ctx);
+    void         *cov_clock_ctx;
 
     /* Stats */
     uint64_t      total_events_written;
@@ -335,6 +370,43 @@ pgwt_open_ckpt_load(const char *path,
  * trace file, in which case *out is PGWT_CLOSURE_UNKNOWN (a file we cannot
  * inspect is never reported clean). */
 int  pgwt_trace_file_closure(const char *path, enum pgwt_closure_status *out);
+
+/* ── #947 coverage records (trace v6, src/coverage_record.h) ──────────
+ *
+ * Usable without a daemon: the U2b fixture generator calls these directly.
+ * `observation_ns` is the block's first/last timestamp (mono at write).
+ * Each call writes one COVERAGE block straight to the file and flushes it to
+ * the OS (fflush) without cutting the pending data buffers; a file is opened
+ * lazily (BOOT first) when none is open. Returns 0, or -1 when nothing was
+ * written (writer disabled or failed, an inconsistent record, an I/O error).
+ *
+ * configure ENABLES coverage for this writer session and sets what BOOT
+ * says; call it before the first write. From then on the writer itself
+ * writes BOOT as the first block of every file it opens. A session that
+ * never calls it (library and unit-test writers) writes no COVERAGE block at
+ * all, and the three calls below refuse: such a v6 file carries no coverage
+ * claim, which a coverage reader must treat as not captured. */
+void pgwt_writer_coverage_configure(struct pgwt_event_writer *w,
+                                    uint64_t boot_start_ns,
+                                    uint64_t postmaster_start_wall_ns,
+                                    uint64_t mode);
+/* WATERMARK(W, floor_db, floor_idle). Refused unless
+ * floor_idle <= floor_db <= W. */
+int  pgwt_writer_coverage_watermark(struct pgwt_event_writer *w,
+                                    uint64_t observation_ns, uint64_t w_ns,
+                                    uint64_t floor_db_ns,
+                                    uint64_t floor_idle_ns);
+/* GAP_OPEN (open = true: t = start, reason a pgwt_coverage_gap_reason,
+ * detection = observation) or GAP_CLOSE (open = false: t = end). A GAP_OPEN
+ * is made durable (fflush + fsync) before the call returns. */
+int  pgwt_writer_coverage_gap(struct pgwt_event_writer *w,
+                              uint64_t observation_ns, bool open,
+                              uint64_t gap_id, uint64_t t_ns, uint8_t reason);
+/* SEAL(W_final): clean shutdown only, immediately before pgwt_writer_close.
+ * Opens a new file only when this session has already opened one (a
+ * session that never wrote anything has nothing to seal). */
+int  pgwt_writer_coverage_seal(struct pgwt_event_writer *w,
+                               uint64_t observation_ns, uint64_t w_final_ns);
 
 int  pgwt_writer_check_rotation(struct pgwt_event_writer *w);
 int  pgwt_writer_close(struct pgwt_event_writer *w);

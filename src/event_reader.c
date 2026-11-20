@@ -1,5 +1,6 @@
 /* event_reader.c — Trace file reader: block decode and time-range seek */
 #include "event_reader.h"
+#include "coverage_record.h"
 #include "wait_event.h"
 
 #include <string.h>
@@ -34,8 +35,10 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
         fclose(r->fp); r->fp = NULL;
         return -1;
     }
-    if (r->header.version < 2 || r->header.version > PGWT_TRACE_VERSION) {
-        /* v2/v3/v4 are read; v1 stays rejected (no deployed installs existed).
+    if (!pgwt_trace_version_readable(r->header.version)) {
+        /* v2/v3/v4/v6 are read; v1 stays rejected (no deployed installs
+         * existed) and v5 is the evidence codec's number, never a trace.
+         * v6 (#947) is v4 plus COVERAGE blocks, which every data path skips.
          * A v2 file's TRANSITIONS records lack the cpu_ns column — the decoder
          * surfaces PGWT_CPU_NS_UNKNOWN for them and compute falls back to
          * gap-inference (T8 §5.3). A newer-than-known version is skipped — its
@@ -43,7 +46,8 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
          * the file is skipped, never a crash on a stale/future layout. */
         fprintf(stderr,
                 "ERROR: unsupported trace version %u in %s "
-                "(this build reads versions 2-%u; regenerate with this build)\n",
+                "(this build reads versions 2-4 and 6-%u; regenerate with "
+                "this build)\n",
                 r->header.version, path, PGWT_TRACE_VERSION);
         fclose(r->fp); r->fp = NULL;
         return -1;
@@ -293,6 +297,13 @@ int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
     if (read_block_header(r, &bh, info) != 0) return -1;
     enum pgwt_block_type block_type = (enum pgwt_block_type)bh.block_type;
 
+    /* #947: a COVERAGE block holds no wait record. Zero records, not an
+     * error: it is a valid block of a v6 file, and a caller counting -1 as
+     * damage must not count it. *info names its type for callers that act
+     * per block. Read it with pgwt_reader_coverage_record(). */
+    if (bh.block_type == PGWT_BLOCK_COVERAGE)
+        return 0;
+
     /* Unknown block type (written by a NEWER build): skip the block rather
      * than decode it with the wrong columnar layout — garbage must never be
      * surfaced as data. */
@@ -427,6 +438,34 @@ int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
     return count;
 }
 
+int pgwt_reader_coverage_record(struct pgwt_event_reader *r, int block_idx,
+                                struct pgwt_coverage_record *rec,
+                                uint64_t *observation_ns)
+{
+    if (rec) memset(rec, 0, sizeof(*rec));
+    if (block_idx < 0 || block_idx >= r->num_blocks || !r->fp || !rec)
+        return -1;
+    if (fseek(r->fp, (long)r->block_index[block_idx].file_offset,
+              SEEK_SET) != 0)
+        return -1;
+    struct pgwt_trace_block_header bh;
+    struct pgwt_block_info info;
+    if (read_block_header(r, &bh, &info) != 0)
+        return -1;
+    if (bh.block_type != PGWT_BLOCK_COVERAGE)
+        return 1;
+    if (observation_ns)
+        *observation_ns = bh.first_timestamp_ns;
+    uint8_t buf[PGWT_COVERAGE_BOOT_PAYLOAD_SIZE];
+    if (bh.compressed_size != bh.uncompressed_size ||
+        bh.compressed_size > sizeof(buf) || bh.num_events != 1)
+        return -2;
+    if (fread(buf, 1, bh.compressed_size, r->fp) != bh.compressed_size)
+        return -1;
+    return pgwt_coverage_decode(buf, bh.compressed_size, rec) == PGWT_COVD_OK
+         ? 0 : -2;
+}
+
 int pgwt_reader_find_block(const struct pgwt_event_reader *r, uint64_t mono_ns)
 {
     /* #429. A binary search needs a sorted array, and block_index[] is in
@@ -466,6 +505,11 @@ int pgwt_reader_block_candidate(struct pgwt_event_reader *r, int bi,
     if (pgwt_reader_block_info(r, bi, &hdr) != 0)
         return -1;
     if (info) *info = hdr;
+
+    /* #947: a COVERAGE block holds no record, so it can never reach a
+     * window -- and it must not reach the straddler branch below either. */
+    if (hdr.block_type == PGWT_BLOCK_COVERAGE)
+        return 0;
 
     /* A record is written in the block it CLOSES in, so a block whose last
      * timestamp is before `from` holds nothing that reaches the window —
@@ -519,6 +563,10 @@ int pgwt_reader_file_span(struct pgwt_event_reader *r,
         struct pgwt_block_info bi;
         if (pgwt_reader_block_info(r, b, &bi) != 0)
             return -1;
+        /* #947: a COVERAGE block's timestamp is when it was WRITTEN, not a
+         * record's; it says nothing about the file's data extent. */
+        if (bi.block_type == PGWT_BLOCK_COVERAGE)
+            continue;
         if (bi.first_timestamp_ns < span->mono_start)
             span->mono_start = bi.first_timestamp_ns;
         if (bi.last_timestamp_ns > span->mono_end)
@@ -638,7 +686,7 @@ int pgwt_scan_trace_files(const char *trace_dir,
                 struct pgwt_trace_file_header hdr;
                 if (fread(&hdr, sizeof(hdr), 1, fp) == 1 &&
                     hdr.magic == PGWT_TRACE_MAGIC &&
-                    hdr.version >= 2 && hdr.version <= PGWT_TRACE_VERSION)
+                    pgwt_trace_version_readable(hdr.version))
                     hdr_start_ns = hdr.start_time_ns;
                 fclose(fp);
             }

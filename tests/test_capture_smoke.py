@@ -2503,6 +2503,14 @@ def phase_event_ring_drain_budget(pm_pid):
     check(timer_ticks > 0,
           f"display timer kept running during the forced drain "
           f"(timer_ticks={timer_ticks})")
+    coverage_ns = [int(n) for n in re.findall(
+        r"COVERAGE-TICK: .*duration_ns=(\d+)", err)]
+    # Same half-second work budget as the display drain: the old coverage
+    # path's 64 x 20 ms callback pass exceeded it. Coverage now inspects a
+    # reservation fence and publishes the loop's work without any callbacks.
+    check(bool(coverage_ns) and max(coverage_ns) <= 500_000_000,
+          f"coverage ticks stay within 500 ms with slow callbacks "
+          f"(ticks={len(coverage_ns)}, max_ms={max(coverage_ns, default=0) / 1e6:.3f})")
     live_cpu = parse_time_model(out).get('CPU*', 0.0)
     check(live_cpu > 500.0,
           f"forced-drain straddler stays visible live: CPU*={live_cpu:.0f}ms")

@@ -380,7 +380,9 @@ def trace_layout(blob):
         raise AssertionError("not a trace file (magic 0x%08x)" % magic)
     if version in (2, 3):
         return TRACE_HDR, BLOCK_HDR
-    if version == 4:
+    # v6 (#947) is the v4 layout plus COVERAGE blocks (type 3), which are
+    # ordinary blocks to this extent walk.
+    if version in (4, 6):
         if len(blob) < TRACE_HDR_V4.size:
             raise AssertionError("shorter than a v4 file header")
         return TRACE_HDR_V4, BLOCK_HDR_V4

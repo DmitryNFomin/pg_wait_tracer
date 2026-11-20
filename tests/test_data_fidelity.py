@@ -663,6 +663,8 @@ def test_legacy_master_responses(t):
     These files predate v4. The v3 mixed fixture includes the review's
     [1s,3s] AAS split; old stored periods control both response cadence and
     fidelity slop. Cache on/off must match the SAME master expectations.
+    The additive `entered` expectations are independently derived from each
+    frozen body's own complete links, never from the server under test.
     """
     fixtures = Path(__file__).parent / "fixtures"
     root = fixtures / "legacy_responses"
@@ -701,6 +703,14 @@ def test_legacy_master_responses(t):
                     label_text = (f"master {label} cache={cache} {case['command']} "
                                   f"{case['args']}: full response matches master")
                     t.check(matches, label_text if matches else label_text + f"; got {actual}")
+                    if (case["command"] == "transitions" and
+                            response.get("truncated") is False):
+                        for node in response["nodes"]:
+                            incoming = sum(link["value"] for link in response["links"]
+                                           if link["target"] == node["name"])
+                            t.check_eq(node.get("entered"), incoming,
+                                       f"{label_text}: {node['name']} entered equals "
+                                       "the sum of incoming links")
 
 
 def main():

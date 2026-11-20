@@ -277,9 +277,15 @@ def compare_chart(tab, option, data, snapshot, request, capture_from):
                 if node['name'] not in ('pgwt-layout-anchor-tl', 'pgwt-layout-anchor-br'):
                     raise AssertionError('unknown transition node')
                 continue
-            value = nodes[node['name']]['total_ms']
+            source = nodes[node['name']]
+            value = source['total_ms']
             equal(node['value'], value, 'transition node ms')
-            text = fixed(value / 1000, 1) + 's' if value >= 1000 else fixed(value, 0) + 'ms'
+            if source.get('count') == 0 and source.get('sampled_ms') == 0 and source.get('entered', 0) > 0:
+                text = f"entered {source['entered']:,}×"
+                name = node['name'].split(':', 1)[-1] if ':' in node['name'][1:] else node['name']
+                equal(node['label']['formatter'], name + '\n' + text, 'transition node units (entered-only label)')
+            else:
+                text = fixed(value / 1000, 1) + 's' if value >= 1000 else fixed(value, 0) + 'ms'
             equal(node['label']['formatter'].split('\n')[-1], text, 'transition node units')
     elif tab == 'waterfall':
         lanes = [data['leader']] + data.get('workers', [])

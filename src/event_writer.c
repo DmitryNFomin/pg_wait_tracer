@@ -3,6 +3,7 @@
  * Buffers events in blocks of 4096, encodes column-wise, LZ4-compresses,
  * writes to hourly-rotating trace files with a block index footer. */
 #include "event_writer.h"
+#include "coverage_record.h"
 #include "crash_point.h"
 
 #include <string.h>
@@ -17,6 +18,7 @@
 #include <grp.h>
 #include <pwd.h>
 #include <lz4.h>
+#include <sys/random.h>
 
 /* ── Varint (unsigned LEB128) ─────────────────────────────── */
 
@@ -597,13 +599,16 @@ static void recover_current_trace(struct pgwt_event_writer *w)
                 "(leaving it in place)\n", cur, strerror(errno));
         return;
     }
-    /* Accept any reader-supported version (v2..current): recovery only scans
-     * block headers to rebuild the footer index — it never re-encodes the
-     * columnar payload — so a v2 current.trace left by a pre-T8 daemon is
-     * archived intact and stays readable as v2. */
+    /* Accept any reader-supported version (v2..current, never v5): recovery
+     * only scans block headers to rebuild the footer index — it never
+     * re-encodes the columnar payload — so a v2 current.trace left by a
+     * pre-T8 daemon is archived intact and stays readable as v2. Every block
+     * TYPE is kept as it was written, COVERAGE (type 3, #947) included: a
+     * crashed boot's BOOT and WATERMARK records are exactly what the coverage
+     * label reads to bound what the crash lost. */
     if (fread(&hdr, sizeof(hdr), 1, fp) != 1 ||
         hdr.magic != PGWT_TRACE_MAGIC ||
-        hdr.version < 2 || hdr.version > PGWT_TRACE_VERSION) {
+        !pgwt_trace_version_readable(hdr.version)) {
         fclose(fp);
         char aside[600];
         snprintf(aside, sizeof(aside), "%s.corrupt.%lld", cur,
@@ -813,6 +818,19 @@ static int write_footer(struct pgwt_event_writer *w)
     return 0;
 }
 
+static int write_coverage_block(struct pgwt_event_writer *w,
+                                const struct pgwt_coverage_record *rec,
+                                uint64_t observation_ns);
+
+static uint64_t cov_clock_now(struct pgwt_event_writer *w)
+{
+    if (w->cov_clock)
+        return w->cov_clock(w->cov_clock_ctx);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
 {
     (void)first_mono_ns;
@@ -882,6 +900,33 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
 
     w->num_blocks = 0;
 
+    /* #947: BOOT is the FIRST block of every file. It names the writer
+     * session (nonce), this file's place in it (file_no, running on across
+     * rotation) and the clock domain (kernel boot_id). Its observation is
+     * the file's own start, so a coverage reader can bound a missing earlier
+     * file by where this one begins. A file that cannot carry its BOOT is
+     * not opened: a v6 file without one could not be placed in any boot. */
+    if (w->cov_enabled) {
+        struct pgwt_coverage_record boot = {
+            .kind = PGWT_COVK_BOOT,
+            .a = w->cov_boot_start_ns,
+            .b = w->cov_next_file_no,
+            .c = w->cov_postmaster_start_wall_ns,
+            .d = w->cov_mode,
+        };
+        memcpy(boot.boot_nonce, w->cov_boot_nonce, 16);
+        memcpy(boot.kernel_boot_id, w->cov_kernel_boot_id, 16);
+        uint64_t obs = w->cov_clock ? cov_clock_now(w) : w->file_start_mono_ns;
+        if (write_coverage_block(w, &boot, obs) != 0) {
+            fprintf(stderr, "WARN: cannot write the BOOT record of %s\n",
+                    w->current_path);
+            fclose(w->fp);
+            w->fp = NULL;
+            return -1;
+        }
+        w->cov_next_file_no++;
+    }
+
     /* #424: a new file has a new identity, so any checkpoint still sitting
      * under the live name describes a file that no longer exists here.
      * Recovery has already carried the valid ones next to their archives, so
@@ -890,6 +935,101 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
     w->ckpt_seq = 0;
     ckpt_discard(w->trace_dir, "a new trace file started", w->verbose);
 
+    return 0;
+}
+
+/* Grow the in-memory block index by one slot. -1 marks the writer failed. */
+static int block_index_reserve(struct pgwt_event_writer *w)
+{
+    if (w->num_blocks < w->block_index_cap)
+        return 0;
+    int new_cap = w->block_index_cap * 2;
+    struct pgwt_block_index_entry *new_idx =
+        realloc(w->block_index, new_cap * sizeof(*new_idx));
+    if (!new_idx) {
+        fprintf(stderr, "WARN: cannot grow block index\n");
+        w->enabled = false;
+        w->failed = true;
+        return -1;
+    }
+    w->block_index = new_idx;
+    w->block_index_cap = new_cap;
+    return 0;
+}
+
+/* Write committed block count atomically (Kafka-style high watermark).
+ * Readers use this instead of scanning/guessing block count. */
+static void write_meta_count(struct pgwt_event_writer *w)
+{
+    char meta_path[512], tmp_path[512];
+    snprintf(meta_path, sizeof(meta_path), "%s/current.trace.meta",
+             w->trace_dir);
+    snprintf(tmp_path, sizeof(tmp_path), "%s/current.trace.meta.tmp",
+             w->trace_dir);
+    FILE *mf = fopen(tmp_path, "w");
+    if (mf) {
+        fprintf(mf, "%d\n", w->num_blocks);
+        fclose(mf);
+        rename(tmp_path, meta_path);  /* atomic on POSIX */
+    }
+}
+
+/* #947: one COVERAGE block (trace v6), written straight to the open file.
+ *
+ * It does NOT flush the pending TRANSITIONS/SAMPLES buffers: the caller
+ * decides when data is published (the daemon publishes before it writes a
+ * WATERMARK, which is what makes the watermark true). The block joins the
+ * footer index like any block, so rotation, retention, copying and recovery
+ * move it with its file; data consumers skip it by type. */
+static int write_coverage_block(struct pgwt_event_writer *w,
+                                const struct pgwt_coverage_record *rec,
+                                uint64_t observation_ns)
+{
+    uint8_t payload[PGWT_COVERAGE_BOOT_PAYLOAD_SIZE];
+    size_t n = pgwt_coverage_encode(rec, payload);
+    if (n == 0 || !w->fp)
+        return -1;
+    if (w->num_blocks >= PGWT_MAX_FILE_BLOCKS && !w->force_rotate)
+        w->force_rotate = true;
+    if (block_index_reserve(w) != 0)
+        return -1;
+
+    long file_offset = ftell(w->fp);
+    struct pgwt_trace_block_header bh = {
+        .first_timestamp_ns = observation_ns,
+        .last_timestamp_ns = observation_ns,
+        .num_events = 1,
+        .compressed_size = (uint32_t)n,     /* never compressed */
+        .uncompressed_size = (uint32_t)n,
+        .block_type = (uint16_t)PGWT_BLOCK_COVERAGE,
+        .reserved = 0,
+        .sample_period_ns = 0,
+    };
+    uint64_t v4_ext = 0;
+    if (file_offset < 0 ||
+        fwrite(&bh, sizeof(bh), 1, w->fp) != 1 ||
+        fwrite(&v4_ext, sizeof(v4_ext), 1, w->fp) != 1 ||
+        fwrite(payload, 1, n, w->fp) != n) {
+        fprintf(stderr, "WARN: trace coverage write failed: %s\n",
+                strerror(errno));
+        w->enabled = false;
+        w->failed = true;
+        return -1;
+    }
+    w->block_index[w->num_blocks++] = (struct pgwt_block_index_entry){
+        .timestamp_ns = observation_ns,
+        .file_offset = (uint64_t)file_offset,
+    };
+    w->cov_records_written++;
+    w->cov_bytes_written += pgwt_trace_block_header_size(PGWT_TRACE_VERSION)
+                          + n + sizeof(struct pgwt_block_index_entry);
+    if (fflush(w->fp) != 0) {
+        fprintf(stderr, "WARN: trace flush failed (%s) — coverage block %d "
+                "is not visible to readers and is not being advertised\n",
+                strerror(errno), w->num_blocks);
+        return -1;
+    }
+    write_meta_count(w);
     return 0;
 }
 
@@ -930,19 +1070,8 @@ static int write_typed_block(struct pgwt_event_writer *w,
     }
 
     /* Grow block index if needed */
-    if (w->num_blocks >= w->block_index_cap) {
-        int new_cap = w->block_index_cap * 2;
-        struct pgwt_block_index_entry *new_idx =
-            realloc(w->block_index, new_cap * sizeof(*new_idx));
-        if (!new_idx) {
-            fprintf(stderr, "WARN: cannot grow block index\n");
-            w->enabled = false;
-            w->failed = true;
-            return -1;
-        }
-        w->block_index = new_idx;
-        w->block_index_cap = new_cap;
-    }
+    if (block_index_reserve(w) != 0)
+        return -1;
 
     /* Record block index entry */
     long file_offset = ftell(w->fp);
@@ -1001,22 +1130,7 @@ static int write_typed_block(struct pgwt_event_writer *w,
         return -1;
     }
 
-    /* Write committed block count atomically (Kafka-style high watermark).
-     * Readers use this instead of scanning/guessing block count. */
-    {
-        char meta_path[512], tmp_path[512];
-        snprintf(meta_path, sizeof(meta_path), "%s/current.trace.meta",
-                 w->trace_dir);
-        snprintf(tmp_path, sizeof(tmp_path), "%s/current.trace.meta.tmp",
-                 w->trace_dir);
-        FILE *mf = fopen(tmp_path, "w");
-        if (mf) {
-            fprintf(mf, "%d\n", w->num_blocks);
-            fclose(mf);
-            rename(tmp_path, meta_path);  /* atomic on POSIX */
-        }
-    }
-
+    write_meta_count(w);
     return 0;
 }
 
@@ -1219,6 +1333,60 @@ const char *pgwt_default_trace_group(void)
     return NULL;
 }
 
+/* #947: the session nonce. Identity only (ordering comes from the boot's
+ * start time and generation), so a weaker fallback is acceptable, but it is
+ * still drawn from the kernel's entropy when that is possible at all. */
+static void cov_fill_nonce(uint8_t nonce[16])
+{
+    if (getentropy(nonce, 16) == 0)
+        return;
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        size_t got = fread(nonce, 1, 16, f);
+        fclose(f);
+        if (got == 16)
+            return;
+    }
+    struct timespec a, b;
+    clock_gettime(CLOCK_REALTIME, &a);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    uint64_t x = (uint64_t)a.tv_sec * 1000000000ULL + (uint64_t)a.tv_nsec;
+    uint64_t y = ((uint64_t)b.tv_sec * 1000000000ULL + (uint64_t)b.tv_nsec)
+               ^ ((uint64_t)getpid() << 32);
+    memcpy(nonce, &x, 8);
+    memcpy(nonce + 8, &y, 8);
+}
+
+/* #947: the kernel boot id guards the monotonic clock domain (a reboot
+ * restarts CLOCK_MONOTONIC). Linux only; all zero = unknown. */
+static void cov_read_kernel_boot_id(uint8_t out[16])
+{
+    memset(out, 0, 16);
+    FILE *f = fopen("/proc/sys/kernel/random/boot_id", "r");
+    if (!f)
+        return;
+    char line[64] = {0};
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return;
+    }
+    fclose(f);
+    uint8_t tmp[16];
+    int nib = 0;
+    for (const char *p = line; *p && nib < 32; p++) {
+        int v;
+        if (*p >= '0' && *p <= '9') v = *p - '0';
+        else if (*p >= 'a' && *p <= 'f') v = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F') v = *p - 'A' + 10;
+        else continue;
+        if (nib % 2 == 0) tmp[nib / 2] = (uint8_t)(v << 4);
+        else tmp[nib / 2] |= (uint8_t)v;
+        nib++;
+    }
+    if (nib == 32)
+        memcpy(out, tmp, 16);
+}
+
 int pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
                      int pg_version, int retention_hours,
                      const char *group_name)
@@ -1230,6 +1398,17 @@ int pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
     w->enabled = true;
     w->current_hour = -1;
     w->trace_gid = (gid_t)-1;
+
+    /* #947: one writer session = one boot. */
+    cov_fill_nonce(w->cov_boot_nonce);
+    cov_read_kernel_boot_id(w->cov_kernel_boot_id);
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        w->cov_boot_start_ns = (uint64_t)ts.tv_sec * 1000000000ULL
+                             + (uint64_t)ts.tv_nsec;
+    }
+    w->cov_next_file_no = 0;
 
     if (pgwt_trace_dir_prepare(w->trace_dir, group_name, &w->trace_gid) != 0)
         return -1;
@@ -1411,6 +1590,98 @@ int pgwt_writer_publish(struct pgwt_event_writer *w)
 uint64_t pgwt_writer_committed_through_ns(const struct pgwt_event_writer *w)
 {
     return w->committed_through_ns;
+}
+
+/* ── #947 coverage records ────────────────────────────────── */
+
+void pgwt_writer_coverage_configure(struct pgwt_event_writer *w,
+                                    uint64_t boot_start_ns,
+                                    uint64_t postmaster_start_wall_ns,
+                                    uint64_t mode)
+{
+    w->cov_enabled = true;
+    w->cov_boot_start_ns = boot_start_ns;
+    w->cov_postmaster_start_wall_ns = postmaster_start_wall_ns;
+    w->cov_mode = mode;
+}
+
+/* Common gate: an open file with its BOOT already written. */
+static int cov_ready(struct pgwt_event_writer *w, bool may_open)
+{
+    if (w->failed || !w->enabled || !w->cov_enabled)
+        return -1;
+    /* A file opened before coverage was enabled has no BOOT, so nothing
+     * written into it could be placed in a boot. */
+    if (w->fp && w->cov_next_file_no == 0)
+        return -1;
+    if (w->fp)
+        return 0;
+    if (!may_open)
+        return -1;
+    if (open_trace_file(w, 0) != 0) {
+        w->enabled = false;
+        w->failed = true;
+        return -1;
+    }
+    return 0;
+}
+
+int pgwt_writer_coverage_watermark(struct pgwt_event_writer *w,
+                                   uint64_t observation_ns, uint64_t w_ns,
+                                   uint64_t floor_db_ns,
+                                   uint64_t floor_idle_ns)
+{
+    /* A floor above W, or an idle floor above the DB floor, would claim more
+     * than W itself does: refuse the record rather than write a lie. */
+    if (floor_db_ns > w_ns || floor_idle_ns > floor_db_ns)
+        return -1;
+    if (cov_ready(w, true) != 0)
+        return -1;
+    struct pgwt_coverage_record r = {
+        .kind = PGWT_COVK_WATERMARK,
+        .a = w_ns, .b = floor_db_ns, .c = floor_idle_ns,
+    };
+    return write_coverage_block(w, &r, observation_ns);
+}
+
+int pgwt_writer_coverage_gap(struct pgwt_event_writer *w,
+                             uint64_t observation_ns, bool open,
+                             uint64_t gap_id, uint64_t t_ns, uint8_t reason)
+{
+    if (cov_ready(w, true) != 0)
+        return -1;
+    struct pgwt_coverage_record r = {
+        .kind = open ? PGWT_COVK_GAP_OPEN : PGWT_COVK_GAP_CLOSE,
+        .reason = open ? reason : 0,
+        .a = t_ns,
+        .c = gap_id,
+        .d = open ? observation_ns : 0,
+    };
+    if (write_coverage_block(w, &r, observation_ns) != 0)
+        return -1;
+    /* A gap is the one coverage fact that REVOKES something already
+     * written, so it must survive a crash that follows it at once. */
+    if (open && fsync(fileno(w->fp)) != 0) {
+        fprintf(stderr, "WARN: could not fsync coverage gap %llu (%s)\n",
+                (unsigned long long)gap_id, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+int pgwt_writer_coverage_seal(struct pgwt_event_writer *w,
+                              uint64_t observation_ns, uint64_t w_final_ns)
+{
+    /* A session that never opened a file wrote nothing and has nothing to
+     * seal; one that did (e.g. a rotation just closed its last file) gets a
+     * new file, BOOT then SEAL, so its end is still recorded. */
+    if (cov_ready(w, w->cov_next_file_no > 0) != 0)
+        return -1;
+    struct pgwt_coverage_record r = {
+        .kind = PGWT_COVK_SEAL,
+        .a = w_final_ns,
+    };
+    return write_coverage_block(w, &r, observation_ns);
 }
 
 int pgwt_writer_check_rotation(struct pgwt_event_writer *w)

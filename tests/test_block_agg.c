@@ -252,7 +252,7 @@ _Static_assert(PGWT_IS_MARKER(0xFFFFFFF0U) && PGWT_IS_MARKER(0xFFFFFFF7U) &&
                "raw_node_oracle's hardcoded marker range [0xFFFFFFF0, "
                "0xFFFFFFF7] no longer matches PGWT_IS_MARKER — update the "
                "oracle's literals, do not relax this assertion");
-struct node_oracle_row { uint32_t id; uint64_t count, total_ns; };
+struct node_oracle_row { uint32_t id; uint64_t count, total_ns, entered; };
 
 static int raw_node_oracle(const struct pgwt_trace_event *ev, int n,
                            struct node_oracle_row *out, int max_out)
@@ -274,10 +274,28 @@ static int raw_node_oracle(const struct pgwt_trace_event *ev, int n,
             out[at].id = ev[i].old_event;
             out[at].count = 0;
             out[at].total_ns = 0;
+            out[at].entered = 0;
         }
         out[at].count++;
         out[at].total_ns += ev[i].duration_ns;
     }
+    /* Entered uses the raw link population, independently of the aggregate's
+     * node predicate; old dwell expectations above remain unchanged. */
+    struct raw_pairs links;
+    raw_pairs_of(&links, ev, n);
+    for (int i = 0; i < links.res.num_rows; i++) {
+        uint32_t id = links.res.rows[i].to_event;
+        int at = -1;
+        for (int j = 0; j < k; j++)
+            if (out[j].id == id) { at = j; break; }
+        if (at < 0) {
+            assert(k < max_out);
+            at = k++;
+            out[at] = (struct node_oracle_row){ .id = id };
+        }
+        out[at].entered += links.res.rows[i].count;
+    }
+    raw_pairs_free(&links);
     return k;
 }
 
@@ -375,6 +393,18 @@ static int compare_agg_vs_raw(const struct pgwt_block_agg *agg,
             bad++;
         }
     }
+    struct pgwt_block_agg_node *actual = NULL;
+    int actual_n = 0;
+    if (pgwt_block_agg_nodes_sorted(agg, &actual, &actual_n) != PGWT_BAGG_OK)
+        return bad + 1;
+    for (int i = 0; i < actual_n; i++)
+        for (int j = 0; j < n_nodes; j++)
+            if (actual[i].event_id == nodes[j].id &&
+                actual[i].entered != nodes[j].entered) {
+                if (verbose) fprintf(stderr, "entered mismatch for %u\n", actual[i].event_id);
+                bad++;
+            }
+    free(actual);
     if (agg->n_nodes != n_nodes) {
         if (verbose)
             fprintf(stderr, "  node count agg=%d raw=%d\n",
@@ -712,17 +742,23 @@ static void section2b_sampled_nodes(void)
     ev.duration_ns = 100;
     CHECK(pgwt_block_agg_add_sampled_event(&win, &ev) == PGWT_BAGG_OK,
           "add sampled time to existing exact node");
-    CHECK(win.n_nodes == 100 && win.node_records == 1 &&
+    CHECK(win.n_nodes == 101 && win.node_records == 1 &&
           win.node_total_ns == 700 && win.total_transitions == 1 &&
           win.pair_total_ns == 700,
           "samples never change exact node or edge totals");
     struct pgwt_block_agg_node *nodes = NULL;
     int n_nodes = 0;
     CHECK(pgwt_block_agg_nodes_sorted(&win, &nodes, &n_nodes) == PGWT_BAGG_OK &&
-          n_nodes == 100, "readout retains all sample-only nodes after growth");
+          n_nodes == 101, "readout retains sampled nodes and entered-only target after growth");
     for (int i = 0; i < n_nodes; i++) {
         uint64_t count = 99, total_ns = 99;
         int mixed = nodes[i].event_id == E_IO1;
+        if (nodes[i].event_id == E_CPU) {
+            CHECK(nodes[i].count == 0 && nodes[i].total_ns == 0 &&
+                  nodes[i].sampled_ns == 0 && nodes[i].entered == 1,
+                  "exact record adds entered-only CPU target");
+            continue;
+        }
         CHECK(pgwt_block_agg_node_lookup(&win, nodes[i].event_id,
                                         &count, &total_ns) &&
               count == (uint64_t)mixed && total_ns == (mixed ? 700U : 0U) &&
@@ -735,6 +771,71 @@ static void section2b_sampled_nodes(void)
 }
 
 /* ── §3 merge is associative and commutative ────────────────────────────── */
+
+/* #982: a one-way fanout forces growth/rehash of entered-only slots.
+ * Compare build+merge, per-record raw accumulation and the raw link oracle.
+ * Source dwell values still use the original C5 expectations. */
+static void section2c_entered_nodes(void)
+{
+    printf("=== 2c entered-only nodes: build, merge, raw and growth ===\n");
+    struct pgwt_trace_event events[100];
+    uint64_t total_ns = 0;
+    for (int i = 0; i < 100; i++) {
+        events[i] = (struct pgwt_trace_event) {
+            .timestamp_ns = TS_BASE + (uint64_t)i,
+            .pid = 101, .old_event = E_LOCK1, .new_event = E_IO1 + (uint32_t)i,
+            .duration_ns = (uint64_t)(17 + i), .cpu_ns = PGWT_CPU_NS_UNKNOWN,
+        };
+        total_ns += events[i].duration_ns;
+    }
+    struct pgwt_block_agg merged, raw;
+    pgwt_block_agg_init_window(&merged);
+    pgwt_block_agg_init_window(&raw);
+    for (int b = 0; b < 2; b++) {
+        struct pgwt_block_identity id = {
+            .trace = TRACE_A, .block_index = (uint32_t)b, .num_events = 50,
+            .file_offset = (uint64_t)(4096 + b * 4096),
+            .first_timestamp_ns = events[b * 50].timestamp_ns,
+            .last_timestamp_ns = events[b * 50 + 49].timestamp_ns,
+        };
+        struct pgwt_block_agg block;
+        CHECK(pgwt_block_agg_build(&block, &id, PGWT_BLOCK_TRANSITIONS, 1,
+                                   events + b * 50, 50) == PGWT_BAGG_OK,
+              "982 build fanout block %d", b);
+        CHECK(pgwt_block_agg_merge(&merged, &block) == PGWT_BAGG_OK,
+              "982 merge fanout block %d", b);
+        pgwt_block_agg_free(&block);
+    }
+    for (int i = 0; i < 100; i++)
+        CHECK(pgwt_block_agg_add_event(&raw, &events[i]) == PGWT_BAGG_OK,
+              "982 raw accumulation %d", i);
+    struct raw_pairs pairs;
+    raw_pairs_of(&pairs, events, 100);
+    struct node_oracle_row expected[101];
+    int nn = raw_node_oracle(events, 100, expected, 101);
+    CHECK(compare_agg_vs_raw(&merged, &pairs.res, expected, nn, 1) == 0,
+          "982 merged entered matches raw transition differential");
+    CHECK(compare_agg_vs_raw(&raw, &pairs.res, expected, nn, 1) == 0,
+          "982 per-event entered matches raw transition differential");
+    const struct pgwt_block_agg *paths[] = { &raw, &merged };
+    for (int p = 0; p < 2; p++) {
+        struct pgwt_block_agg_node *nodes = NULL;
+        int n = 0;
+        CHECK(pgwt_block_agg_nodes_sorted(paths[p], &nodes, &n) == PGWT_BAGG_OK && n == 101,
+              "982 path %d retains all 100 targets across growth and merge", p);
+        for (int i = 0; i < n; i++) {
+            int source = nodes[i].event_id == E_LOCK1;
+            CHECK(nodes[i].count == (source ? 100U : 0U) &&
+                  nodes[i].total_ns == (source ? total_ns : 0U) &&
+                  nodes[i].sampled_ns == 0 && nodes[i].entered == (source ? 0U : 1U),
+                  "982 path %d node %u has literal entry/dwell counts", p, nodes[i].event_id);
+        }
+        free(nodes);
+    }
+    raw_pairs_free(&pairs);
+    pgwt_block_agg_free(&raw);
+    pgwt_block_agg_free(&merged);
+}
 
 static void section3_merge_algebra(void)
 {
@@ -2552,6 +2653,7 @@ int main(void)
     section1_predicate_differential();
     section2_literals();
     section2b_sampled_nodes();
+    section2c_entered_nodes();
     section3_merge_algebra();
     section4_straddle();
     section5_plan_partition();
