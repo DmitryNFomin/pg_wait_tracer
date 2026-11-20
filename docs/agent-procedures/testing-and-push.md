@@ -50,6 +50,9 @@
   changed since the merge base with `origin/master`: branch commits, staged and
   unstaged edits, and untracked files that Git does not ignore. A skipped suite
   still runs in CI's `full-check`, which runs everything and must pass to merge.
+  Keep `scripts/check.sh` out of blanket slow-suite globs so adding test steps
+  preserves fast local selection; CI's required `full-check` runs every step
+  in full mode and catches wiring mistakes.
   Missing/unusable merge-base history (including a shallow clone) or failure to
   enumerate paths runs every slow suite and prints the reason. Set
   `PGWT_CHECK_FAST_ALL=1 make check-fast` to force every slow suite locally;

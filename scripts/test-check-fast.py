@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 
@@ -114,14 +115,14 @@ def fixtures(root):
 NAMES = ('committed', 'staged', 'unstaged', 'untracked', 'untouched', 'deleted', 'renamed', 'new-name', 'special')
 
 
-def exercise(selector, repo, *, fast=True, override=False):
+def exercise(selector, repo, bash, *, fast=True, override=False, empty_globs=False):
     harness = 'set -uo pipefail\nFAST=' + str(int(fast)) + '\n'
     # Timing is stubbed only to keep suite output deterministic; selection and
     # command execution use the exact production functions.
     harness += 'finish_step() { :; }; step() { :; }; step_name=\n'
     harness += selector + '\n'
     for name in NAMES:
-        pattern = 'special*' if name == 'special' else name + '.txt'
+        pattern = '' if empty_globs else ('special*' if name == 'special' else name + '.txt')
         harness += f'slow_step {shlex.quote(name)} {shlex.quote(pattern)} printf "RUN: {name}\\n"\n'
     harness += 'print_fast_summary\n'
     env = dict(os.environ)
@@ -131,20 +132,23 @@ def exercise(selector, repo, *, fast=True, override=False):
     for name in list(env):
         if name.startswith('GIT_'):
             del env[name]
-    result = subprocess.run(['bash'], cwd=repo, input=harness, text=True,
+    result = subprocess.run([bash], cwd=repo, input=harness, text=True,
                             capture_output=True, env=env, timeout=15)
-    assert result.returncode == 0, f'selector execution failed: {result.stderr}'
+    assert result.returncode == 0, f'{repo.name}: selector execution failed under {bash}: {result.stderr}'
+    assert not result.stderr, f'{repo.name}: selector diagnostic under {bash}: {result.stderr}'
     return result.stdout
 
 
-def proofs(selector, repos):
+def proofs(selector, repos, bash):
+    # clean is exactly the merge base, with no changed or untracked paths.
+    # Keep it first so the empty-array mutant reaches this specific case.
     expectations = {case: set() for case in ('clean', 'ignored')}
     expectations.update({case: {case} for case in ('committed', 'staged', 'unstaged', 'untracked', 'deleted', 'special')})
     expectations['renamed'] = {'renamed', 'new-name'}
     expectations['combined'] = {'committed', 'staged', 'unstaged', 'untracked'}
     expectations.update({case: set(NAMES) for case in ('missing-base', 'unrelated-base', 'shallow')})
     for case, expected in expectations.items():
-        out = exercise(selector, repos[case])
+        out = exercise(selector, repos[case], bash)
         actual = set(re.findall(r'^RUN: (.*)$', out, re.M))
         assert actual == expected, f'{case}: matching slow steps {actual}, expected {expected}'
         skipped = set(re.findall(r'^SKIP \(fast\): (.*)$', out, re.M))
@@ -154,12 +158,25 @@ def proofs(selector, repos):
         if case in ('missing-base', 'unrelated-base', 'shallow'):
             assert 'fast: running every slow step:' in out, f'{case}: missing fail-safe explanation'
     for case in ('clean', 'committed', 'missing-base'):
-        out = exercise(selector, repos[case], fast=False)
+        out = exercise(selector, repos[case], bash, fast=False)
         assert re.findall(r'^RUN: (.*)$', out, re.M) == list(NAMES), f'full mode {case}: skipped or reordered commands'
         assert 'SKIP' not in out and 'fast:' not in out and 'Fast slow steps:' not in out, 'full mode output changed'
-    out = exercise(selector, repos['clean'], override=True)
+    out = exercise(selector, repos['clean'], bash, override=True)
     assert set(re.findall(r'^RUN: (.*)$', out, re.M)) == set(NAMES), 'override: skipped slow steps'
     assert 'PGWT_CHECK_FAST_ALL=1' in out, 'override: missing explanation'
+    out = exercise(selector, repos['committed'], bash, empty_globs=True)
+    assert not re.search(r'^RUN:', out, re.M), 'empty globs: selected a slow step'
+    assert f'Fast slow steps: 0 ran, {len(NAMES)} skipped' in out, 'empty globs: wrong counts'
+
+
+def bash_shells():
+    path_bash = shutil.which('bash')
+    assert path_bash, 'bash not found on PATH'
+    shells = [path_bash]
+    system_bash = Path('/bin/bash')
+    if system_bash.is_file() and not os.path.samefile(path_bash, system_bash):
+        shells.append(str(system_bash))
+    return shells
 
 
 def main():
@@ -167,31 +184,51 @@ def main():
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')[:-1]
     calls = coverage(source, tracked)
     print(f'coverage: PASS ({len(calls)} slow steps; nonempty, tracked globs; own scripts covered)', flush=True)
-    selector = source.split(BEGIN, 1)[1].split(END, 1)[0]
+    # Drop the entire marker line, including its explanatory comment suffix.
+    selector = source.split(BEGIN, 1)[1].split('\n', 1)[1].split(END, 1)[0]
     # Mutants must remain valid shell and reach the named assertion.
     mutations = (
-        ('matched step skipped', 'if [[ "$path" == $pattern ]]; then\n                        selected=1',
-         'if [[ "$path" == $pattern ]]; then\n                        selected=0', 'committed: matching slow steps'),
+        ('matched step skipped', 'if [[ "$path" == $pattern ]]; then\n                            selected=1',
+         'if [[ "$path" == $pattern ]]; then\n                            selected=0', 'committed: matching slow steps'),
         ('untracked ignored', 'git ls-files --others --exclude-standard -z', 'printf \'\'', 'untracked: matching slow steps'),
         ('missing merge base skips', "fast_all_reason='cannot compute merge base with origin/master'", "fast_all_reason=", 'missing-base: matching slow steps'),
         ('full mode skips', 'if [[ $FAST -eq 0 ]]; then\n        selected=1', 'if [[ $FAST -eq 0 ]]; then\n        selected=0', 'full mode clean: skipped'),
     )
     with tempfile.TemporaryDirectory(prefix='pgwt-fast-selftest-') as temp:
         repos = fixtures(Path(temp))
-        proofs(selector, repos)
-        print('selector: PASS (committed/staged/unstaged/untracked isolation + combined, clean/ignored, delete/rename, NUL paths, missing/unrelated/shallow base, full mode, override, counts)', flush=True)
-        for name, old, new, intended in mutations:
-            assert selector.count(old) == 1, f'{name}: mutation site drift'
-            mutant = selector.replace(old, new)
-            syntax = subprocess.run(['bash', '-n'], input=mutant, text=True, capture_output=True)
-            assert syntax.returncode == 0, f'{name}: mutant syntax error'
-            try:
-                proofs(mutant, repos)
-            except AssertionError as exc:
-                assert intended in str(exc), f'{name}: wrong failure: {exc}'
-                print(f'mutant RED: {name} (valid shell; {exc})', flush=True)
+        for bash in bash_shells():
+            version = subprocess.check_output([bash, '-c', 'printf "%s" "$BASH_VERSION"'], text=True)
+            print(f'bash: {bash} ({version})', flush=True)
+            proofs(selector, repos, bash)
+            print('selector: PASS (committed/staged/unstaged/untracked isolation + combined, empty changed-path list, ignored, delete/rename, NUL paths, missing/unrelated/shallow base, full mode, override, counts, empty globs)', flush=True)
+            shell_mutations = list(mutations)
+            # Newer Bash permits empty array expansion with nounset. Only
+            # require this mutant to fail on shells exhibiting the defect.
+            probe = subprocess.run([bash], input='set -u; empty=(); printf "%s" "${empty[@]}"\n',
+                                   text=True, capture_output=True)
+            if probe.returncode:
+                assert 'empty[@]: unbound variable' in probe.stderr, probe.stderr
+                shell_mutations.append((
+                    'unguarded empty changed-path list',
+                    'if [[ ${#fast_changed_paths[@]} -gt 0 && ${#globs[@]} -gt 0 ]]; then',
+                    'if [[ ${#globs[@]} -gt 0 ]]; then',
+                    'clean: selector execution failed'))
             else:
-                raise AssertionError(f'{name}: SURVIVED')
+                print('empty-array regression mutant: N/A (shell permits empty arrays under set -u)', flush=True)
+            for name, old, new, intended in shell_mutations:
+                assert selector.count(old) == 1, f'{name}: mutation site drift'
+                mutant = selector.replace(old, new)
+                syntax = subprocess.run([bash, '-n'], input=mutant, text=True, capture_output=True)
+                assert syntax.returncode == 0, f'{name}: mutant syntax error'
+                try:
+                    proofs(mutant, repos, bash)
+                except AssertionError as exc:
+                    assert intended in str(exc), f'{name}: wrong failure: {exc}'
+                    if name == 'unguarded empty changed-path list':
+                        assert 'fast_changed_paths[@]: unbound variable' in str(exc), str(exc)
+                    print(f'mutant RED: {name} (valid shell; {exc})', flush=True)
+                else:
+                    raise AssertionError(f'{name}: SURVIVED')
     # The declaration guard must itself reject each required failure mode.
     first = calls[0]
     for name, bad in (('empty globs', ''), ('unmatched glob', 'no-such-tracked-path/*'),

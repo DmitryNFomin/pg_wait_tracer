@@ -117,14 +117,17 @@ slow_step() {
             # Split the declared, space-separated glob list without pathname
             # expansion; matching below treats the changed path literally.
             read -r -a globs <<< "$patterns"
-            for path in "${fast_changed_paths[@]}"; do
-                for pattern in "${globs[@]}"; do
-                    if [[ "$path" == $pattern ]]; then
-                        selected=1
-                        break 2
-                    fi
+            # Bash 3.2 treats an empty array expansion as unset under -u.
+            if [[ ${#fast_changed_paths[@]} -gt 0 && ${#globs[@]} -gt 0 ]]; then
+                for path in "${fast_changed_paths[@]}"; do
+                    for pattern in "${globs[@]}"; do
+                        if [[ "$path" == $pattern ]]; then
+                            selected=1
+                            break 2
+                        fi
+                    done
                 done
-            done
+            fi
         fi
     fi
     if [[ $selected -eq 0 ]]; then
@@ -451,8 +454,10 @@ run bash tests/test_check_runner_pin.sh
 
 # Promoted from an untracked results directory; closes the numpy-presence
 # false-negative in the frame detector's bypass probes (issue #519).
-step "frame-verify probe suite (bypass suite for scripts/frame_verify.py, #519)"
+check_slow_20() {
 run python3 tests/test_frame_verify_probes.py
+}
+slow_step "frame-verify probe suite (bypass suite for scripts/frame_verify.py, #519)" 'tests/test_frame_verify_probes.py scripts/frame_verify.py' check_slow_20
 
 step "runner-image pin guard (this tree)"
 run bash scripts/check-runner-pin.sh
@@ -620,11 +625,15 @@ run bash tests/test_tag_cli_args.sh
 # live only in the box tier. The cases are weighted toward FALSE negatives:
 # 404, dead server, empty tree, missing dir and missing python3 must each
 # REFUSE ("cannot verify"), never pass.
-step "bash: served-asset guard unit tests (stale bridge refusal)"
+check_slow_21() {
 run bash tests/test_served_asset_guard.sh
+}
+slow_step "bash: served-asset guard unit tests (stale bridge refusal)" 'tests/test_served_asset_guard.sh tests/live_daemon_lib.sh tests/ui_live_smoke.sh tests/demo_rehearsal.sh web/main.go web/static/*' check_slow_21
 
-step "python: gallery provenance and tiered output unit tests"
+check_slow_22() {
 run python3 tests/test_evidence_output.py
+}
+slow_step "python: gallery provenance and tiered output unit tests" 'tests/test_evidence_output.py tests/ui_gallery.sh tests/ui_gallery_report.py tests/cross_validate_rate_output.sh' check_slow_22
 
 step "CI change-classifier table-driven test (issue #167)"
 run bash tests/test_classify_changed_files.sh
