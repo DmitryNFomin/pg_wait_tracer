@@ -3,8 +3,8 @@
 # PostgreSQL, no root. CI's full-check runs the full tier on Linux; the
 # pre-push hook accepts either mode's passing stamp before `git push`.
 #
-#   make check        full local tier (~4 min: adds the Playwright UI suite)
-#   make check-fast   node + go + python compile only (seconds)
+#   make check        full local tier (includes the Playwright UI suite)
+#   make check-fast   cheap guards + slow suites covering branch changes
 #
 # Everything that needs the Linux build (C units, synthetic-data tests against
 # pgwt-server, protocol drift, live capture) runs via `make box-check`.
@@ -52,11 +52,11 @@ finish_step() {
 print_timings() {
     finish_step
     printf '\nStep timings (elapsed seconds, slowest first):\n'
-    if [[ -n "$step_name" ]]; then
+    if [[ ${#step_times[@]} -gt 0 ]]; then
         printf '%s\n' "${step_times[@]}" | sort -t $'\t' -k1,1nr
     fi
 }
-trap print_timings EXIT
+trap 'print_timings; print_fast_summary' EXIT
 step() {
     finish_step
     step_name=$1
@@ -65,11 +65,94 @@ step() {
 }
 run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 
+# BEGIN fast slow-step selector (also exercised in isolation by its self-test)
+slow_ran=0
+slow_skipped=0
+fast_paths_ready=0
+fast_all_reason=
+fast_changed_paths=()
+init_fast_paths() {
+    [[ $fast_paths_ready -eq 0 ]] || return
+    fast_paths_ready=1
+    local base paths_file path shallow
+    if [[ "${PGWT_CHECK_FAST_ALL:-0}" == 1 ]]; then
+        fast_all_reason='PGWT_CHECK_FAST_ALL=1'
+    elif ! shallow=$(git rev-parse --is-shallow-repository 2>/dev/null); then
+        fast_all_reason='cannot inspect repository history'
+    elif [[ $shallow == true ]]; then
+        fast_all_reason='shallow repository; merge base is not reliable'
+    elif ! base=$(git merge-base HEAD origin/master 2>/dev/null) || [[ -z "$base" ]]; then
+        fast_all_reason='cannot compute merge base with origin/master'
+    elif ! paths_file=$(mktemp "${TMPDIR:-/tmp}/pgwt-check-paths.XXXXXX"); then
+        fast_all_reason='cannot create changed-path inventory'
+    else
+        # Compare the base with the working tree (includes committed, staged
+        # and unstaged changes). Disable renames so both paths are covered.
+        # NUL delimiters preserve spaces, newlines and glob metacharacters.
+        if git diff --name-only --no-renames -z "$base" -- > "$paths_file" &&
+           git ls-files --others --exclude-standard -z >> "$paths_file"; then
+            while IFS= read -r -d '' path; do
+                fast_changed_paths+=("$path")
+            done < "$paths_file"
+        else
+            fast_all_reason='cannot enumerate changed or untracked paths'
+        fi
+        rm -f "$paths_file"
+    fi
+    if [[ -n "$fast_all_reason" ]]; then
+        printf 'fast: running every slow step: %s\n' "$fast_all_reason"
+    fi
+}
+slow_step() {
+    local name=$1 patterns=$2 path pattern selected=0
+    local -a globs
+    shift 2
+    if [[ $FAST -eq 0 ]]; then
+        selected=1
+    else
+        init_fast_paths
+        if [[ -n "$fast_all_reason" ]]; then
+            selected=1
+        else
+            # Split the declared, space-separated glob list without pathname
+            # expansion; matching below treats the changed path literally.
+            read -r -a globs <<< "$patterns"
+            for path in "${fast_changed_paths[@]}"; do
+                for pattern in "${globs[@]}"; do
+                    if [[ "$path" == $pattern ]]; then
+                        selected=1
+                        break 2
+                    fi
+                done
+            done
+        fi
+    fi
+    if [[ $selected -eq 0 ]]; then
+        # A skipped suite has no timing row and must not inflate its neighbour.
+        finish_step
+        step_name=
+        slow_skipped=$((slow_skipped + 1))
+        printf 'SKIP (fast): %s\n' "$name"
+        return 0
+    fi
+    slow_ran=$((slow_ran + 1))
+    step "$name"
+    "$@"
+}
+print_fast_summary() {
+    if [[ $FAST -eq 1 ]]; then
+        printf '\nFast slow steps: %s ran, %s skipped\n' "$slow_ran" "$slow_skipped"
+        echo "note: CI's full-check runs everything."
+    fi
+}
+# END fast slow-step selector
+
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
 need node; need go; need python3
 
 # Sampled attribution: deterministic syscall budget and caught regressions.
-step "sampled attribution I/O budget and mutants"
+# Keep suite command spelling intact for the existing literal wiring guards.
+check_slow_1() {
 run python3 -B tests/test_sampled_attr_io.py
 # The live status-batch test's pure parts (perf summary parser, bounds) on outputs
 # recorded on the Ubuntu and EL8 gate images; the recorded master must assess RED.
@@ -83,11 +166,15 @@ else
     echo "FAIL: cannot create sampler dispatch test directory"
     fail=1
 fi
+}
+slow_step "sampled attribution I/O budget and mutants" 'src/* demos/replay-compat.h tests/*sampl* tests/fixtures/* tests/run_all.sh tests/test_backend* tests/test_init_hint* tests/test_counter* tests/*lifecycle* tests/test_spawn* tests/demo_rehearsal* tests/live_daemon_lib.sh tests/testutil.py' check_slow_1
 
-step "watchpoint attach exit races (portable backend C harness)"
+check_slow_2() {
 run python3 -B tests/test_backend_attach_race.py --mutants
 run python3 -B tests/test_backend_exit_accounting.py
 run python3 -B tests/test_init_hint_known_class.py
+}
+slow_step "watchpoint attach exit races (portable backend C harness)" 'src/* demos/replay-compat.h tests/test_backend* tests/test_init_hint* tests/demo_rehearsal* tests/live_daemon_lib.sh tests/testutil.sh tests/*attach* tests/sampler_batch_perf.py tests/test_sampler_batch_live.py tests/test_preseed_startup_live.py tests/testutil.py tests/mock_server.py tests/server_harness.py tests/test_cmdline.c' check_slow_2
 
 # Portable C core: this script builds/runs the contract C test in a temporary
 # directory. The differential compares against the independent reference;
@@ -103,8 +190,8 @@ run python3 -B tests/test_counter_vector_portable.py
 run python3 -B tests/test_counter_failures.py
 run python3 -B tests/counter_vector_mutants.py --guard-sweep
 
-step "core wait_time, merge and evidence contract status and mutation checks"
 core_cflags="${CFLAGS:-} -fsanitize=address,undefined -fno-omit-frame-pointer"
+check_slow_3() {
 # core-status runs the portable merge/evidence contract, differential, codec,
 # redelivery, report, merge index and merge queue suites (including their
 # mutants) once in this run.
@@ -130,15 +217,21 @@ run python3 -B tests/test_ledger.py
 # core-status ran the merge index and queue proofs; this keeps the queue
 # suite's production/instrumented symbol check and informational timings.
 run env CFLAGS="$core_cflags" python3 -B tests/test_core_merge_queue.py
+}
+slow_step "core wait_time, merge and evidence contract status and mutation checks" 'src/core/* contracts/* scripts/core* scripts/tree-hash.sh scripts/ledger.py ledger/* tests/core* tests/test_core* tests/evidence* tests/test_evidence* tests/*oracle* tests/fixtures/* tests/test_ledger.py' check_slow_3
 
-step "stateless evidence-v1 pilot route, browser, uint64 and mutations"
+check_slow_4() {
 run python3 -B tests/check_server_test_links.py --self-test
 run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py --require-browser
 run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py --mutants
 run bash tests/test_consumer_boundary.sh --self-test
+}
+slow_step "stateless evidence-v1 pilot route, browser, uint64 and mutations" 'src/* contracts/* demos/replay-compat.h tests/test_pilot_route.py tests/check_server_test_links.py tests/server_build.py Makefile tests/pilot* tests/evidence* tests/fixtures/* tests/*.trace* tests/test_consumer_boundary.sh tests/Makefile web/static/* tests/web_unit/pilot-evidence.test.mjs tests/mock_server.py tests/server_harness.py tests/test_sample_weight_controls.py tests/*.c tests/*.h' check_slow_4
 
-step "C11 synthetic merge adapter: wire goldens, contract replay and rule mutants (Refs #871)"
+check_slow_5() {
 run env CFLAGS="$core_cflags" bash tests/core_merge_adapter_mutants.sh
+}
+slow_step "C11 synthetic merge adapter: wire goldens, contract replay and rule mutants (Refs #871)" 'src/core/* contracts/merge-v1/* tests/core_merge_adapter_mutants.sh tests/merge_adapter_goldens.h tests/test_core_merge_adapter.c tests/test_core_merge_contract.c' check_slow_5
 
 step "U1b transport wire golden bytes and registered A1/B seams (host C)"
 if transport_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-transport-check.XXXXXX"); then
@@ -185,22 +278,32 @@ fi
 # an environmental reason, and a gate that is red for the wrong reason gets
 # switched off. This Mac and CI are the places it is both meaningful and able
 # to run.
-step "bash: .gitignore covers every tests/ build product (tree-hash integrity)"
+check_slow_6() {
 run bash tests/test_gitignore_build_products.sh
+}
+slow_step "bash: .gitignore covers every tests/ build product (tree-hash integrity)" '.gitignore tests/Makefile tests/* scripts/tree-hash.sh' check_slow_6
 
-step "bash: push-guard denylist and executable pre-push proofs (#719)"
+check_slow_7() {
 run bash tests/test_push_guard_denylist.sh
 run python3 -B tests/test_check_stamp.py
+}
+slow_step "bash: push-guard denylist and executable pre-push proofs (#719)" 'tests/test_push_guard_denylist.sh tests/test_pre_push_hook.sh tests/test_check_stamp.py scripts/hooks/push-guard.sh scripts/git-hooks/pre-push scripts/tree-hash.sh scripts/check.sh .claude/settings.json .gitignore' check_slow_7
 
-step "bash: commit-msg attribution hook fails open and derives Generated-with (#771)"
+check_slow_8() {
 run bash tests/test_commit_msg_hook.sh
+}
+slow_step "bash: commit-msg attribution hook fails open and derives Generated-with (#771)" 'tests/test_commit_msg_hook.sh scripts/git-hooks/commit-msg scripts/board-author.py' check_slow_8
 
-step "report audit isolation and contradiction controls (#761)"
+check_slow_9() {
 run python3 scripts/lead/audit-report-selftest.py
+}
+slow_step "report audit isolation and contradiction controls (#761)" 'scripts/lead/*' check_slow_9
 
 # Brief and report checks are local, hermetic and require no browser or box.
-step "bash: brief sections, budget and live scope evidence"
+check_slow_10() {
 run bash tests/test_check_brief.sh
+}
+slow_step "bash: brief sections, budget and live scope evidence" 'tests/test_check_brief.sh scripts/lead/* scripts/tree-hash.sh' check_slow_10
 
 step "agent agreement matches registered hooks and role invocations"
 run scripts/check-agent-agreement.sh
@@ -208,17 +311,23 @@ run scripts/check-agent-agreement.sh
 step "python: RULE 0 absence vocabulary and evidence scopes"
 run python3 tests/test_absence_vocab.py
 
-step "POSIX shell: Codex task wrapper self-test"
+check_slow_11() {
 run scripts/lead/codex-task-selftest.sh
+}
+slow_step "POSIX shell: Codex task wrapper self-test" 'scripts/lead/* scripts/board-author.py' check_slow_11
 
-step "deterministic lead tick offline self-test"
+check_slow_12() {
 run scripts/lead/tick-selftest.sh
+}
+slow_step "deterministic lead tick offline self-test" 'scripts/lead/*' check_slow_12
 
 step "board-labels trailer authorship regression tests (#771)"
 run python3 tests/test_board_author.py
 
-step "bash: pr-ready ordering and refusal self-test (#701)"
+check_slow_13() {
 run bash tests/test_pr_ready.sh
+}
+slow_step "bash: pr-ready ordering and refusal self-test (#701)" 'tests/test_pr_ready.sh scripts/pr-ready.sh scripts/tree-hash.sh' check_slow_13
 
 step "generated tag board offline self-test (#850)"
 run scripts/lead/board-selftest.sh
@@ -226,14 +335,20 @@ run scripts/lead/board-selftest.sh
 step "PR state drift sweep and disposition self-test (#717)"
 run python3 scripts/lead/selftest-pr-state.py
 
-step "box build provenance offline self-test (#861)"
+check_slow_14() {
 run bash tests/test_box_check_build_provenance.sh
+}
+slow_step "box build provenance offline self-test (#861)" 'tests/test_box_check_build_provenance.sh scripts/box* scripts/tree-hash.sh scripts/check.sh scripts/lead/selftest.sh Makefile tests/Makefile tests/hetzner* tests/provision-runner.sh' check_slow_14
 
-step "detached box-check transport recovery offline self-test"
+check_slow_15() {
 run bash tests/test_box_check_detached.sh
+}
+slow_step "detached box-check transport recovery offline self-test" 'tests/test_box_check_detached.sh scripts/box* scripts/tree-hash.sh tests/hetzner* tests/run_all.sh' check_slow_15
 
-step "lead hooks and box evidence offline self-test (#861)"
+check_slow_16() {
 run bash scripts/lead/selftest.sh
+}
+slow_step "lead hooks and box evidence offline self-test (#861)" 'scripts/lead/* scripts/tree-hash.sh' check_slow_16
 
 # The summary format version is the one number in the docs with an
 # OPERATIONAL consequence: DEMO_RUNBOOK.md tells the operator which trace
@@ -298,8 +413,10 @@ run bash tests/test_check_test_registration.sh
 # missing section without built binaries or a Linux box. Discover every
 # sectioned C suite automatically; refuse unparseable inputs, and exercise
 # the guard's own blind spots here so it cannot silently approve nothing.
-step "section-registration guard self-test (bypass suite, #686)"
+check_slow_17() {
 run tests/test_check_section_registration.sh
+}
+slow_step "section-registration guard self-test (bypass suite, #686)" 'tests/test_check_section_registration.sh scripts/check-section-registration*' check_slow_17
 
 step "section-registration guard (every sectioned C suite, #686)"
 run scripts/check-section-registration.sh
@@ -340,6 +457,9 @@ run python3 tests/test_frame_verify_probes.py
 step "runner-image pin guard (this tree)"
 run bash scripts/check-runner-pin.sh
 
+step "fast slow-step coverage guard and mutants"
+run python3 -B scripts/test-check-fast.py
+
 step "CI full-check job guard and mutants"
 run python3 -B scripts/check-ci-full-check.py
 run python3 -B scripts/test-ci-full-check.py
@@ -367,8 +487,10 @@ run python3 tests/test_multi_window_lib.py
 step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
 
-step "python: tag checklist exact-SHA evidence and blocker refusals"
+check_slow_18() {
 run python3 tests/test_tag_checklist.py
+}
+slow_step "python: tag checklist exact-SHA evidence and blocker refusals" 'tests/test_tag_checklist.py scripts/tag-checklist.py tests/tag_checklist.tsv tests/fixtures/tag_checklist/* scripts/check.sh .github/workflows/* tests/unit_tests.list tests/run_all.sh tests/*.py tests/*.sh tests/web_unit/* src/server.c' check_slow_18
 
 step "tag checklist: real inventory retains every historical ID"
 run python3 scripts/tag-checklist.py "$(git rev-parse HEAD)" --check-history
@@ -426,8 +548,10 @@ run python3 tests/test_ui_live_smoke_failure.py --snapshot-js
 # could be complete and still produce nothing during a rehearsal. Asserts the
 # whole thread (CLI flag -> _run_passes -> every run_tab call) with run_tab
 # replaced by a recorder: no browser, no network, milliseconds.
-step "python: harness ownership, box argv, teardown and Overview REDs (#544/#546)"
+check_slow_19() {
 run python3 tests/test_harness_ownership.py
+}
+slow_step "python: harness ownership, box argv, teardown and Overview REDs (#544/#546)" 'tests/test_harness_ownership.py tests/test_rehearsal_workload_lifetime.py tests/*.sh tests/bridge_owner.py tests/live_loop_workload.py tests/*rehearsal* tests/ui_live_smoke* tests/demo_workload* tests/testutil.py scripts/demo-rehearsal* web/static/* tests/schedstat_lib.py tests/schedstat_probe.py tests/server_harness.py tests/test_capture_smoke.py tests/testutil.py' check_slow_19
 
 step "python: rehearsal --diag-data wiring (#384)"
 run python3 tests/test_demo_rehearsal_diag.py
