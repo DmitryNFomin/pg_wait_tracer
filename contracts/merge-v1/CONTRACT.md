@@ -149,7 +149,47 @@ Each separately delivered LOSS/FAULT report causes a VOID even if the epoch is a
 A counter observation reports a newly observed change once; rereading the same vector does not generate another report. This observation checkpoint does not replace the epoch’s valid baseline.
 While suspended, suppress trusted DATA/TEXT callbacks and FRONTIERs; continue fault reporting.
 
-Any subsequent attachment interruption or destructive reseed is a counted coverage fault, delivered as `FAULT(unknown_evidence,d,C)` before further trusted release; it requires suspension and explicit recovery. Missing FORK, failed identity/provenance checks and unproved attachment ordering remain unknown evidence; reliable loss counters, including INIT loss, still cause VOID independently. Cookies never cancel loss, revive epochs or establish boundaries.
+Any subsequent attachment interruption or destructive reseed remains a counted coverage fault, delivered as FAULT(unknown_evidence,d,C) before further trusted release; it requires suspension and explicit recovery. Missing FORK, identity, provenance or attachment ordering remains unknown evidence except for the complete A2 proof below. Reliable loss counters, including actual INIT loss, independently cause VOID. Cookies never cancel loss, revive epochs or establish boundaries.
+
+A2 is the following narrow exception to the failed-direct-attachment refusal in §2. It admits a completely reconciled, never-attached lifetime only when:
+(a) an observed FORK produced during this capture and a kernel EXIT bind the same (capture,pid,g), with a nonzero, non-reused lifetime cookie and boot_start <= fork_ns <= exit_ns;
+(b) EXIT has DISPOSITION and lacks WP_EVER_LIVE, and complete lifetime-bound userspace history contains no successful wait-watchpoint enable or attachment interruption;
+(c) (BOOTSTRAP_FIRED,INIT_STORED) is (0,0) with init_ts=0, or (1,1) with fork_ns <= init_ts <= exit_ns;
+(d) retained disposition, attachment history and delivered records agree, and every required identity proof, state observation and loss-accounting obligation is complete;
+(e) every unsuccessful attachment operation is expressly admissible under the closed table below; no other required read, write or publication failed or is unknown.
+
+A delivered INIT must agree exactly with the stored INIT timestamp. Stored INIT carried only by EXIT is sufficient when the producer protocol required no separate INIT publication. Never synthesize an INIT from that stored timestamp.
+Neither lack of attach opportunity nor a maximum lifetime is an admission criterion. This rule applies to every postmaster child type on every supported OS.
+boot_start is the recorded start of this capture's writer boot, in the event clock. Receiving the FORK after the first ring drain or after EXIT does not alter its birth timestamp or disqualify an otherwise complete proof.
+
+Admissible non-attachment evidence is no attach attempt, cancellation after consuming the matching kernel EXIT, or an unsuccessful operation from this closed table:
+- target /proc open: ENOENT, with independently retained lifetime/task binding;
+- perf_event_open(disabled): ESRCH, with retained lifetime/task binding;
+- state-map lookup: ENOENT only when the matching retained EXIT supplies the missing terminal state;
+- SET_BPF, ENABLE, state-map update and every other operation: no admissible failure errno.
+
+Every admitted unsuccessful operation additionally requires the matching-cookie kernel EXIT, no successful enable, and no unsuccessful operation outside this table.
+Capture operation, target identity, result and original errno before logging or cleanup. PID-only observations, a later negative liveness check, or errno alone are insufficient.
+The adapter must qualify each permitted operation/error mapping on the supported kernels. An unqualified mapping supplies unknown evidence. Do not require failure_time >= exit_ns.
+An admissible ENOENT lookup whose terminal state is supplied by EXIT is not an unknown terminal-state read; all other required read failures retain their existing treatment.
+
+Pending EXIT evidence holds the affected release batch and its frontier. Terminal reconciliation without the matching kernel EXIT, contradictory evidence, or any non-admissible attachment failure reports FAULT(unknown_evidence,d,C).
+In particular, fired-but-not-stored, absent disposition, successful-enable/clear-EVER_LIVE races and observation-only death receive no exception.
+
+For a qualifying lifetime, omit only the synthetic INIT-loss increment whose sole cause would be never attaching. Never subtract, mask or forgive an actual counter change.
+The completed A2 proof admits FORK/EXIT without an attachment proof or separately delivered INIT. It does not admit TRANS/MARKER numerical evidence. A TRANS/MARKER lacking an independent valid observation proof remains unknown evidence; an A2 declaration cannot repair it.
+
+After ordinary complete-batch validation, release FORK and any genuine INIT normally, then UNTRACED(pid,g,fork_ns,exit_ns,receive_ns) immediately before the matching EXIT, exactly once.
+The declaration's ordering timestamp is exit_ns. receive_ns is the original userspace dequeue time of that lifetime's FORK, in the same monotonic clock; require receive_ns >= fork_ns, but do not require receive_ns <= exit_ns.
+UNTRACED declares the whole half-open interval [fork_ns,exit_ns) unobserved. It supplies no wait, CPU time, completed-wait count, zero-work assertion or coverage lower bound.
+Publication failure causes writer_push_fail VOID. Successfully published records preceding that failure remain observable only in the uncertified suffix; no frontier certifies a partially published release.
+
+For a new lifetime without another valid creation/attachment proof, hold FORK and its release batch and frontier until the qualifying EXIT is eligible for release.
+Eligibility remains t < W, where W is the minimum qualified source boundary; merely receiving EXIT is insufficient. After successful release and unchanged counters, normal FRONTIER(W-1 ns) advancement resumes.
+Existing pre-enable marker restrictions, actual loss paths, batch validation and counter checks remain unchanged. A2 presentation failure alone does not suspend the merge epoch.
+Presentation follows ../coverage-a2-v1/CONTRACT.md.
+
+A FORK+INIT-created lifetime that meets the A2 proof is an A2 lifetime and receives UNTRACED; the DECISION 25 creation route does not displace it. (Clarification added by the lead after the A2 oracle round, 2026-11-19: both independent answer sets already gave this answer for M46; no behaviour change.)
 
 REARM is accepted only while the epoch is suspended. Reject REARM in an active epoch without output or any state change, preserving staged DATA/TEXT, sequence state, boundaries and the counter baseline. (DECISION 28, added 2026-11-11 after the P1 review.)
 A rejected REARM returns a distinct `rearm_rejected` status to the caller and is never silent; its counter observation `C` is still processed as `CHECK(d,C)`. (DECISION 28a, lead, 2026-11-11, from Fable's challenge.)

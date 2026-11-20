@@ -357,7 +357,10 @@ int pgwt_replay_file(struct pgwt_event_reader *r,
         int right_open = 0;
         int cand = pgwt_reader_block_candidate(r, bi, 0,
                                                to_mono_ns, &hdr, &right_open);
-        if (cand == 0) continue;
+        /* #947: the candidacy test already answers 0 for a COVERAGE block;
+         * named here too, because this loop is a block-type dispatch site. */
+        if (cand == 0 || (cand > 0 && hdr.block_type == PGWT_BLOCK_COVERAGE))
+            continue;
         /* #586: TRANSITIONS before `from` may contain the command-id
          * markers needed by a left-edge wait. Decode them for seeds only;
          * pgwt_replay_events still applies the original time admission.

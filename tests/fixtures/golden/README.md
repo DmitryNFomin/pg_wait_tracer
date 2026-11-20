@@ -67,3 +67,13 @@ maximum weights. The frozen checksum includes the reader-derived sample
 weights. Legacy rev2/rev3 checksums continue to checksum on-disk columns
 (sample durations remain zero for those checksums), with a separate frozen
 `sample_weights_v3` fixture checking the unified weight API.
+
+## rev6 (#947)
+
+The rev4 input through the v6 writer (`./gen_test_traces -o
+fixtures/golden/rev6/trace -s fixtures/golden/rev6/scenario.json`). v6 is
+the v4 layout plus COVERAGE blocks (type 3); gen_test_traces does not enable
+coverage, so this file holds the same two data blocks and its decoded stream
+checksums to rev4's frozen value. The COVERAGE payload golden bytes live in
+`tests/test_coverage_writer.c`; a coverage-bearing fixture arrives with the
+coverage fixture generator (U2b).

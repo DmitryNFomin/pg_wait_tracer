@@ -37,7 +37,6 @@
 
 #define PGWT_DEBUG_BLOCK_NS (50ULL * 1000ULL * 1000ULL)
 #define PGWT_TEST_EVENT_DELAY_COUNT 1024U
-#define PGWT_EVENT_DRAIN_CALLBACK_BUDGET 64U
 
 /* #416: how many budgeted passes the per-tick drain (drain_event_ring_for_tick
  * below) may take before it gives up on this tick. The cap exists because
@@ -112,7 +111,14 @@ int pgwt_consume_event_ring(struct pgwt_daemon *d, bool bounded)
     if (d->exact_perf)
         return d->transport.consume
             ? d->transport.consume(d, PGWT_WIRE_DEST_E, bounded) : -ENOSYS;
-    return ring_buffer__consume(d->event_rb);
+    int rc = ring_buffer__consume(d->event_rb);
+    bool yielded = rc == -EAGAIN && d->event_drain_callback_limit != 0 &&
+                   d->event_drain_callbacks_current >= d->event_drain_callback_limit;
+    /* libbpf can advance consumer_pos past a rejected callback. Crossing a
+     * fence after such an error cannot certify that prefix for this boot. */
+    if (rc < 0 && !yielded)
+        d->coverage.consume_failed = true;
+    return rc;
 }
 
 static bool consume_event_ring(struct pgwt_daemon *d, const char *op,
@@ -1822,10 +1828,44 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     ev.data.fd = d->signal_fd;
     epoll_ctl(d->epoll_fd, EPOLL_CTL_ADD, d->signal_fd, &ev);
 
+    /* Baseline first: no loss after boot_start may be silently absorbed. */
+    struct pgwt_counter_vector coverage_base = pgwt_daemon_counter_vector(d);
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     d->start_ts = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
     d->running = true;
+
+    /* #947: the boot starts HERE, once the backend scan and the startup
+     * recovery passes have attached what they can, so a BOOT never vouches
+     * for a stretch the capture was not yet watching. One WATERMARK per
+     * second on the master path (not lightweight, not exact_perf). */
+    d->coverage_timer_armed = false;
+    d->coverage_started = false;
+    d->coverage_clean_shutdown = false;
+    if (d->event_writer) {
+        pgwt_coverage_start(d, &coverage_base);
+        if (d->coverage.watermarks) {
+            int cfd = timerfd_create(CLOCK_MONOTONIC,
+                                     TFD_CLOEXEC | TFD_NONBLOCK);
+            struct itimerspec cits = {
+                .it_interval = { .tv_sec = 1 },
+                .it_value    = { .tv_sec = 1 },
+            };
+            struct epoll_event cev = { .events = EPOLLIN, .data.fd = cfd };
+            if (cfd >= 0 && timerfd_settime(cfd, 0, &cits, NULL) == 0 &&
+                epoll_ctl(d->epoll_fd, EPOLL_CTL_ADD, cfd, &cev) == 0) {
+                d->coverage_timer_fd = cfd;
+                d->coverage_timer_armed = true;
+            } else {
+                fprintf(stderr, "WARN: coverage: no 1 s timer (%s); this "
+                        "run writes no coverage watermarks\n",
+                        strerror(errno));
+                if (cfd >= 0)
+                    close(cfd);
+                d->coverage.watermarks = false;
+            }
+        }
+    }
 
     /* Control socket at {trace_dir}/pgwt.sock (D4).
      * Failure is non-fatal (tracing must not depend on the control plane) —
@@ -1950,6 +1990,10 @@ static void dispatch_ready_fd(struct pgwt_daemon *d, int fd,
         started_ns = pgwt_debug_block_begin(d);
         pgwt_handle_timer(d);
         pgwt_debug_block_end(d, "timer_handler", 0, started_ns);
+    } else if (d->coverage_timer_armed && fd == d->coverage_timer_fd) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_coverage_tick(d);
+        pgwt_debug_block_end(d, "coverage_tick", 0, started_ns);
     } else if (d->sample_timer_fd >= 0
                && fd == d->sample_timer_fd) {
         started_ns = pgwt_debug_block_begin(d);
@@ -1985,6 +2029,7 @@ static void dispatch_ready_fd(struct pgwt_daemon *d, int fd,
 int pgwt_daemon_run(struct pgwt_daemon *d)
 {
     struct epoll_event events[8];
+    int result = 0;
     int rb_fd = d->exact_perf ? pgwt_percpu_transport_epoll_fd(d)
                               : ring_buffer__epoll_fd(d->rb);
     int event_rb_fd = d->event_rb ? ring_buffer__epoll_fd(d->event_rb) : -1;
@@ -2041,6 +2086,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
                 continue;
             }
             perror("epoll_wait");
+            result = -1;
             break;
         }
 
@@ -2075,6 +2121,14 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
 
     if (d->attach_timeline) d->attach_timeline->wake_active = false;
 
+    /* Counter baseline BEFORE the final-drain boundary, as on every tick. */
+    d->final_drain_counters = pgwt_daemon_counter_vector(d);
+    {
+        struct timespec fts;
+        clock_gettime(CLOCK_MONOTONIC, &fts);
+        d->final_drain_from_ns = (uint64_t)fts.tv_sec * 1000000000ULL
+                               + (uint64_t)fts.tv_nsec;
+    }
     /* Drain remaining events before cleanup */
     if (!d->exact_perf && d->event_rb) {
         consume_event_ring(d, "event_ring_final_drain", false);
@@ -2087,7 +2141,8 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
 
     if (d->exit_reason != PGWT_EXIT_PG_DEAD)
         fprintf(stderr, "\npg_wait_tracer: shutting down\n");
-    return 0;
+    d->coverage_clean_shutdown = result == 0;
+    return result;
 }
 
 /* PGWT_DEBUG_DUMP_STATE (DEBUG ONLY): dump the final BPF state_map to stderr
@@ -2282,6 +2337,10 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
         d->summary_writer = NULL;
     }
     if (d->event_writer) {
+        /* #947: SEAL on this, the clean-shutdown path, only. A SIGKILL or a
+         * crash never reaches it, and the missing SEAL is what says so. */
+        if (d->coverage_clean_shutdown)
+            pgwt_coverage_shutdown(d);
         pgwt_writer_close(d->event_writer);
         pgwt_writer_destroy(d->event_writer);
         free(d->event_writer);
@@ -2321,6 +2380,10 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
     if (d->epoll_fd >= 0) { close(d->epoll_fd); d->epoll_fd = -1; }
     if (d->timer_fd >= 0) { close(d->timer_fd); d->timer_fd = -1; }
     if (d->sample_timer_fd >= 0) { close(d->sample_timer_fd); d->sample_timer_fd = -1; }
+    if (d->coverage_timer_armed) {
+        close(d->coverage_timer_fd);
+        d->coverage_timer_armed = false;
+    }
     if (d->signal_fd >= 0) { close(d->signal_fd); d->signal_fd = -1; }
     if (d->attach_timeline) {
         pgwt_timeline_summary(stderr, d->attach_timeline);

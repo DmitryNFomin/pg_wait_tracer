@@ -97,9 +97,10 @@ def trace_header_size(path):
     with open(path, "rb") as f:
         prefix = f.read(6)
     version = int.from_bytes(prefix[4:6], "little")
-    if len(prefix) != 6 or version not in (2, 3, 4):
+    # v6 (#947) keeps the v4 header; v5 is the evidence codec's, never here.
+    if len(prefix) != 6 or version not in (2, 3, 4, 6):
         raise AssertionError("invalid trace version in corruption fixture")
-    return 36 if version == 4 else 28
+    return 36 if version >= 4 else 28
 
 
 SCENARIO = {
@@ -424,7 +425,7 @@ def check_transitions_idle_flag(t, srv):
 
 
 def check_transitions_sampled_ms(t, srv):
-    """#808: pin numeric sampled_ms and count on EVERY real transitions node.
+    """#808/#982: pin sampled_ms, count and entered on EVERY real node.
 
     The schema diff is symmetric: if both real and mock omit the field it
     passes. merge_schemas also folds null into a single other type, hiding a
@@ -443,7 +444,7 @@ def check_transitions_sampled_ms(t, srv):
     t.check(len(nodes) > 0,
             "[transitions sampled_ms] real nodes array is non-empty")
     for node in nodes:
-        for field in ("sampled_ms", "count"):
+        for field in ("sampled_ms", "count", "entered"):
             value = node.get(field)
             t.check(isinstance(value, (int, float)) and not isinstance(value, bool),
                     f"[transitions {field}] node "

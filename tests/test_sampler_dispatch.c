@@ -61,6 +61,7 @@ static void arm_sample_timer_jittered(struct pgwt_daemon *d)
 { assert(d == dispatch_daemon); ++rearm_calls; }
 static void handle_signal(struct pgwt_daemon *d) { (void)d; abort(); }
 void pgwt_handle_timer(struct pgwt_daemon *d) { (void)d; abort(); }
+void pgwt_coverage_tick(struct pgwt_daemon *d) { (void)d; abort(); }
 bool pgwt_escalation_is_timer_fd(const struct pgwt_daemon *d, int fd)
 { (void)d; (void)fd; return false; }
 void pgwt_escalation_on_timer(struct pgwt_daemon *d) { (void)d; abort(); }

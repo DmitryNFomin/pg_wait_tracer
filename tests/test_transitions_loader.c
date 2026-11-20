@@ -159,12 +159,25 @@ int main(void)
     cJSON *total = cJSON_GetObjectItem(out, "total");
     REQUIRE(cJSON_IsNumber(total) && total->valuedouble == oracle.total_transitions);
     cJSON *nodes = cJSON_GetObjectItem(out, "nodes");
-    REQUIRE(cJSON_IsArray(nodes) && cJSON_GetArraySize(nodes) == 1);
+    REQUIRE(cJSON_IsArray(nodes) && cJSON_GetArraySize(nodes) == 2);
     cJSON *cpu = cJSON_GetArrayItem(nodes, 0);
     cJSON *ms = cJSON_GetObjectItem(cpu, "total_ms");
     cJSON *id = cJSON_GetObjectItem(cpu, "event_id");
     REQUIRE(cJSON_IsNumber(id) && id->valuedouble == 0);
     REQUIRE(cJSON_IsNumber(ms) && ms->valuedouble == 0.001);
+    /* #982: tagging still removes the non-command CPU record above, while
+     * the counted CPU->ClientRead entry retains its target without dwell. */
+    cJSON *entered_only = cJSON_GetArrayItem(nodes, 1);
+    cJSON *name = cJSON_GetObjectItem(entered_only, "name");
+    REQUIRE(cJSON_IsString(name) && !strcmp(name->valuestring, "Client:ClientRead"));
+    const char *zero_fields[] = { "total_ms", "count", "sampled_ms" };
+    for (int i = 0; i < 3; i++) {
+        cJSON *value = cJSON_GetObjectItem(entered_only, zero_fields[i]);
+        REQUIRE(cJSON_IsNumber(value) && value->valuedouble == 0);
+    }
+    cJSON *entered = cJSON_GetObjectItem(entered_only, "entered");
+    REQUIRE(cJSON_IsNumber(entered) && entered->valuedouble == expected_link);
+
     REQUIRE(!bagg_window_eligible(srv, &req.filter, req.from_ns, req.to_ns));
 
     cJSON_Delete(out);
