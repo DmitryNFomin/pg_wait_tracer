@@ -63,7 +63,7 @@ typedef enum {
     PGWT_MERGE_LOSS, PGWT_MERGE_FAULT, PGWT_MERGE_CHECK,
     PGWT_MERGE_REARM, PGWT_MERGE_WRITER_REJECTED,
     PGWT_MERGE_ADMIT_DISCOVERY, PGWT_MERGE_CONFIRM_DISCOVERY,
-    PGWT_MERGE_TERMINAL_DISCOVERY
+    PGWT_MERGE_TERMINAL_DISCOVERY, PGWT_MERGE_ABANDON_DISCOVERY
 } pgwt_merge_input_kind;
 typedef struct {
     pgwt_merge_input_kind kind;
@@ -111,6 +111,9 @@ typedef struct {
     pgwt_merge_counters last_observed;
     pgwt_merge_sink sink;
     void *sink_context;
+    /* Validated Decision 45 consumption, never a publication. Non-fallible
+     * bookkeeping callback: releases the adapter arrival token exactly once. */
+    void (*discovery_discard)(void *, const pgwt_merge_record *, bool text);
 } pgwt_merge_config;
 typedef struct pgwt_merge pgwt_merge;
 typedef struct {
@@ -118,6 +121,7 @@ typedef struct {
     uint64_t epoch, last_invalid_epoch, diagnostic_cutoff;
     bool epoch_invalid, has_frontier, void_failed, qualified;
     uint64_t frontier, faults[PGWT_MERGE_REASON_COUNT];
+    uint64_t discovery_abandoned_records; /* cumulative, separate from loss C */
 } pgwt_merge_report;
 typedef struct {
     bool has_frontier, invalid;

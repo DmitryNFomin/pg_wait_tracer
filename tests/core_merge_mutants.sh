@@ -105,21 +105,11 @@ guard_mutations = [
     ('M19', [('if (in->record.t <= m->frontiers[i].frontier) {',
               'if (i + 1 == m->frontier_count && in->record.t <= m->frontiers[i].frontier) {')],
      'older_epochs', 'seal_violation VOID invalidates both epochs'),
-    ('M20', [('    if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);\n'
-              '    if (!same_counters(obs.counters, m->baseline))\n'
-              '        return fault(m, counter_fault(obs.counters, m->observed), obs);\n'
-              '    /* Fixed', '    /* Fixed')],
+    ('M20', [('    /* Release batch counter checkpoint. */\n    if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);\n    if (!same_counters(obs.counters, m->baseline))\n        return fault(m, counter_fault(obs.counters, m->observed), obs);', '    /* Release batch counter checkpoint. */')],
      'counter_before_batch', 'counter fault VOID stops publication at its checkpoint'),
-    ('M21', [('        if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);\n'
-              '        if (!same_counters(obs.counters, m->baseline))\n'
-              '            return fault(m, counter_fault(obs.counters, m->observed), obs);\n'
-              '        if (!v->text)', '        if (!v->text)')],
+    ('M21', [('        /* Published DATA counter checkpoint. */\n        if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);\n        if (!same_counters(obs.counters, m->baseline))\n            return fault(m, counter_fault(obs.counters, m->observed), obs);', '        /* Published DATA counter checkpoint. */')],
      'counter_after_data', 'counter fault VOID stops publication at its checkpoint'),
-    ('M22', [('        if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);\n'
-              '        if (!same_counters(obs.counters, m->baseline))\n'
-              '            return fault(m, counter_fault(obs.counters, m->observed), obs);\n'
-              '    }\n    return m->report.status;\n}',
-              '    }\n    return m->report.status;\n}')],
+    ('M22', [('        /* Published frontier counter checkpoint. */\n        if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);\n        if (!same_counters(obs.counters, m->baseline))\n            return fault(m, counter_fault(obs.counters, m->observed), obs);', '        /* Published frontier counter checkpoint. */')],
      'counter_after_frontier', 'counter fault VOID stops publication at its checkpoint'),
     ('M23', [('if (r->q < a->next_q) return fault(m, PGWT_MERGE_SEQUENCE_REUSE, obs);', '')],
      'sequence_reuse', 'sequence_reuse VOID requires exit before DATA'),
@@ -170,6 +160,7 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
     work = Path(tmp)
     (work / "src/core").mkdir(parents=True)
     (work / "tests").mkdir()
+    shutil.copy2(repo / "src/core/pgwt_discovery.h", work / "src/core/pgwt_discovery.h")
     shutil.copy2(repo / "src/core/pgwt_merge.h", work / "src/core/pgwt_merge.h")
     shutil.copy2(repo / "src/core/pgwt_diagnostics.h", work / "src/core/pgwt_diagnostics.h")
     def build_and_run(source, test_source=original_test, guard=None, baseline=False, target=None):

@@ -243,11 +243,12 @@ ma_result ma_map(const ma *a, const ma_envelope *e, const ma_table *t,
         (unsigned)e->kind > MA_DISCOVERY_CONTROL || (unsigned)e->origin > MA_ADMIN)
         return faulted(r, PGWT_MERGE_MALFORMED_ENVELOPE);
     if (e->kind == MA_DISCOVERY_CONTROL) {
-        if (e->size || (unsigned)e->discovery.kind > PGWT_DISC_TERMINAL)
+        if (e->size || (unsigned)e->discovery.kind > PGWT_DISC_ABANDON)
             return faulted(r, PGWT_MERGE_MALFORMED_ENVELOPE);
         r.input[0].kind = e->discovery.kind == PGWT_DISC_ADMIT ? PGWT_MERGE_ADMIT_DISCOVERY :
             e->discovery.kind == PGWT_DISC_CONFIRM ? PGWT_MERGE_CONFIRM_DISCOVERY :
-            PGWT_MERGE_TERMINAL_DISCOVERY;
+            e->discovery.kind == PGWT_DISC_TERMINAL ? PGWT_MERGE_TERMINAL_DISCOVERY :
+            PGWT_MERGE_ABANDON_DISCOVERY;
         r.input[0].discovery = e->discovery;
         return r;
     }
@@ -303,6 +304,14 @@ ma_result ma_map(const ma *a, const ma_envelope *e, const ma_table *t,
                                            &dep, &record.dependency_id, &ok);
         if (!ok) return faulted(r, reason);
         if (dep == PGWT_MERGE_LOST) return faulted(r, PGWT_MERGE_DEPENDENCY_LOST);
+        if (record.discovery.exclusive_text) {
+            record.pid = le(e->bytes + 4, 4);
+            record.g = e->cookie_present ? e->cookie : 0;
+            const ma_lifetime *owner = lifetime(t, record.pid, record.g);
+            if (!owner || !owner->identity_bound || record.g < PGWT_DISCOVERY_COOKIE_MIN)
+                return faulted(r, PGWT_MERGE_UNKNOWN_EVIDENCE);
+            record.identity_known = true;
+        }
         in->kind = PGWT_MERGE_TEXT;
         in->record = record;
         return r;

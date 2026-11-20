@@ -29,7 +29,10 @@ enum pgwt_discovery_fact {
     PGWT_DISC_FRESH_COHERENT_SEED   = UINT64_C(1) << 16,
     PGWT_DISC_RECONCILED           = UINT64_C(1) << 17,
     PGWT_DISC_COUNTER_NO_WRAP      = UINT64_C(1) << 18,
-    PGWT_DISC_REQUIRED_READS       = UINT64_C(1) << 19
+    PGWT_DISC_REQUIRED_READS       = UINT64_C(1) << 19,
+    /* Capture-owned facts, resolved from retained inventory and gap state. */
+    PGWT_DISC_INVENTORIED          = UINT64_C(1) << 20,
+    PGWT_DISC_STARTUP_OPEN         = UINT64_C(1) << 21
 };
 #define PGWT_DISC_ADMISSION_FACTS ((UINT64_C(1) << 12) - 1)
 #define PGWT_DISC_QUIET_FACTS ((((UINT64_C(1) << 20) - 1) & \
@@ -56,7 +59,7 @@ typedef struct {
     bool claims_completed_coherence;
 } pgwt_discovery_witness;
 typedef enum {
-    PGWT_DISC_ADMIT, PGWT_DISC_CONFIRM, PGWT_DISC_TERMINAL
+    PGWT_DISC_ADMIT, PGWT_DISC_CONFIRM, PGWT_DISC_TERMINAL, PGWT_DISC_ABANDON
 } pgwt_discovery_control_kind;
 typedef struct {
     pgwt_discovery_control_kind kind;
@@ -71,9 +74,14 @@ typedef struct {
 typedef struct {
     uint64_t attachment_generation;
     bool membership_proved, marker, baselines_refreshed;
+    /* Retained producer attribution: metadata belongs only to (pid,cookie).
+     * Shared metadata never sets this flag. */
+    bool exclusive_text;
 } pgwt_discovery_origin;
 typedef struct {
-    bool admitted, confirmed, has_lower_bound, terminal_released;
+    bool admitted, confirmed, has_lower_bound, terminal_released, abandoned;
+    bool has_uncertified;
+    uint64_t uncertified_through; /* greatest validated consumed numerical stamp */
     uint64_t attachment_generation, lower_bound, terminal_time;
     uint64_t source, position;
     pgwt_discovery_witness baseline;

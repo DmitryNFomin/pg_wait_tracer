@@ -477,7 +477,7 @@ static double cost(size_t retained)
      * or a large initial-proof validation to the measured feed cost. */
     for (size_t i = 0; i < retained; ++i) {
         in.record.pid = i;
-        in.record.g = i ^ UINT64_MAX;
+        in.record.g = i + 1;
         in.record.rank = PGWT_MERGE_FORK;
         in.record.fork_seed_proved = true;
         ++in.record.t;
@@ -503,7 +503,7 @@ static double cost(size_t retained)
     for (size_t i = 0; i < iterations; ++i) {
         /* Walk the entire retained table in a deterministic permuted order. */
         in.record.pid = (retained - 1 + i * UINT64_C(104729)) % retained;
-        in.record.g = in.record.pid ^ UINT64_MAX;
+        in.record.g = in.record.pid + 1;
         ++in.record.t;
         ++in.record.o;
 #ifdef PGWT_MERGE_TEST_WORK

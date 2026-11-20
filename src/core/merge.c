@@ -503,6 +503,18 @@ static bool final_discovery_record(const struct generation_state *a,
         r->t >= a->discovery.baseline.e;
 }
 
+static bool discovery_record_consistent(const struct generation_state *a,
+                                         const pgwt_merge_record *r)
+{
+    if (a->discovery.abandoned && a->terminal_proved && r->t > a->terminal_at)
+        return false;
+    if (r->rank != PGWT_MERGE_TRANS || !a->discovery.admitted) return true;
+    bool quiet = a->quiet_pending || a->discovery.confirmed;
+    if (!quiet && !a->discovery.has_lower_bound) return true;
+    uint64_t base = quiet ? a->discovery.baseline.t : a->discovery.lower_bound;
+    return final_discovery_record(a, r) || r->t <= base;
+}
+
 static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input *in)
 {
     const pgwt_discovery_attempt *d = &in->discovery;
@@ -518,6 +530,18 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
         (a && (a->creation || a->fork_seed_admitted ||
                (a->proof.identity_proved && !a->discovery.admitted && !a->terminal_proved))))
         return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+    if (in->kind == PGWT_MERGE_ABANDON_DISCOVERY) {
+        /* Capture supplies these facts from retained census/binding history,
+         * never from a current numeric-PID lookup. Duplicates outlive closure. */
+        if (!(a && a->discovery.abandoned) &&
+            (!pgwt_discovery_has(d->proof, PGWT_DISC_INVENTORIED |
+                PGWT_DISC_STARTUP_OPEN | PGWT_DISC_IDENTITY_VISIBLE) ||
+             (a && a->discovery.admitted)))
+            return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+    } else if (a && a->discovery.abandoned &&
+               in->kind != PGWT_MERGE_TERMINAL_DISCOVERY) {
+        return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+    }
     if (!a) a = remember_generation(m, &key);
     if (!a) return allocation_fault(m, PGWT_POOL_CORE_IDENTITY, obs);
     if (in->kind == PGWT_MERGE_ADMIT_DISCOVERY &&
@@ -526,6 +550,12 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
     if (in->kind == PGWT_MERGE_CONFIRM_DISCOVERY &&
         !quiet_witness_valid(&d->witness) && d->witness.claims_completed_coherence)
         return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+    if (in->kind == PGWT_MERGE_ABANDON_DISCOVERY) {
+        /* Disposition survives suspension too, but never recovers release. */
+        a->discovery.abandoned = true;
+        m->held_cached = false;
+        return m->report.status;
+    }
     /* Controls do not recover a suspended epoch or replace its evidence. */
     if (m->report.status != PGWT_MERGE_OK) return m->report.status;
     m->held_cached = false;
@@ -535,6 +565,21 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
                 return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
             a->terminal_proved = true;
             a->terminal_at = d->terminal_time;
+            if (a->discovery.has_uncertified &&
+                a->discovery.uncertified_through > a->terminal_at)
+                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+            for (size_t slot = m->first; slot != SIZE_MAX; slot = m->queue_nodes[slot].next) {
+                const struct staged *v = &m->queue[slot];
+                if (!v->text && v->record.pid == d->pid && v->record.g == d->cookie &&
+                    v->record.t > a->terminal_at)
+                    return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+            }
+            if (a->exited) {
+                if (a->exit_record.t != a->terminal_at)
+                    return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+                a->discovery.terminal_released = true;
+                a->discovery.terminal_time = a->terminal_at;
+            }
         }
         return m->report.status;
     }
@@ -571,6 +616,17 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
     if (a->discovery.has_lower_bound) return m->report.status; /* exactly one route */
     a->discovery.attachment_generation = d->attachment_generation;
     a->discovery.baseline = *w;
+    /* Reconcile already staged earlier attempts, including a suffix which
+     * completeness has not yet made eligible. A later arrival uses the same
+     * check before staging; no earlier attempt may escape the persisted gap. */
+    for (size_t slot = m->first; slot != SIZE_MAX; slot = m->queue_nodes[slot].next) {
+        const struct staged *v = &m->queue[slot];
+        const pgwt_merge_record *r = &v->record;
+        if (!v->text && r->rank == PGWT_MERGE_TRANS && r->pid == d->pid && r->g == d->cookie &&
+            !(r->discovery.membership_proved && r->discovery.attachment_generation == d->attachment_generation &&
+              r->t >= w->e) && r->t > w->t)
+            return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+    }
     if (!a->quiet_pending) {
         a->quiet_next = m->quiet_head;
         m->quiet_head = (size_t)(a - m->attachments) + 1;
@@ -591,6 +647,7 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
     /* contract §3 W=min; zero/unqualified cutoffs cannot certify release. */
     m->report.diagnostic_cutoff = W;
     if (W == 0 || !m->report.qualified) return m->report.status;
+    /* Release batch counter checkpoint. */
     if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
     if (!same_counters(obs.counters, m->baseline))
         return fault(m, counter_fault(obs.counters, m->observed), obs);
@@ -634,20 +691,23 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
     }
     size_t end = eligible;
     eligible = eligible_count;
-    bool held = m->waiting_count != 0, discovery_held = false;
+    bool held = m->waiting_count != 0, discovery_held = false, reconcile_discovery = false;
     const pgwt_merge_record *previous_transition = previous_slot == SIZE_MAX ?
         NULL : &m->queue[previous_slot].record;
     for (size_t i = begin; i != end; i = m->queue_nodes[i].next) {
         MERGE_WORK(QVISIT, 1);
         const struct staged *v = &m->queue[i];
-        if (v->text) continue;
+        if (v->text && !v->record.discovery.exclusive_text) continue;
         const pgwt_merge_record *r = &v->record;
         struct generation_state *generation = plan_generation(m, r);
         if (!r->identity_known || !generation)
             return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
         pgwt_merge_attachment *a = &generation->proof;
-        if (r->g >= PGWT_DISCOVERY_COOKIE_MIN && !a->identity_proved) {
-            if (r->rank == PGWT_MERGE_FORK || r->rank == PGWT_MERGE_INIT)
+        reconcile_discovery = reconcile_discovery || generation->discovery.admitted ||
+            generation->discovery.abandoned;
+        if (r->g >= PGWT_DISCOVERY_COOKIE_MIN && !a->identity_proved &&
+            !generation->discovery.abandoned) {
+            if (!v->text && (r->rank == PGWT_MERGE_FORK || r->rank == PGWT_MERGE_INIT))
                 return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
             if (!(r->rank == PGWT_MERGE_EXIT && generation->terminal_proved &&
                   r->t == generation->terminal_at)) {
@@ -655,9 +715,17 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
                 continue; /* no DATA or frontier until matching control */
             }
         }
+        if (v->text) continue; /* exclusive ownership validated; untimed */
+        if (!discovery_record_consistent(generation, r))
+            return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+        if (generation->discovery.abandoned) {
+            if (r->rank != PGWT_MERGE_TRANS && r->rank != PGWT_MERGE_EXIT)
+                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+        }
         /* DECISION 25/25a: bootstrap only in validated output order. A FORK
          * cannot resurrect a known generation or overlap another live one. */
-        if (!a->identity_proved && !(generation->terminal_proved && r->rank == PGWT_MERGE_EXIT)) {
+        if (!a->identity_proved && !generation->discovery.abandoned &&
+            !(generation->terminal_proved && r->rank == PGWT_MERGE_EXIT)) {
             if (r->rank != PGWT_MERGE_FORK || generation->lifecycle_seen ||
                 generation->sequence_seen)
                 return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
@@ -674,7 +742,8 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
                 /* A registry slot reserved by a later queued generation is
                  * not lifecycle/sequence evidence preceding this FORK. */
                 if (!other->proof.identity_proved && !other->lifecycle_seen &&
-                    !other->sequence_seen) continue;
+                    !other->sequence_seen && !other->discovery.admitted &&
+                    !other->discovery.abandoned) continue;
                 if (!other->exited || order(m, &other->exit_record, r) >= 0)
                     return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
             }
@@ -717,6 +786,13 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         if (m->has_last && order(m, &m->last, r) >= 0)
             return fault(m, PGWT_MERGE_SORT_ORDER_BREACH, obs);
         if (r->rank != PGWT_MERGE_TRANS) continue;
+        if (final_discovery_record(generation, r) && !generation->discovery.has_lower_bound &&
+            !generation->quiet_pending && (!r->discovery.marker || r->discovery.baselines_refreshed)) {
+            /* Prospective only: validate subsequent records against the first
+             * release-order anchor before publishing any of this batch. */
+            generation->discovery.has_lower_bound = true;
+            generation->discovery.lower_bound = r->t;
+        }
         if (m->config.mode == PGWT_MERGE_N) {
             /* contract §2: any same-generation cross-source TRANS/MARKER tie.
              * TRANS of one (t,pid,g) group are contiguous and source ordered,
@@ -739,6 +815,18 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
             ++a->next_q;
         }
     }
+    if (reconcile_discovery) {
+        for (size_t i = end; i != SIZE_MAX; i = m->queue_nodes[i].next) {
+            const struct staged *v = &m->queue[i];
+            if (v->text) continue;
+            struct generation_state *a = attachment(m, &v->record);
+            if (!a) continue;
+            size_t plan = m->planned[a - m->attachments];
+            if (plan) a = &m->prospective[plan - 1];
+            if (!discovery_record_consistent(a, &v->record))
+                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+        }
+    }
     if (held) {
         m->held_cached = !discovery_held;
         m->held_tail = tail;
@@ -756,14 +844,17 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         struct staged *v = &m->queue[i];
         pgwt_merge_output out = {.kind = v->text ? PGWT_MERGE_OUT_TEXT : PGWT_MERGE_OUT_DATA,
             .record = v->record, .epoch = m->report.epoch};
-        struct generation_state *published = v->text ? NULL :
+        bool owned = !v->text || v->record.discovery.exclusive_text;
+        struct generation_state *published = !owned ? NULL :
             attachment(m, &v->record);
-        struct generation_state *planned = v->text ? NULL :
+        struct generation_state *planned = !owned ? NULL :
             &m->prospective[m->planned[published - m->attachments] - 1];
         MERGE_WORK(STATE, v->text ? 0 : 1);
         bool transition = !v->text && v->record.rank == PGWT_MERGE_TRANS;
         bool discovery_transition = transition && published->discovery.admitted;
         bool final_record = discovery_transition && final_discovery_record(published, &v->record);
+        bool discard = published && published->discovery.abandoned &&
+            (v->text || transition);
         if (transition) {
             out.prior_interval_certified = !planned->fork_seed_admitted || published->first_released;
             if (discovery_transition) {
@@ -772,9 +863,16 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
                 out.prior_interval_certified = final_record &&
                     (published->discovery.has_lower_bound || quiet) && v->record.t >= base;
             }
+            if (discard) out.prior_interval_certified = false;
         }
         /* contract §3/§4: rejection is not output; post carries failure C,d. */
-        if (!m->config.sink(m->config.sink_context, &out, &obs))
+        if (discard) {
+            if (m->report.discovery_abandoned_records == UINT64_MAX)
+                return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
+            ++m->report.discovery_abandoned_records;
+            if (m->config.discovery_discard)
+                m->config.discovery_discard(m->config.sink_context, &v->record, v->text);
+        } else if (!m->config.sink(m->config.sink_context, &out, &obs))
             return fault(m, PGWT_MERGE_WRITER_PUSH_FAIL, obs);
         /* DECISION 25c: retain the successful prefix even when a later
          * publication or counter checkpoint suspends this release. */
@@ -784,6 +882,22 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
             published->first_released = true;
             planned->first_released = true;
         }
+        if (transition && (discovery_transition || discard) && !out.prior_interval_certified) {
+            pgwt_discovery_state *s = &published->discovery;
+            if (!s->has_uncertified || v->record.t > s->uncertified_through)
+                s->uncertified_through = v->record.t;
+            s->has_uncertified = true;
+            planned->discovery = *s;
+        }
+        /* Retain publication evidence even if the following counter check
+         * faults. A later matching terminal proof still needs this EXIT;
+         * a rejected publication never reaches this point. */
+        if (published && !v->text && v->record.rank == PGWT_MERGE_EXIT) {
+            published->exited = true;
+            published->exit_record = v->record;
+            published->exit_record.payload = NULL;
+        }
+        /* Published DATA counter checkpoint. */
         if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
         if (!same_counters(obs.counters, m->baseline))
             return fault(m, counter_fault(obs.counters, m->observed), obs);
@@ -825,6 +939,7 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         pgwt_pool_set(&m->diagnostics.pools[PGWT_POOL_CORE_FRONTIER], m->frontier_count);
         m->frontiers[m->frontier_count - 1] = (struct frontier_state){
             .epoch = m->report.epoch, .frontier = F};
+        /* Published frontier counter checkpoint. */
         if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
         if (!same_counters(obs.counters, m->baseline))
             return fault(m, counter_fault(obs.counters, m->observed), obs);
@@ -891,6 +1006,12 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
             return fault(m, PGWT_MERGE_MALFORMED_ENVELOPE, obs);
         struct source_state *src = &m->sources[r->source];
         bool perf = r->source < m->config.source_count - 2 && src->proof.qualified;
+        if (in->kind == PGWT_MERGE_TEXT && r->discovery.exclusive_text) {
+            if (!r->identity_known || r->g < PGWT_DISCOVERY_COOKIE_MIN)
+                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+            if (!remember_generation(m, r))
+                return allocation_fault(m, PGWT_POOL_CORE_IDENTITY, obs);
+        }
         if (in->kind == PGWT_MERGE_DATA) {
             if (perf && src->has_data && r->t < src->last_t)
                 return late_fault(m, PGWT_MERGE_CLOCK_REGRESSION, in);
@@ -900,6 +1021,8 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
                 return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
             struct generation_state *a = remember_generation(m, r);
             if (!a) return allocation_fault(m, PGWT_POOL_CORE_IDENTITY, obs);
+            if (!discovery_record_consistent(a, r))
+                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
             if (m->report.status != PGWT_MERGE_OK && r->rank != PGWT_MERGE_TRANS)
                 a->lifecycle_seen = true;
             if (perf) {
@@ -974,6 +1097,7 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
     case PGWT_MERGE_ADMIT_DISCOVERY:
     case PGWT_MERGE_CONFIRM_DISCOVERY:
     case PGWT_MERGE_TERMINAL_DISCOVERY:
+    case PGWT_MERGE_ABANDON_DISCOVERY:
         (void)discovery_control(m, in);
         if (m->report.status != PGWT_MERGE_OK) return m->report.status;
         break;

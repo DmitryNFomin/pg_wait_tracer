@@ -8,15 +8,16 @@ complete structured output sequences against EXPECTED.md before executing C.
 Every row: full_state compares every successful DATA identity, source/position,
 rank, raw payload byte, U/T mark and output order; every FRONTIER and its entire
 C0 vector; every VOID's time, full counter vector/label and reason. It checks
-semantic and persisted gap closing times (C and C+1), open/close/reopen order,
+semantic C and the contract-transcribed persisted P_close, zero GAP_CLOSE
+reserved fields, reader availability on both sides, open/close/reopen order,
 pending count, census completeness/fence, exact lower bound, route and ordered
 fresh-record position. Final epoch status, invalidation and exit requirements
 are checked. Rejected publication is absent from successful outputs.
 
 Prose facts encoded on the consumer side:
-D01: numerical authority returns X=3 ns/1 completion; Y's uncertified completion
-at 12 contributes no count. The coverage reader refuses [12,13) and permits the
-next ns, using decoded GAP records with the conservative C+1 endpoint.
+D01: the decoded emitted records give G(13). The reader refuses [12,16)
+and the completed-Y count in [12,13); both are unavailable, never zero.
+The reader permits [13,16), where X duration is 2 ns and count is 1.
 D02a: checkpoint before strict completeness retains P=1; S(13) commits quiet
 b=12 and closes the gap; X=3/1 follows through the numerical authority.
 D02b: no DATA, quiet confirmation or numerical baseline from a reread.
@@ -68,9 +69,39 @@ Q07: retained seed has wait word 0, on_cpu_ts=0, numeric accumulator/base 0
 and validity=true. Certified CPU is the supplied 1 ns, not 0 or wall time 3.
 Q08: address mismatch supplies no confirmation, ADMIT or lower bound.
 Q09: after each release, final generation 3 keeps quiet seed/b=11 and v=9;
-earlier D9 is U and cannot rebase it. D15 supplies X=4 ns/1 completion.
+earlier D9 is U and cannot rebase it. G(11) permits D15's X=4 ns/1 completion.
+D14a: A12 retains certified semantics while D12 is U. The combined completed-Y
+count in [12,13) is unavailable. G(13) permits X=2 ns/1 in [13,16).
+D14b: the earlier U anchor at 12 does not increment census C=15. G(15) permits
+X duration 0/count 1 in [15,16), retaining the certified completion at 15.
+D14c: earlier-attempt D11 is U and does not replace alpha3's baseline.
+G(12) refuses [11,16) and permits X=3 ns/1 in [12,16).
+A01-A20: complete output sequences, all counter components/unknown vectors,
+persisted reader gap state, unresolved count, permanent disposition and exact
+cumulative consumed-discard count match the frozen expectations. The capture
+diagnostic exposes that same count; A01/A19 also reconcile the wire identity
+with abandonment as a separate category. A03/A09/A17
+consume the terminal TRANS but publish EXIT and close at G(19). A15 preserves
+the consumed-discard count on rejected EXIT, with no discharge/frontier/close.
+A20 publishes EXIT and G(18), then rejects a first abandonment after closure.
+A11 checks seal_violation, rejected-record accounting and epoch invalidation;
+A12 checks successful explicit REARM with abandonment, count, retained
+boundaries and last frontier intact. A19 checks exclusive TEXT and MARKER
+consumption after dependency reconciliation, with no invented TEXT timestamp.
+A16 supplies identity_known=false directly to the core; the arrival guard
+refuses it before any discard. A later valid AB does not cancel that fault.
 
-Additional schedules: an unknown empty census stays open with pending 0;
+Additional schedules: cookie-less EXIT before identity installation retains
+one census lifetime and waits for its matching retained terminal witness. It
+discharges only after successful EXIT publication; rejection leaves pending 1.
+An EXIT published before terminal-control delivery is retained and reconciled
+when the matching control arrives, including after an independent counter
+fault and explicit REARM. The counter fault is retained; rejected EXITs
+remain undischargeable. A reserved but uninstalled cookie cannot
+authorize AB. Duplicate AB still observes changed counters. Shared metadata
+publishes normally and is never counted as an abandonment discard.
+
+An unknown empty census stays open with pending 0;
 an explicitly complete empty census closes only beyond its fence and permits
 ordinary reader windows; rejected gap-close publication leaves it open and
 preserves the writer fault. Discovery-disabled T-cov runs its unchanged schedules
@@ -100,3 +131,20 @@ These are remaining oracle facts, not passing assertions or qualifications:
 The producer unit also owns physical quiet bracket ordering. No host
 proof-boolean mutation is represented
 as evidence for those physical operations or for actual kernel qualification.
+
+Mutation scope: zero_wait_infers_on_cpu was removed because it changed only a
+retained seed copy which numerical product code never reads. That mutation
+proved a test-field round trip, not a product defect. Valid-zero eligibility
+and elapsed-wall substitution still have executed product mutants on Q07;
+actual producer seed installation remains in the excluded producer unit.
+The numerical_adapter_uses_lower_bound mutant exercises the test's consumer
+adapter: no discovery server consumer is introduced by this unit. Every other
+discovery mutation changes executed core, capture, adapter, codec or metric code.
+
+Producer integration: after reserving/binding an inventory cookie, deliver
+pgwt_capture_discovery_installed with known/true IDENTITY_VISIBLE and
+EMISSION_IDENTITY only after the installed identity is continuously bound.
+AB's inventory/open-gap facts are resolved by capture, not trusted from its
+caller. Exclusive abandoned TEXT must carry its retained pid/cookie and the
+exclusive_text attribution fact; shared metadata leaves that fact false.
+These are consumer inputs, not a census, identity-installation or BPF mechanism.

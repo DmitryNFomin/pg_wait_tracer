@@ -80,7 +80,7 @@ env = dict(os.environ, ASAN_OPTIONS='halt_on_error=1:exitcode=86',
            UBSAN_OPTIONS='halt_on_error=1:exitcode=87:print_stacktrace=1')
 with tempfile.TemporaryDirectory(prefix='pgwt-merge-adapter-mutants-') as tmp:
     work = Path(tmp)
-    for name in ['src/core/pgwt_merge.h', 'src/core/pgwt_diagnostics.h', 'src/core/pgwt_merge_adapter.h', 'src/core/merge.c',
+    for name in ['src/core/pgwt_discovery.h', 'src/core/pgwt_merge.h', 'src/core/pgwt_diagnostics.h', 'src/core/pgwt_merge_adapter.h', 'src/core/merge.c',
                  'tests/test_core_merge_adapter.c', 'tests/test_core_merge_contract.c',
                  'tests/merge_adapter_goldens.h']:
         dest = work / name

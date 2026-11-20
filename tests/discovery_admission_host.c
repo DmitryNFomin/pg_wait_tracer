@@ -20,7 +20,7 @@ static const char *discovery_case;
 #define DY UINT32_C(0x06000001)
 #define DZ UINT32_C(0x06000002)
 struct discovery_record {
-    unsigned char bytes[48];
+    unsigned char bytes[272];
     uint64_t pid, cookie, position;
     size_t source, size;
     pgwt_merge_rank rank;
@@ -35,7 +35,12 @@ struct dh {
     struct discovery_record input[32], released[32]; size_t ninput, nreleased;
     struct pgwt_capture_gap gaps[32]; size_t ngaps;
     struct pgwt_cov_rec coverage[32]; size_t coverage_count;
-    bool reject_data, reject_close;
+    bool reject_data, reject_close, reject_exit, unknown_identity;
+    uint64_t detection;
+    uint64_t boundaries;
+    bool query_dependency;
+    bool allow_shared_text;
+    bool counter_after_exit;
     size_t data_count;
 };
 static void full_append(struct dh *h, const char *fmt, ...)
@@ -51,7 +56,7 @@ static const char *counter_label(pgwt_merge_counters counters)
 {
     static const char *labels[]={"C0","Ce","Cf","Cs","Cw"};
     static const size_t components[]={PGWT_MERGE_COUNTERS,0,10,12,14};
-    DC(counters.known,"output counter vector known");
+    if(!counters.known) return "unknown";
     for(size_t k=0;k<5;++k) {
         bool equal=true;
         for(size_t j=0;j<PGWT_MERGE_COUNTERS;++j)
@@ -70,9 +75,16 @@ static void append(struct dh *h, const char *token, uint64_t t, const char *suff
 static bool dsink(void *ctx, const pgwt_merge_output *out, pgwt_merge_observation *post)
 {
     struct dh *h=ctx;
+    if(out->kind==PGWT_MERGE_OUT_TEXT && h->allow_shared_text) {
+        DC(out->record.payload_size==272 && !out->record.discovery.exclusive_text,
+           "shared TEXT retains metadata semantics");
+        full_append(h,"TEXTx");return true;
+    }
+    DC(out->kind!=PGWT_MERGE_OUT_TEXT,"exclusive abandoned TEXT is never published");
     DC(out->kind==PGWT_MERGE_OUT_DATA || out->kind==PGWT_MERGE_OUT_FRONTIER ||
        out->kind==PGWT_MERGE_OUT_VOID,"every output kind is specified by this oracle");
-    if(out->kind==PGWT_MERGE_OUT_DATA && h->reject_data) {
+    if(out->kind==PGWT_MERGE_OUT_DATA && (h->reject_data ||
+        (h->reject_exit && out->record.rank==PGWT_MERGE_EXIT))) {
         post->d=DB+20; post->counters.value[14]=1;
         return false;
     }
@@ -87,13 +99,15 @@ static bool dsink(void *ctx, const pgwt_merge_output *out, pgwt_merge_observatio
             if(h->input[i].source==r->source && h->input[i].position==r->o) break;
         DC(i<h->ninput,"released record has its original source/position");
         struct discovery_record copy=h->input[i];
-        DC(copy.pid==r->pid && copy.cookie==r->g && copy.rank==r->rank &&
+        bool terminal_binding=!copy.cookie && r->rank==PGWT_MERGE_EXIT &&
+            r->g==(copy.pid==40?DG+1:DG);
+        DC(copy.pid==r->pid && (copy.cookie==r->g || terminal_binding) && copy.rank==r->rank &&
            r->identity_known && !r->has_q && !r->q,"released lifetime identity and rank");
         DC(copy.size==r->payload_size && !memcmp(copy.bytes,r->payload,copy.size),"all raw payload bytes preserved");
         copy.certified=out->prior_interval_certified;
         DC(h->nreleased<32,"released record bound");h->released[h->nreleased++]=copy;
         const char *name=r->rank==PGWT_MERGE_TRANS?
-            (r->g==1?"R":(!strcmp(discovery_case,"D09") && r->t==DB+18)?"terminal_D":"D"):
+            (r->pid==10?"A":r->g==1?"R":r->pid==40?"H":r->t==DB+18?"terminal_D":"D"):
             r->rank==PGWT_MERGE_EXIT?(r->pid==40?"EXIT_H":"EXIT_D"):
             r->rank==PGWT_MERGE_FORK?"FORK_R":"INIT";
         full_append(h,"%s%llu%s",name,(unsigned long long)(r->t-DB),
@@ -101,6 +115,9 @@ static bool dsink(void *ctx, const pgwt_merge_output *out, pgwt_merge_observatio
         append(h,r->rank==PGWT_MERGE_TRANS?"D":r->rank==PGWT_MERGE_EXIT?"EXIT":
                r->rank==PGWT_MERGE_FORK?"FORK":"INIT",r->t-DB,
                r->rank==PGWT_MERGE_TRANS?(out->prior_interval_certified?"T":"U"):"");
+        if(h->counter_after_exit && r->rank==PGWT_MERGE_EXIT) {
+            post->counters.value[0]=1;h->snapshot.value[0]=1;
+        }
     } else if(out->kind==PGWT_MERGE_OUT_FRONTIER) {
         append(h,"F",out->F-DB,"");
         full_append(h,"F%llu[%s]",(unsigned long long)(out->F-DB),counter_label(out->counters));
@@ -126,6 +143,7 @@ static bool dgap(void *ctx,const struct pgwt_capture_gap *gap)
     unsigned char bytes[80];size_t n=pgwt_coverage_encode(&r,bytes);
     struct pgwt_coverage_record decoded;
     DC(pgwt_coverage_decode(bytes,n,&decoded)==PGWT_COVD_OK,"persisted gap decode");
+    DC(decoded.b==0 && decoded.d==0,"GAP_CLOSE reserved fields stay zero");
     DC(h->coverage_count<32,"gap record bound");
     h->coverage[h->coverage_count++]=(struct pgwt_cov_rec){.kind=decoded.kind,.a=(int64_t)decoded.a,.c=(int64_t)decoded.c};
     return true;
@@ -133,19 +151,29 @@ static bool dgap(void *ctx,const struct pgwt_capture_gap *gap)
 static struct dh *dsetup_inventory(size_t count, uint64_t fence, bool qmode, bool census)
 {
     struct dh *h=calloc(1,sizeof(*h));DC(h,"host fixture allocation");
-    h->snapshot=readable();
+    h->snapshot=readable();h->detection=20;
     pgwt_merge_source sources[4]={{.qualified=true},{.qualified=true},{.qualified=true},{.qualified=true}};
+    pgwt_merge_attachment attached[2]={{.pid=10,.g=1,.identity_proved=true,.sequence_proved=true,.next_q=1},
+        {.pid=20,.g=1,.identity_proved=true,.sequence_proved=true,.next_q=1}};
     pgwt_merge_config initial={.mode=qmode?PGWT_MERGE_Q:PGWT_MERGE_N,
         .sources=sources,.source_count=4,.staged_capacity=64,.payload_capacity=272,
+        .attachments=attached,.attachment_count=2,
         .attachment_capacity=64,.frontier_capacity=128,.dependency_capacity=64,
         .observation={.d=DB+20,.counters={.known=true}},.last_observed={.known=true}};
     struct pgwt_capture_config cfg={.cpu_count=2,.capacity=64,.ctx=h,
         .sink={.emit=dsink,.ctx=h},.baseline=initial.observation,.publish_startup_gap=dgap,
         .test_attach_premise=true,.discovery_enabled=true};
-    ma_table empty={0};
-    h->capture=pgwt_capture_replay_create(&cfg,&initial,&empty);DC(h->capture,"capture create");
+    ma_lifetime lifetimes[2]={{.pid=10,.g=1,.identity_bound=true},
+        {.pid=20,.g=1,.identity_bound=true}};
+    ma_table premises={.lifetimes=lifetimes,.lifetime_count=2};
+    h->capture=pgwt_capture_replay_create(&cfg,&initial,&premises);DC(h->capture,"capture create");
     DC(pgwt_capture_coverage_begin(h->capture,DB,NULL,0,NULL)==0,"begin startup gap");
     if(count) DC(pgwt_capture_discovery_inventory(h->capture,30,DG)==0,"D inventory");
+    if(count && discovery_case[0]=='A') {
+        uint64_t facts=PGWT_DISC_IDENTITY_VISIBLE | PGWT_DISC_EMISSION_IDENTITY;
+        DC(pgwt_capture_discovery_installed(h->capture,30,DG,
+            (pgwt_discovery_facts){facts,facts})==0,"D installed identity report");
+    }
     if(count>1) DC(pgwt_capture_discovery_inventory(h->capture,40,DG+1)==0,"H inventory");
     if(census) DC(pgwt_capture_discovery_census(h->capture,DB+fence,true,DB+20,&h->snapshot)==0,"complete census");
     return h;
@@ -169,11 +197,16 @@ static pgwt_discovery_attempt bracket(uint64_t pid,uint64_t cookie,uint64_t t,ui
 static void dcontrol(struct dh *h,pgwt_discovery_attempt a)
 {
     pgwt_discovery_attempt before=a;
-    DC(pgwt_capture_discovery_control(h->capture,&a,DB+20,&h->snapshot)==0,"discovery control delivery");
+    DC(pgwt_capture_discovery_control(h->capture,&a,DB+h->detection,&h->snapshot)==0,"discovery control delivery");
     DC(!memcmp(&a,&before,sizeof(a)),"consumer preserves supplied producer attempt");
 }
 static void dadmit(struct dh *h,uint64_t e) {dcontrol(h,admit(30,DG,e,1));}
 static void dquiet(struct dh *h,uint64_t t,uint64_t e) {dcontrol(h,bracket(30,DG,t,e,1));}
+static void dabandon(struct dh *h,uint64_t pid,uint64_t cookie)
+{dcontrol(h,(pgwt_discovery_attempt){.kind=PGWT_DISC_ABANDON,.pid=pid,.cookie=cookie});}
+static void dterminal(struct dh *h)
+{dcontrol(h,(pgwt_discovery_attempt){.kind=PGWT_DISC_TERMINAL,.pid=30,.cookie=DG,
+    .terminal_time=DB+18,.terminal_binding_proved=true});}
 static void record(struct dh *h,uint64_t t,uint64_t pid,uint64_t cookie,size_t src,
                    pgwt_merge_rank rank,uint64_t gen,bool marker,bool refresh)
 {
@@ -189,6 +222,15 @@ static void record(struct dh *h,uint64_t t,uint64_t pid,uint64_t cookie,size_t s
         if(!strcmp(discovery_case,"Q09")) {
             old=t==9?DY:DX;next=t==9?DZ:0;duration=t==9?1:4;
         }
+        if(!strcmp(discovery_case,"D14c")) {
+            old=t==11?DY:DX;next=t==11?DZ:0;duration=t==11?0:4;
+        }
+        if(!strcmp(discovery_case,"D14a") && pid==10) {old=DY;next=0;duration=2;}
+        if(discovery_case[0]=='A') {
+            old=t==12 || t==15?DX:DY;next=t==12?DY:DX;
+            duration=t==12?3:t==15?3:t==17?5:t==18?6:0;
+            if(t==18) next=PGWT_EVENT_EXIT;
+        }
         if(!strcmp(discovery_case,"Q01") || !strcmp(discovery_case,"Q02") ||
            !strcmp(discovery_case,"Q03") || !strcmp(discovery_case,"Q04") ||
            !strcmp(discovery_case,"Q04b") || !strcmp(discovery_case,"Q05") ||
@@ -196,6 +238,7 @@ static void record(struct dh *h,uint64_t t,uint64_t pid,uint64_t cookie,size_t s
         if(!strcmp(discovery_case,"Q07")) {old=0;next=DY;}
         tb_le(bytes,DB+t,8);tb_le(bytes+8,pid,4);tb_le(bytes+12,old,4);tb_le(bytes+16,next,4);
         tb_le(bytes+24,duration,8);tb_le(bytes+40,cpu,8);
+        if(h->query_dependency) tb_le(bytes+32,77,8);
     } else {
         tb_le(bytes,rank==PGWT_MERGE_FORK?1:rank==PGWT_MERGE_INIT?2:3,4);
         tb_le(bytes+4,pid,4);tb_le(bytes+16,DB+t,8);
@@ -209,18 +252,43 @@ static void record(struct dh *h,uint64_t t,uint64_t pid,uint64_t cookie,size_t s
     *saved=(struct discovery_record){.pid=pid,.cookie=cookie,.position=e.position,.source=src,.size=size,.rank=rank};
     memcpy(saved->bytes,bytes,size);
     size_t token=0;
-    int received=pgwt_capture_received_token(h->capture,&e,DB+20,&token);
+    if(h->unknown_identity) {
+        pgwt_merge_input in={.kind=PGWT_MERGE_DATA,
+            .observation={.d=DB+h->detection,.counters={.known=true}},
+            .record={.source=src,.o=e.position,.t=DB+t,.pid=pid,.g=cookie,.rank=rank,
+                .identity_known=false,.payload=bytes,.payload_size=size}};
+        DC(pgwt_capture_replay_control(h->capture,&in)==PGWT_MERGE_SUSPENDED,
+           "uncertain record attribution rejected before discard");
+        return;
+    }
+    int received=pgwt_capture_received_token(h->capture,&e,DB+h->detection,&token);
     DC(received>=0,"record consumption");
-    if(!received) DC(pgwt_capture_envelope_token(h->capture,&e,token,DB+20,&h->snapshot)==0,"record adapter delivery");
+    if(!received) DC(pgwt_capture_envelope_token(h->capture,&e,token,DB+h->detection,&h->snapshot)==0,"record adapter delivery");
 }
 static void data(struct dh *h,uint64_t t,size_t source,uint64_t gen)
 {record(h,t,30,DG,source,PGWT_MERGE_TRANS,gen,false,true);}
+static void text_for_d(struct dh *h)
+{
+    unsigned char bytes[272]={0};tb_le(bytes,4,4);tb_le(bytes+4,30,4);tb_le(bytes+8,77,8);
+    ma_envelope e={.kind=MA_TEXT,.version=1,.origin=MA_EXACT,.source=3,.position=++h->pos[3],
+        .bytes=bytes,.size=sizeof(bytes),.cookie_present=true,.cookie=DG,
+        .discovery_origin={.exclusive_text=!h->allow_shared_text}};
+    size_t token=0;
+    DC(pgwt_capture_received_token(h->capture,&e,DB+20,&token)==0,"TEXT receipt");
+    ma_table t=table(h->capture);
+    size_t slot=ma_binding_bucket(&t,77,NULL);
+    h->capture->bindings[h->capture->binding_index[slot]-1]=(ma_binding){.query_id=77,
+        .dependency_id=1,.kind=MA_WAIT};
+    h->query_dependency=true;
+    DC(pgwt_capture_envelope_token(h->capture,&e,token,DB+20,&h->snapshot)==0,"exclusive metadata delivery");
+}
 static void complete(struct dh *h,uint64_t w)
 {
     for(size_t s=0;s<4;++s) {
         ma_envelope e={.kind=MA_BOUNDARY,.version=1,.source=s,.position=++h->pos[s],
             .w=DB+w,.boundary=s<2?MA_IDLE_PERF:MA_RING_BOUNDARY};
-        DC(pgwt_capture_envelope(h->capture,&e,DB+20,&h->snapshot)==0,"source completeness");
+        ++h->boundaries;
+        DC(pgwt_capture_envelope(h->capture,&e,DB+h->detection,&h->snapshot)==0,"source completeness");
     }
 }
 static void state_is(struct dh *h,const char *out,int64_t close,size_t pending,bool census)
@@ -250,12 +318,12 @@ static int base_verdict(struct dh *h,uint64_t from,uint64_t to)
     free(result.scratch);
     return v;
 }
-static void endpoint_verdict(struct dh *h,uint64_t closure)
+static void endpoint_verdict(struct dh *h,uint64_t closure,bool increment)
 {
-    DC(base_verdict(h,closure,closure+1)==PGWT_COV_INCOMPLETE,
-       "reader excludes completion exactly at C");
+    DC(base_verdict(h,closure,closure+1)==(increment?PGWT_COV_INCOMPLETE:PGWT_COV_COMPLETE),
+       "reader availability at semantic C");
     DC(base_verdict(h,closure+1,closure+2)==PGWT_COV_COMPLETE,
-       "reader permits interval after conservative endpoint");
+       "reader permits interval after endpoint");
 }
 static void full_state(struct dh *h, const char *id)
 {
@@ -270,17 +338,23 @@ static void full_state(struct dh *h, const char *id)
     DC(gap.closed==(expected->close>=0) && gap.unresolved==expected->pending &&
        gap.census_complete==expected->census,"full gap state and census");
     if(expected->close>=0) DC(gap.closure==DB+(uint64_t)expected->close,"semantic gap closing time");
-    DC(gap.census_fence==DB+(!strcmp(id,"D07b")?25:5),"retained census fence");
+    DC(gap.census_fence==DB+(!strcmp(id,"D07b")?25:!strcmp(id,"D14b")?15:5),"retained census fence");
+    DC(base_verdict(h,99,100)==(expected->persisted>=0?PGWT_COV_COMPLETE:PGWT_COV_INCOMPLETE),
+       "persisted reader gap state");
     size_t ngaps=!strcmp(id,"D10")?3:expected->close>=0?2:1;
     DC(h->ngaps==ngaps,"complete startup gap publication sequence");
     DC(h->gaps[0].kind==PGWT_CAPTURE_GAP_PREEXISTING && h->gaps[0].at==DB &&
        h->gaps[0].detected==DB,"startup opens before any coverage");
     if(ngaps>=2) {
-        uint64_t close=!strcmp(id,"D10")?12:(uint64_t)expected->close;
+        uint64_t close=!strcmp(id,"D10")?13:(uint64_t)expected->persisted;
         DC(h->gaps[1].kind==PGWT_CAPTURE_GAP_PREEXISTING_END &&
-           h->gaps[1].at==DB+close+1 && h->gaps[1].detected==DB+20,
+           h->gaps[1].at==DB+close && h->gaps[1].detected==DB+20,
            "persisted startup endpoint and publication time");
-        DC(h->coverage[1].a==(int64_t)(DB+close+1),"encoded GAP_CLOSE time");
+        DC(h->coverage[1].a==(int64_t)(DB+close),"encoded GAP_CLOSE time");
+        if(ngaps==2) {
+            DC(base_verdict(h,close-1,close)==PGWT_COV_INCOMPLETE,"reader before persisted endpoint");
+            DC(base_verdict(h,close,close+1)==PGWT_COV_COMPLETE,"reader at persisted endpoint");
+        }
     }
     if(ngaps==3) DC(h->gaps[2].kind==PGWT_CAPTURE_GAP_PREEXISTING &&
         h->gaps[2].at==DB && h->gaps[2].detected==DB+40,"late gap revocation and detection times");
@@ -299,7 +373,9 @@ static void full_state(struct dh *h, const char *id)
             DC(d.baseline.wait_word==(!strcmp(id,"Q07")?0:DX),"quiet seed wait state");
         }
     } else DC(!d.confirmed,"no accepted quiet confirmation");
-    DC(!d.terminal_released,"D not discharged by an invented terminal witness");
+    bool terminal=!strcmp(id,"A03")||!strcmp(id,"A09")||!strcmp(id,"A17")||!strcmp(id,"A20");
+    DC(d.terminal_released==terminal,"D matching terminal discharge");
+    if(terminal) DC(d.terminal_time==DB+18,"D terminal discharge time");
     if(!strcmp(id,"D02b") || !strcmp(id,"D02e"))
         DC(d.baseline.t==0 && !d.has_lower_bound,"ordinary reread establishes no baseline");
     if(!strcmp(id,"Q08")) DC(!d.admitted,"address mismatch supplies no ADMIT");
@@ -315,10 +391,24 @@ static void full_state(struct dh *h, const char *id)
         if(terminal) DC(other.terminal_time==DB+18,"H discharge at released EXIT time");
     }
     pgwt_merge_report report=pgwt_capture_report(h->capture);
-    DC(!report.epoch_invalid && !report.void_failed && report.status!=PGWT_MERGE_EXIT_REQUIRED,
+    DC(report.epoch_invalid==!strcmp(id,"A11") && !report.void_failed && report.status!=PGWT_MERGE_EXIT_REQUIRED,
        "oracle does not invalidate epochs or require process exit");
-    bool fault=strstr(expected->output,"VOID")!=NULL;
+    DC(report.discovery_abandoned_records==expected->abandoned,"cumulative consumed abandonment count");
+    DC(pgwt_capture_coverage(h->capture,DB+100).discovery_abandoned_records==expected->abandoned,
+       "capture diagnostic agrees with consumed discard count");
+    bool abandoned=id[0]=='A' && strcmp(id,"A04") && strcmp(id,"A06") && strcmp(id,"A20");
+    DC(d.abandoned==abandoned,"retained lifetime abandonment disposition");
+    bool fault=strstr(expected->output,"VOID")!=NULL && strcmp(id,"A12");
     DC(report.status==(fault?PGWT_MERGE_SUSPENDED:PGWT_MERGE_OK),"final epoch status");
+    if(!strcmp(id,"A01") || !strcmp(id,"A19")) {
+        FILE *stream=tmpfile();DC(stream,"wire accounting output stream");
+        uint64_t wire=0;for(size_t i=0;i<4;++i) wire+=h->pos[i];
+        pgwt_capture_coverage_print(stream,h->capture,DB+100,wire,h->boundaries,0,0);
+        rewind(stream);char output[2048]={0};size_t n=fread(output,1,sizeof(output)-1,stream);
+        DC(n>0 && !ferror(stream),"wire accounting output read");fclose(stream);
+        DC(strstr(output,!strcmp(id,"A01")?"discovery_abandoned_records=2 ok=1":"discovery_abandoned_records=3 ok=1"),
+           "wire identity accounts for consumed abandonment separately");
+    }
 }
 /* Feed ONLY certified incoming intervals to the existing numerical authority.
  * A frontier supplies release coverage, not an open-wait snapshot. For an
@@ -329,16 +419,15 @@ static void released_metrics(struct dh *h,uint32_t event,uint64_t from,uint64_t 
     pgwt_core_wait waits[32],scratch[32];size_t n=0;uint32_t last=0;uint64_t last_t=0;
     for(size_t i=0;i<h->nreleased;++i) {
         const struct discovery_record *r=&h->released[i];
-        if(r->rank!=PGWT_MERGE_TRANS || r->cookie!=DG) continue;
+        if(r->rank!=PGWT_MERGE_TRANS || (r->cookie!=DG && r->pid!=10)) continue;
         uint64_t t=get_le(r->bytes,8),dur=get_le(r->bytes+24,8);
         last=(uint32_t)get_le(r->bytes+16,4);last_t=t;
         if(r->certified && get_le(r->bytes+12,4)==event)
             waits[n++]=(pgwt_core_wait){.event={"selected",8},.start=t-dur,.end=t};
     }
-    pgwt_discovery_state d={0};(void)pgwt_merge_discovery_state(h->capture->core,30,DG,&d);
-    pgwt_merge_report report=pgwt_capture_report(h->capture);
-    pgwt_core_span span={.start=d.lower_bound,.end=report.frontier+1};
-    pgwt_core_evidence evidence={.life_start=DB,.coverage=&span,.coverage_count=d.has_lower_bound?1:0,
+    bool available=base_verdict(h,from,to)==PGWT_COV_COMPLETE;
+    pgwt_core_span span={.start=DB+from,.end=DB+to};
+    pgwt_core_evidence evidence={.life_start=DB,.coverage=&span,.coverage_count=available?1:0,
         .waits=waits,.wait_count=n};
     if(last==event) {
         evidence.has_open=true;evidence.open=(pgwt_core_open_wait){.event={"selected",8},.start=last_t,.as_of=last_t};
@@ -351,14 +440,18 @@ static void released_metrics(struct dh *h,uint32_t event,uint64_t from,uint64_t 
 }
 static void numerical_outputs(struct dh *h,const char *id)
 {
-    bool measured=!strcmp(id,"D01")||!strcmp(id,"D02a")||!strcmp(id,"D03")||
-        !strcmp(id,"Q01")||!strcmp(id,"Q09");
-    bool unavailable=!strcmp(id,"D02c")||!strcmp(id,"Q02")||!strcmp(id,"Q03");
+    bool fresh=!strcmp(id,"D01")||!strcmp(id,"D03")||!strcmp(id,"D14a");
+    bool measured=fresh||!strcmp(id,"D02a")||!strcmp(id,"Q01")||!strcmp(id,"Q09")||
+        !strcmp(id,"D14b")||!strcmp(id,"D14c");
+    bool unavailable=!strcmp(id,"D02c")||!strcmp(id,"Q02")||!strcmp(id,"Q03")||
+        !strcmp(id,"Q04")||!strcmp(id,"Q04b")||!strcmp(id,"Q05")||!strcmp(id,"Q06");
     if(measured || unavailable) {
         pgwt_core_result time,count;
-        released_metrics(h,DX,!strcmp(id,"D02c")?10:!strcmp(id,"Q09")?11:12,
+        released_metrics(h,DX,!strcmp(id,"D02c")?10:!strcmp(id,"Q09")?11:
+                  fresh?13:!strcmp(id,"D14b")?15:12,
                   !strcmp(id,"D02c")?13:16,&time,&count);
-        if(measured) DC(time.value.present && time.value.value==(!strcmp(id,"Q09")?4:3) &&
+        if(measured) DC(time.value.present && time.value.value==(!strcmp(id,"Q09")?4:
+            fresh?2:!strcmp(id,"D14b")?0:3) &&
             count.value.present && count.value.value==1,"X duration and completed count");
         else {
             DC(!time.value.present && !count.value.present,"incoming or open interval quantities unavailable");
@@ -367,9 +460,13 @@ static void numerical_outputs(struct dh *h,const char *id)
                "no invented X duration or completed count");
         }
     }
-    if(!strcmp(id,"D01")) {
+    if(fresh || !strcmp(id,"D14c")) {
+        pgwt_core_result time,count;released_metrics(h,DX,!strcmp(id,"D14c")?11:12,16,&time,&count);
+        DC(!time.value.present && !count.value.present,"reader refuses window containing uncertified endpoint");
+    }
+    if(!strcmp(id,"D01") || !strcmp(id,"D14a")) {
         pgwt_core_result time,count;released_metrics(h,DY,12,13,&time,&count);
-        DC(count.value.present && count.value.value==0,"uncertified completion at 12 contributes no count");
+        DC(!count.value.present,"unknown completed count at C is unavailable");
     }
     if(!strcmp(id,"Q01") || !strcmp(id,"Q07") || !strcmp(id,"Q02") || !strcmp(id,"Q03")) {
         bool has_cpu=false;uint64_t cpu=0;
@@ -378,7 +475,8 @@ static void numerical_outputs(struct dh *h,const char *id)
             if(r->rank!=PGWT_MERGE_TRANS || !r->certified) continue;
             struct pgwt_trace_event e;memcpy(&e,r->bytes,sizeof(e));
             if(e.cpu_ns==PGWT_CPU_NS_UNKNOWN) continue;
-            has_cpu=true;cpu+=pgwt_cpu_clip_ns(&e,DB+12,DB+16,NULL);
+            if(base_verdict(h,12,!strcmp(id,"Q07")?15:16)!=PGWT_COV_COMPLETE) continue;
+            has_cpu=true;cpu+=pgwt_cpu_clip_ns(&e,DB+12,!strcmp(id,"Q07")?DB+15:DB+16,NULL);
         }
         bool expected=!strcmp(id,"Q01")||!strcmp(id,"Q07");
         DC(has_cpu==expected,"CPU availability follows interval certification");
@@ -413,14 +511,94 @@ static void a2_population(struct dh *h)
     DC(pgwt_capture_a2_omission_population(h->capture,&u)==PGWT_A2_UNTRACED_INVALID,
        "discovery contributes no A2 omission even with an in-boot timestamp");
 }
+static void abandon_row(struct dh *h,const char *id)
+{
+    if(!strcmp(id,"A04")) {
+        dadmit(h,8);data(h,12,0,1);complete(h,13);dabandon(h,30,DG);return;
+    }
+    if(!strcmp(id,"A06")) {dabandon(h,40,DG+1);return;}
+    if(!strcmp(id,"A20")) {
+        dterminal(h);record(h,18,30,DG,3,PGWT_MERGE_EXIT,0,false,false);complete(h,19);
+        dabandon(h,30,DG);return;
+    }
+    if(!strcmp(id,"A19")) {
+        text_for_d(h);data(h,9,0,1);record(h,10,30,DG,0,PGWT_MERGE_TRANS,1,true,true);
+        dabandon(h,30,DG);complete(h,16);return;
+    }
+    h->unknown_identity=!strcmp(id,"A16");
+    data(h,9,0,1);
+    if(!strcmp(id,"A18"))
+        DC(pgwt_capture_fault(h->capture,PGWT_MERGE_ALLOCATION_FAIL,DB+20,&h->snapshot)==0,"fault before abandonment");
+    if(!strcmp(id,"A07")) {
+        dcontrol(h,admit(40,DG+1,13,1));dcontrol(h,bracket(40,DG+1,12,13,1));
+        dabandon(h,30,DG);record(h,15,40,DG+1,1,PGWT_MERGE_TRANS,1,false,true);complete(h,16);
+        pgwt_discovery_state state;
+        DC(pgwt_merge_discovery_state(h->capture->core,40,DG+1,&state) && state.lower_bound==DB+12,
+           "H quiet bound independent of D abandonment");return;
+    }
+    bool base=!strcmp(id,"A01")||!strcmp(id,"A02")||!strcmp(id,"A03")||!strcmp(id,"A09")||
+        !strcmp(id,"A10")||!strcmp(id,"A11")||!strcmp(id,"A12")||!strcmp(id,"A15")||!strcmp(id,"A17");
+    if(base) {
+        data(h,12,0,1);complete(h,13);state_is(h,"",-1,1,true);
+    }
+    dabandon(h,30,DG);
+    if(!strcmp(id,"A05")) {dadmit(h,8);complete(h,16);return;}
+    if(!strcmp(id,"A08")||!strcmp(id,"A14")) {
+        if(!strcmp(id,"A08")) h->snapshot.value[0]=1;
+        else h->snapshot.valid=false;
+        ma_envelope e={.version=1,.kind=MA_CHECK};
+        DC(pgwt_capture_envelope(h->capture,&e,DB+20,&h->snapshot)==0,"abandoned failure checkpoint");
+    }
+    if(!strcmp(id,"A13")) {
+        for(size_t s=0;s<4;++s) {
+            if(s==2) continue;
+            ma_envelope e={.kind=MA_BOUNDARY,.version=1,.source=s,.position=++h->pos[s],
+                .w=DB+16,.boundary=s<2?MA_IDLE_PERF:MA_RING_BOUNDARY};
+            DC(pgwt_capture_envelope(h->capture,&e,DB+20,&h->snapshot)==0,"partial source completeness");
+        }
+        return;
+    }
+    complete(h,16);
+    if(!strcmp(id,"A02")) {data(h,17,0,1);complete(h,20);}
+    if(!strcmp(id,"A10")) dquiet(h,12,13);
+    if(!strcmp(id,"A11")) data(h,14,0,1);
+    if(!strcmp(id,"A12")) {
+        DC(pgwt_capture_fault(h->capture,PGWT_MERGE_ALLOCATION_FAIL,DB+20,&h->snapshot)==0,"fault after discards");
+        pgwt_merge_attachment proofs[2]={{.pid=10,.g=1,.identity_proved=true},
+            {.pid=20,.g=1,.identity_proved=true}};
+        pgwt_merge_input rearm={.kind=PGWT_MERGE_REARM,.observation={.d=DB+21,.counters={.known=true}},
+            .attachments=proofs,.attachment_count=2,.attachment_proofs_fresh=true};
+        DC(pgwt_capture_replay_control(h->capture,&rearm)==PGWT_MERGE_OK,"explicit REARM accepted");
+        h->detection=22;data(h,17,0,1);complete(h,18);
+    }
+    if(!strcmp(id,"A03")||!strcmp(id,"A09")||!strcmp(id,"A15")||!strcmp(id,"A17")) {
+        data(h,18,2,1);record(h,18,30,DG,3,PGWT_MERGE_EXIT,0,false,false);dterminal(h);
+        complete(h,18);state_is(h,"F12 F15 F17",-1,1,true);
+        DC(pgwt_capture_report(h->capture).discovery_abandoned_records==2,"terminal at W is not consumed");
+        h->reject_exit=!strcmp(id,"A15");complete(h,19);
+        if(!strcmp(id,"A09")) dabandon(h,30,DG);
+        if(!strcmp(id,"A17")) {
+            record(h,20,30,1,3,PGWT_MERGE_FORK,0,false,false);
+            record(h,22,30,1,0,PGWT_MERGE_TRANS,0,false,true);complete(h,23);
+        }
+    }
+}
 static void run_row(const char *id)
 {
-    bool two=!strcmp(id,"D07a")||!strcmp(id,"D07b")||!strcmp(id,"D08a")||!strcmp(id,"D08b");
-    struct dh *h=dsetup(two,!strcmp(id,"D07b")?25:5,!strcmp(id,"D13e"));
-    if(!strcmp(id,"D01")||!strcmp(id,"D10")) {
+    bool two=!strcmp(id,"D07a")||!strcmp(id,"D07b")||!strcmp(id,"D08a")||!strcmp(id,"D08b")||
+        !strcmp(id,"A04")||!strcmp(id,"A07");
+    struct dh *h=dsetup(two,!strcmp(id,"D07b")?25:!strcmp(id,"D14b")?15:5,!strcmp(id,"D13e"));
+    if(id[0]=='A') {
+        abandon_row(h,id);
+    } else if(!strcmp(id,"D14a")||!strcmp(id,"D14b")) {
+        dadmit(h,8);data(h,12,0,1);
+        if(!strcmp(id,"D14a")) record(h,12,10,1,1,PGWT_MERGE_TRANS,0,false,true);
+        data(h,15,0,1);complete(h,16);
+    } else if(!strcmp(id,"D01")||!strcmp(id,"D10")) {
         dadmit(h,8);data(h,12,0,1);data(h,15,0,1);complete(h,16);
-        state_is(h,"D12U D15T F15",12,0,true);endpoint_verdict(h,12);
+        state_is(h,"D12U D15T F15",12,0,true);endpoint_verdict(h,12,true);
         if(!strcmp(id,"D10")) {
+            numerical_outputs(h,"D01");
             complete(h,31);
             DC(base_verdict(h,13,16)==PGWT_COV_COMPLETE,"late revocation previously certified window");
             unsigned char bytes[48]={0};tb_le(bytes+8,99,4);
@@ -512,16 +690,16 @@ static void run_row(const char *id)
         dcontrol(h,a);complete(h,16);state_is(h,"F15",-1,1,true);
         pgwt_discovery_state r;DC(pgwt_merge_discovery_state(h->capture->core,30,DG,&r),"candidate lifetime retained");
         DC(r.baseline.t==0,"address mismatch rejects quiet candidate");
-    } else if(!strcmp(id,"Q09")) {
+    } else if(!strcmp(id,"Q09")||!strcmp(id,"D14c")) {
         dcontrol(h,admit(30,DG,12,3));pgwt_discovery_attempt final=bracket(30,DG,11,12,3);
-        final.witness.v0=final.witness.v1=9;dcontrol(h,final);data(h,9,0,1);
-        complete(h,12);state_is(h,"D9U F11",11,0,true);
+        final.witness.v0=final.witness.v1=9;dcontrol(h,final);data(h,!strcmp(id,"D14c")?11:9,0,!strcmp(id,"D14c")?2:1);
+        complete(h,12);state_is(h,!strcmp(id,"D14c")?"D11U F11":"D9U F11",11,0,true);
         pgwt_discovery_state after_first;
         DC(pgwt_merge_discovery_state(h->capture->core,30,DG,&after_first) &&
            after_first.confirmed && after_first.lower_bound==DB+11 &&
            after_first.baseline.t==DB+11 && after_first.baseline.v0==9 &&
            after_first.attachment_generation==3,"D9 does not rebase final attachment seed");
-        data(h,15,0,3);complete(h,16);state_is(h,"D9U F11 D15T F15",11,0,true);
+        data(h,15,0,3);complete(h,16);state_is(h,!strcmp(id,"D14c")?"D11U F11 D15T F15":"D9U F11 D15T F15",11,0,true);
         pgwt_discovery_state s;DC(pgwt_merge_discovery_state(h->capture->core,30,DG,&s),"confirmed baseline retained");
         DC(s.baseline.t==DB+11,"earlier attempt cannot overwrite final baseline");
     } else if(id[0]=='Q') {
@@ -549,7 +727,11 @@ static void run_row(const char *id)
 static void adversarial_guards(const char *id)
 {
     struct dh *h;
-    if(!strcmp(id,"D01")) {
+    if(!strcmp(id,"A01")) {
+        h=dsetup(false,5,false);data(h,9,0,1);data(h,12,0,1);dabandon(h,30,DG);complete(h,16);
+        DC(pgwt_capture_pending_records(h->capture)==0 && h->capture->arrival_count==0,
+           "consumed discards release all capture bookkeeping slots");
+    } else if(!strcmp(id,"D01")) {
         h=dsetup(false,5,false);dadmit(h,8);
         record(h,12,30,DG,0,PGWT_MERGE_TRANS,1,true,false);data(h,15,0,1);complete(h,16);
         DC(!strcmp(h->output,"D12U D15U F15"),"stale marker cannot establish lower bound");
@@ -579,6 +761,94 @@ static void adversarial_guards(const char *id)
         complete(h,18);complete(h,19);
         pgwt_capture_discovery_report r=pgwt_capture_discovery_status(h->capture);
         DC(!r.closed && r.unresolved==1 && !strcmp(h->output,"F17"),"ESRCH cannot authorize matching EXIT");
+    } else if(!strcmp(id,"D08a") || !strcmp(id,"A15")) {
+        h=dsetup(false,5,false);
+        /* Identity insertion never completed. Retain the cookie-less kernel
+         * witness; only TERM's matching census/lifecycle proof can bind it. */
+        record(h,18,30,0,3,PGWT_MERGE_EXIT,0,false,false);
+        pgwt_capture_discovery_report pending=pgwt_capture_discovery_status(h->capture);
+        DC(pending.unresolved==1 && pending.census_complete,"cookie-less EXIT retains one census lifetime");
+        complete(h,18);
+        DC(h->nreleased==0,"unmatched cookie-less EXIT does not publish");
+        h->reject_exit=!strcmp(id,"A15");dterminal(h);complete(h,19);
+        pgwt_capture_discovery_report after=pgwt_capture_discovery_status(h->capture);
+        bool rejected=!strcmp(id,"A15");
+        DC(after.unresolved==(rejected?1:0) && after.closed==!rejected,
+           "pre-install terminal discharge requires successful EXIT publication");
+        DC(base_verdict(h,18,19)==(rejected?PGWT_COV_INCOMPLETE:PGWT_COV_COMPLETE),
+           "pre-install terminal endpoint through reader");
+        DC(h->nreleased==(rejected?0:1),"pre-install EXIT publication result");
+    } else if(!strcmp(id,"A03")) {
+        h=dsetup(false,5,false);
+        dabandon(h,30,DG);record(h,18,30,DG,3,PGWT_MERGE_EXIT,0,false,false);complete(h,19);
+        DC(h->nreleased==1 && pgwt_capture_discovery_status(h->capture).unresolved==1,
+           "published EXIT awaits matching terminal proof");
+        dterminal(h);
+        DC(pgwt_capture_discovery_status(h->capture).closed && base_verdict(h,18,19)==PGWT_COV_COMPLETE,
+           "later terminal proof matches retained successful EXIT");
+        pgwt_capture_destroy(h->capture);free(h);
+        h=dsetup(false,5,false);dabandon(h,30,DG);
+        record(h,18,30,DG,3,PGWT_MERGE_EXIT,0,false,false);complete(h,19);
+        data(h,19,2,1);dterminal(h);
+        DC(!pgwt_capture_discovery_status(h->capture).closed &&
+           pgwt_capture_discovery_status(h->capture).unresolved==1 &&
+           pgwt_capture_report(h->capture).status==PGWT_MERGE_SUSPENDED,
+           "terminal proof reconciles staged records beyond EXIT before discharge");
+        pgwt_capture_destroy(h->capture);free(h);
+        h=dsetup(false,5,false);dabandon(h,30,DG);h->counter_after_exit=true;
+        record(h,18,30,DG,3,PGWT_MERGE_EXIT,0,false,false);complete(h,19);
+        DC(h->nreleased==1 && pgwt_capture_report(h->capture).status==PGWT_MERGE_SUSPENDED,
+           "successful EXIT publication precedes independent counter fault");
+        pgwt_merge_attachment proofs[2]={{.pid=10,.g=1,.identity_proved=true},
+            {.pid=20,.g=1,.identity_proved=true}};
+        pgwt_merge_input rearm={.kind=PGWT_MERGE_REARM,.observation={.d=DB+21,.counters={.known=true,.value={1}}},
+            .attachments=proofs,.attachment_count=2,.attachment_proofs_fresh=true,.identity_repaired=true};
+        DC(pgwt_capture_replay_control(h->capture,&rearm)==PGWT_MERGE_OK,"terminal evidence explicit recovery");
+        h->detection=22;dterminal(h);complete(h,20);
+        DC(pgwt_capture_discovery_status(h->capture).closed &&
+           pgwt_capture_discovery_status(h->capture).unresolved==0 &&
+           pgwt_capture_report(h->capture).faults[PGWT_MERGE_COUNTER_CHANGE]==1,
+           "successful EXIT survives counter fault for later terminal reconciliation");
+        record(h,20,30,1,3,PGWT_MERGE_FORK,0,false,false);
+        record(h,22,30,1,0,PGWT_MERGE_TRANS,0,false,true);complete(h,23);
+        DC(pgwt_capture_report(h->capture).status==PGWT_MERGE_OK && h->nreleased==3 &&
+           h->released[2].cookie==1 && !h->released[2].certified,
+           "retained published EXIT permits distinct replacement after recovery");
+    } else if(!strcmp(id,"A06")) {
+        h=dsetup(false,5,false);h->capture->inventory[0].identity_installed=false;
+        dabandon(h,30,DG);
+        DC(!strcmp(h->output,"VOID20:unknown_evidence"),"reserved cookie alone cannot authorize abandonment");
+    } else if(!strcmp(id,"A04")) {
+        h=dsetup(true,5,false);dadmit(h,8);data(h,12,0,1);complete(h,13);
+        DC(pgwt_capture_fault(h->capture,PGWT_MERGE_ALLOCATION_FAIL,DB+20,&h->snapshot)==0,"admitted epoch fault");
+        pgwt_merge_attachment proofs[2]={{.pid=10,.g=1,.identity_proved=true},
+            {.pid=20,.g=1,.identity_proved=true}};
+        pgwt_merge_input rearm={.kind=PGWT_MERGE_REARM,.observation={.d=DB+21,.counters={.known=true}},
+            .attachments=proofs,.attachment_count=2,.attachment_proofs_fresh=true};
+        DC(pgwt_capture_replay_control(h->capture,&rearm)==PGWT_MERGE_OK,"admitted-history REARM");
+        h->detection=22;dabandon(h,30,DG);
+        pgwt_discovery_state state;
+        DC(pgwt_merge_discovery_state(h->capture->core,30,DG,&state) && state.admitted && !state.abandoned &&
+           pgwt_capture_report(h->capture).status==PGWT_MERGE_SUSPENDED,
+           "admission history forbids abandonment across REARM");
+    } else if(!strcmp(id,"A09")) {
+        h=dsetup(false,5,false);dabandon(h,30,DG);
+        h->snapshot.value[0]=1;dabandon(h,30,DG);
+        DC(!strcmp(h->output,"VOID20:counter_change"),"duplicate abandonment still observes counters");
+    } else if(!strcmp(id,"A19")) {
+        h=dsetup(false,5,false);dabandon(h,30,DG);h->allow_shared_text=true;
+        text_for_d(h);complete(h,16);
+        DC(!strcmp(h->full_output,"TEXTx F15[C0]") &&
+           pgwt_capture_report(h->capture).discovery_abandoned_records==0,
+           "shared metadata is published and not counted as abandoned");
+        pgwt_capture_destroy(h->capture);free(h);
+        h=dsetup(false,5,false);
+        ma_table t=table(h->capture);size_t slot=ma_binding_bucket(&t,77,NULL);
+        h->capture->bindings[h->capture->binding_count++]=(ma_binding){.query_id=77,.dependency_id=1,.kind=MA_WAIT};
+        h->capture->binding_index[slot]=h->capture->binding_count;
+        h->query_dependency=true;data(h,9,0,1);dabandon(h,30,DG);complete(h,16);
+        DC(h->nreleased==0 && h->full_length==0 && pgwt_capture_report(h->capture).discovery_abandoned_records==0,
+           "abandonment cannot bypass missing metadata dependency");
     } else if(!strcmp(id,"D13a")) {
         h=dsetup(false,5,false);h->snapshot.value[0]=1;
         ma_envelope check={.version=1,.kind=MA_CHECK};
@@ -622,14 +892,14 @@ static void empty_census(void)
     state_is(h,"F15",-1,0,false);
     DC(base_verdict(h,6,10)==PGWT_COV_INCOMPLETE,"unknown empty census cannot certify a window");
     DC(pgwt_capture_discovery_census(h->capture,DB+5,true,DB+20,&h->snapshot)==0,"explicit complete empty census");
-    state_is(h,"F15",5,0,true);endpoint_verdict(h,5);
+    state_is(h,"F15",5,0,true);endpoint_verdict(h,5,false);
     DC(base_verdict(h,6,10)==PGWT_COV_COMPLETE,"complete empty census certifies ordinary windows");
     pgwt_capture_destroy(h->capture);free(h);
 
     h=dsetup_inventory(0,16,false,true);complete(h,16);
     state_is(h,"F15",-1,0,true);
     complete(h,17);state_is(h,"F15 F16",16,0,true);
-    endpoint_verdict(h,16);
+    endpoint_verdict(h,16,false);
     pgwt_capture_destroy(h->capture);free(h);
 
     h=dsetup_inventory(0,5,false,true);h->reject_close=true;complete(h,16);

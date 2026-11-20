@@ -29,6 +29,8 @@ struct arrival {
 };
 struct discovery_inventory {
     uint64_t pid, cookie;
+    bool terminal_proved, identity_installed;
+    uint64_t terminal_at;
 };
 struct pgwt_merge_capture {
     struct pgwt_capture_dump *dump;
@@ -334,6 +336,22 @@ static bool capture_sink(void *ctx, const pgwt_merge_output *out,
     return ok;
 }
 
+static void capture_discovery_discard(void *ctx, const pgwt_merge_record *r, bool text)
+{
+    struct pgwt_merge_capture *c = ctx;
+    (void)text;
+    if (r->payload_size >= sizeof(uint64_t)) {
+        uint64_t id;
+        memcpy(&id, r->payload, sizeof(id));
+        if (id && id <= c->config.capacity) {
+            const struct arrival *a = &c->arrivals[id - 1];
+            if (a->active && a->source == r->source && a->position == r->o)
+                arrival_remove(c, (size_t)id, c->observation.d);
+        }
+    }
+    if (c->staged) --c->staged;
+}
+
 /* Normally the FRONTIER callback commits the batch inside the core's
  * publication checkpoint. TEXT may publish without advancing F; finish that
  * batch here. A failed append leaves only an uncertified suffix and must
@@ -440,6 +458,7 @@ static struct pgwt_merge_capture *capture_create(const struct pgwt_capture_confi
     pgwt_pool_set(&c->diagnostics.pools[PGWT_POOL_CAPTURE_LIFETIME], c->lifetime_count);
     pgwt_pool_set(&c->diagnostics.pools[PGWT_POOL_CAPTURE_BINDING], c->binding_count);
     if (!ma_core_config(c->adapter, &base, &core_config)) goto fail;
+    core_config.discovery_discard = capture_discovery_discard;
     pgwt_merge_status status;
     c->core = pgwt_merge_create(&core_config, &status);
     if (!c->core || pgwt_merge_get_report(c->core).void_failed) goto fail;
@@ -503,13 +522,20 @@ static int discovery_progress(struct pgwt_merge_capture *c)
     }
     /* frontier = W-1. W must be strictly beyond semantic C. */
     pgwt_merge_report report = pgwt_capture_report(c);
-    if (!report.has_frontier || report.frontier < close || close == UINT64_MAX) return 0;
+    if (!report.has_frontier || report.frontier < close) return 0;
     if (!c->startup_open_published) return 0;
-    /* DECISION 42: integer-ns GAP_CLOSE is C+1. The existing reader thus
-     * refuses even [C,C+1), excluding ALL completions at C without changing
-     * payload bytes or inventing a per-record discovery storage carrier. */
+    bool increment = false;
+    for (size_t i = 0; i < c->inventory_count; ++i) {
+        pgwt_discovery_state s;
+        const struct discovery_inventory *v = &c->inventory[i];
+        (void)pgwt_merge_discovery_state(c->core, v->pid, v->cookie, &s);
+        if (s.has_uncertified && s.uncertified_through == close) increment = true;
+    }
+    if (increment && close == UINT64_MAX) return 0;
+    /* Only a consumed uncertified numerical record at C excludes its instant.
+     * Quiet, census and terminal bounds otherwise persist C unchanged. */
     struct pgwt_capture_gap gap = {.kind = PGWT_CAPTURE_GAP_PREEXISTING_END,
-        .at = close + 1, .detected = c->observation.d};
+        .at = close + (increment ? 1 : 0), .detected = c->observation.d};
     if (!startup_publish(c, gap)) {
         if (c->config.writer_failed) {
             c->config.writer_failed(c->config.ctx);
@@ -621,7 +647,8 @@ int pgwt_capture_discovery_inventory(struct pgwt_merge_capture *c, uint64_t pid,
         c->census_complete = false;
         ++c->inventory_count;
     }
-    c->inventory[i] = (struct discovery_inventory){pid, cookie};
+    c->inventory[i].pid = pid;
+    c->inventory[i].cookie = cookie;
     ma_table t = table(c);
     size_t slot = ma_lifetime_bucket(&t, pid, cookie, NULL);
     if (!c->lifetime_index[slot]) {
@@ -642,16 +669,57 @@ int pgwt_capture_discovery_census(struct pgwt_merge_capture *c, uint64_t fence,
     ma_envelope check = {.version = 1, .kind = MA_CHECK};
     return pgwt_capture_envelope(c, &check, d, s);
 }
+int pgwt_capture_discovery_installed(struct pgwt_merge_capture *c, uint64_t pid,
+                                       uint64_t cookie, pgwt_discovery_facts proof)
+{
+    if (!c || !c->config.discovery_enabled || c->finished ||
+        !pgwt_discovery_has(proof, PGWT_DISC_IDENTITY_VISIBLE | PGWT_DISC_EMISSION_IDENTITY))
+        return -EINVAL;
+    for (size_t i = 0; i < c->inventory_count; ++i)
+        if (c->inventory[i].pid == pid && c->inventory[i].cookie == cookie) {
+            c->inventory[i].identity_installed = true;
+            return 0;
+        }
+    return -EINVAL;
+}
 int pgwt_capture_discovery_control(struct pgwt_merge_capture *c, const pgwt_discovery_attempt *a,
                                    uint64_t d, const ma_snapshot *s)
 {
     if (!c || !c->config.discovery_enabled || !a) return -EINVAL;
-    if (a->cookie >= PGWT_DISCOVERY_COOKIE_MIN) {
+    pgwt_discovery_attempt control = *a;
+    if (a->kind == PGWT_DISC_ABANDON) {
+        bool inventoried = false, installed = false, bound = false;
+        for (size_t i = 0; i < c->inventory_count; ++i)
+            if (c->inventory[i].pid == a->pid && c->inventory[i].cookie == a->cookie) {
+                inventoried = true;
+                installed = c->inventory[i].identity_installed;
+            }
+        ma_table t = table(c);
+        size_t slot = ma_lifetime_bucket(&t, a->pid, a->cookie, NULL);
+        if (c->lifetime_index[slot])
+            bound = c->lifetimes[c->lifetime_index[slot] - 1].identity_bound;
+        control.proof = (pgwt_discovery_facts){
+            .known = PGWT_DISC_INVENTORIED | PGWT_DISC_STARTUP_OPEN | PGWT_DISC_IDENTITY_VISIBLE,
+            .truth = (inventoried ? PGWT_DISC_INVENTORIED : 0) |
+                (c->coverage_begun && !c->startup_closed ? PGWT_DISC_STARTUP_OPEN : 0) |
+                (bound && installed ? PGWT_DISC_IDENTITY_VISIBLE : 0)};
+    } else if (a->cookie >= PGWT_DISCOVERY_COOKIE_MIN) {
         int rc = pgwt_capture_discovery_inventory(c, a->pid, a->cookie);
         if (rc < 0) return rc;
     }
+    if (a->kind == PGWT_DISC_TERMINAL && a->terminal_binding_proved) {
+        for (size_t i = 0; i < c->inventory_count; ++i) {
+            struct discovery_inventory *v = &c->inventory[i];
+            if (v->pid == a->pid && v->cookie == a->cookie) {
+                if (v->terminal_proved && v->terminal_at != a->terminal_time)
+                    return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);
+                v->terminal_proved = true;
+                v->terminal_at = a->terminal_time;
+            }
+        }
+    }
     ma_envelope e = {.version = 1, .kind = MA_DISCOVERY_CONTROL, .origin = MA_ADMIN,
-        .discovery = *a};
+        .discovery = control};
     return pgwt_capture_envelope(c, &e, d, s);
 }
 #ifdef PGWT_TRANSPORT_HOST_TEST
@@ -738,6 +806,17 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
      * A FRONTIER therefore says nothing about uncovered backends. */
     ++c->payload_records;
     bool uncovered = e->kind != MA_TEXT && !(e->cookie_present && e->cookie);
+    if (uncovered && c->config.discovery_enabled && e->kind == MA_LIFECYCLE &&
+        get_le(e->bytes, 2) == PGWT_LIFECYCLE_EXIT) {
+        uint64_t pid = get_le(e->bytes + 4, 4);
+        for (size_t i = 0; i < c->inventory_count; ++i)
+            if (c->inventory[i].pid == pid) {
+                /* Retain the raw witness, without guessing its cookie. Only
+                 * matching terminal control can bind it at adapter release. */
+                uncovered = false;
+                break;
+            }
+    }
     bool preproof = (c->rearm_at && e->kind != MA_TEXT &&
         get_le(e->bytes + (e->kind == MA_TRACE ? 0 : 16), 8) < c->rearm_at);
     bool dropped = !uncovered && (pgwt_capture_report(c).status != PGWT_MERGE_OK || preproof);
@@ -933,15 +1012,45 @@ static int mapped(struct pgwt_merge_capture *c, const ma_envelope *e,
     ma_envelope semantic;
     const ma_envelope *adapter_input = e;
     unsigned char exit_payload[24];
+    if (c->config.discovery_enabled && e->kind == MA_LIFECYCLE &&
+        e->size == sizeof(exit_payload) && get_le(e->bytes, 2) == PGWT_LIFECYCLE_EXIT &&
+        !(e->cookie_present && e->cookie)) {
+        uint64_t pid = get_le(e->bytes + 4, 4), at = get_le(e->bytes + 16, 8);
+        uint64_t cookie = 0;
+        for (size_t i = 0; i < c->inventory_count; ++i) {
+            const struct discovery_inventory *v = &c->inventory[i];
+            if (v->pid != pid || !v->terminal_proved || v->terminal_at != at) continue;
+            if (cookie && cookie != v->cookie)
+                return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, *s);
+            cookie = v->cookie;
+        }
+        if (!cookie) {
+            ma_envelope check = {.version = 1, .kind = MA_CHECK};
+            bool ignored;
+            int rc = mapped(c, &check, 0, d, s, &ignored);
+            *hold = true;
+            return rc;
+        }
+        semantic = *e;
+        semantic.cookie = cookie;
+        semantic.cookie_present = true;
+        adapter_input = &semantic;
+    }
     if (e->kind == MA_LIFECYCLE && e->size == sizeof(exit_payload) &&
         get_le(e->bytes, 2) == PGWT_LIFECYCLE_EXIT && get_le(e->bytes + 2, 2)) {
         memcpy(exit_payload, e->bytes, sizeof(exit_payload));
         exit_payload[2] = exit_payload[3] = 0;
-        semantic = *e;
+        semantic = *adapter_input;
         semantic.bytes = exit_payload;
         adapter_input = &semantic;
     }
+    /* A retained envelope still owns its source while a temporary semantic
+     * view supplies the proved terminal cookie or strips EXIT diagnostics. */
+    bool remapped_owner = adapter_input != e && e->source < c->source_count &&
+        c->held[e->source] == e;
+    if (remapped_owner) c->held[e->source] = adapter_input;
     ma_result r = ma_map(c->adapter, adapter_input, &t, d, snap);
+    if (remapped_owner) c->held[e->source] = e;
     if (adapter_input != e) {
         for (size_t i = 0; i < r.count; ++i)
             if (r.input[i].kind == PGWT_MERGE_DATA) r.input[i].record.payload = e->bytes;
@@ -1215,7 +1324,8 @@ struct pgwt_capture_coverage pgwt_capture_coverage(const struct pgwt_merge_captu
     s.open = c->pause_open; s.reason = c->pause_reason; s.pool = c->pause_pool;
     s.pause_ns = c->pause_ns + (c->pause_open && now >= c->pause_start ? now - c->pause_start : 0);
     s.window_ns = now >= c->capture_start ? now - c->capture_start : 0;
-    s.epoch_invalid = pgwt_capture_report(c).epoch_invalid;
+    pgwt_merge_report report = pgwt_capture_report(c);
+    s.epoch_invalid = report.epoch_invalid;
     /* Invalidated prefixes are unavailable, not still advertised as covered.
      * This run-level report conservatively withdraws all coverage; it is not
      * a replacement for the core's per-epoch invalidation history. */
@@ -1230,6 +1340,7 @@ struct pgwt_capture_coverage pgwt_capture_coverage(const struct pgwt_merge_captu
     s.payload_records = c->payload_records; s.dropped = c->dropped_records;
     s.uncovered = c->uncovered_records; s.pending = c->arrival_count;
     s.dropped_boundaries = c->dropped_boundaries;
+    s.discovery_abandoned_records = report.discovery_abandoned_records;
     return s;
 }
 void pgwt_capture_coverage_print(FILE *out, const struct pgwt_merge_capture *c, uint64_t now,
@@ -1239,7 +1350,8 @@ void pgwt_capture_coverage_print(FILE *out, const struct pgwt_merge_capture *c, 
     uint64_t released = c->released_data + c->released_text;
     controls -= s.dropped_boundaries;
     uint64_t dropped = s.dropped + s.dropped_boundaries + dropped_controls;
-    uint64_t accounted = released + dropped + s.uncovered + s.pending + controls + rejected;
+    uint64_t accounted = released + dropped + s.uncovered + s.pending + controls + rejected +
+        s.discovery_abandoned_records;
     fprintf(out, "exact-perf: coverage capacity_pauses=%" PRIu64 " recovery_attempts=%" PRIu64
         " rearms=%" PRIu64 " pause_seconds=%.9f unavailable_seconds=%.9f last_start_ns=%" PRIu64 " last_end_ns=%" PRIu64
         " open=%d reason=%s pool=%s dropped=%" PRIu64 " window_ns=%" PRIu64
@@ -1249,7 +1361,14 @@ void pgwt_capture_coverage_print(FILE *out, const struct pgwt_merge_capture *c, 
         s.open, s.pauses ? pgwt_merge_reason_name(s.reason) : "none", pgwt_pool_name(s.pool), dropped,
         s.window_ns, s.covered_ns, s.unavailable_ns, s.epoch_invalid,
         s.covered_ns + s.unavailable_ns == s.window_ns);
-    fprintf(out, "exact-perf: wire_identity wire=%" PRIu64 " released=%" PRIu64
+    if (c->config.discovery_enabled) {
+        fprintf(out, "exact-perf: wire_identity wire=%" PRIu64 " released=%" PRIu64
+            " counted_dropped=%" PRIu64 " uncovered=%" PRIu64 " pending=%" PRIu64
+            " boundary_control=%" PRIu64 " rejected_fault=%" PRIu64
+            " discovery_abandoned_records=%" PRIu64 " ok=%d\n",
+            wire, released, dropped, s.uncovered, s.pending, controls, rejected,
+            s.discovery_abandoned_records, wire == accounted);
+    } else fprintf(out, "exact-perf: wire_identity wire=%" PRIu64 " released=%" PRIu64
         " counted_dropped=%" PRIu64 " uncovered=%" PRIu64 " pending=%" PRIu64
         " boundary_control=%" PRIu64 " rejected_fault=%" PRIu64 " ok=%d\n",
         wire, released, dropped, s.uncovered, s.pending, controls, rejected, wire == accounted);

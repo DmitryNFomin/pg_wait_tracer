@@ -126,8 +126,9 @@ struct pgwt_capture_config {
 };
 struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *);
 /* Begin boot coverage before advertising it. With discovery_enabled, PID-only
- * entries await lifetime binding and an explicit census; a cookie-less EXIT
- * cannot discharge them. Otherwise the existing T-cov scan/EXIT rules apply. */
+ * entries await lifetime binding and an explicit census. A cookie-less EXIT
+ * waits for a matching retained terminal witness, then must publish normally
+ * before discharge. Otherwise the existing T-cov scan/EXIT rules apply. */
 int pgwt_capture_coverage_begin(struct pgwt_merge_capture *, uint64_t boot_start,
                                  const uint32_t *pids, size_t count,
                                  void (*persist)(void *, const struct pgwt_capture_gap *));
@@ -139,6 +140,11 @@ typedef struct {
 /* Producer supplies retained lifetime binding, never a current-PID lookup.
  * cookie is reserved even when identity insertion/attachment failed. */
 int pgwt_capture_discovery_inventory(struct pgwt_merge_capture *, uint64_t pid, uint64_t cookie);
+/* Retained producer evidence that identity installation succeeded with a
+ * continuous emission/lifetime binding. Reserving an inventory cookie alone
+ * does not establish this fact and cannot authorize ABANDON. */
+int pgwt_capture_discovery_installed(struct pgwt_merge_capture *, uint64_t pid,
+                                      uint64_t cookie, pgwt_discovery_facts proof);
 int pgwt_capture_discovery_census(struct pgwt_merge_capture *, uint64_t fence,
                                   bool completeness_proved, uint64_t d, const ma_snapshot *);
 int pgwt_capture_discovery_control(struct pgwt_merge_capture *, const pgwt_discovery_attempt *,
@@ -210,6 +216,7 @@ struct pgwt_capture_coverage {
     uint64_t pauses, attempts, proof_acquisitions, rearms;
     uint64_t last_start, last_end, pause_ns, window_ns, covered_ns, unavailable_ns;
     uint64_t payload_records, dropped, uncovered, pending, dropped_boundaries;
+    uint64_t discovery_abandoned_records;
     pgwt_merge_reason reason;
     pgwt_pool pool;
     bool open, epoch_invalid;

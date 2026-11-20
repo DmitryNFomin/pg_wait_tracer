@@ -136,7 +136,8 @@ with tempfile.TemporaryDirectory(prefix="pgwt-capture-bookkeeping-") as temporar
             shutil.copy2(ROOT / "src/attach_timeline.h", tree / "src/attach_timeline.h")
             # daemon.h gained the portable coverage tracker in U1. These are
             # build dependencies only; the pinned migration bytes stay intact.
-            for header in ("open_snapshot.h", "cJSON.h"):
+            for header in ("core/pgwt_discovery.h", "core/pgwt_a2_population.h",
+                           "open_snapshot.h", "cJSON.h"):
                 shutil.copy2(ROOT / "src" / header, tree / "src" / header)
         for name in TESTS:
             (tree / "tests").mkdir(exist_ok=True)
