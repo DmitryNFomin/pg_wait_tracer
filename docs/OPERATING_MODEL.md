@@ -146,9 +146,9 @@ happened -- and it is what exposed the same claim as false for a second branch
 on the same day.
 
 **`make check` reports through its stamp**, `.pgwt-check.stamp`:
-`scripts/check.sh` removes the stamp when a test fails. Its format is
-`<tree-hash> <fast|full>`: the first field must equal `scripts/tree-hash.sh`,
-and the second records the tested mode. Either mode satisfies the push guard;
+`scripts/check.sh` removes the stamp and `.pgwt-check.mode` when a test fails.
+The stamp contains only the tree hash, which must equal `scripts/tree-hash.sh`;
+`.pgwt-check.mode` records `fast` or `full`. Either mode satisfies the push guard;
 PR readiness requires `full`. The matching stamp is the pass signal. One hazard
 found while writing this handover: the stamp is computed when the run finishes,
 so if the tree changes mid-run the stamp describes a tree the run never tested.

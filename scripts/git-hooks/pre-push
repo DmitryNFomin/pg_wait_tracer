@@ -22,8 +22,8 @@ stamp=$(cat .pgwt-check.stamp) || {
     echo "push blocked: could not read .pgwt-check.stamp. Re-run 'make check-fast'." >&2
     exit 2
 }
-if [[ "$stamp" != "$now fast" && "$stamp" != "$now full" ]]; then
-    echo "push blocked: tree changed since the last passing check or stamp mode invalid (stamp $stamp, tree $now). Re-run 'make check-fast'." >&2
+if [[ "$stamp" != "$now" ]]; then
+    echo "push blocked: tree changed since the last passing check (stamp $stamp, tree $now). Re-run 'make check-fast'." >&2
     exit 2
 fi
 

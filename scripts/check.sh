@@ -9,8 +9,8 @@
 # Everything that needs the Linux build (C units, synthetic-data tests against
 # pgwt-server, protocol drift, live capture) runs via `make box-check`.
 #
-# On success writes .pgwt-check.stamp = "<tree hash> <fast|full>" for the
-# exact working tree that passed, so the guard can detect later changes.
+# On success writes .pgwt-check.stamp = "<tree hash>" for the exact working
+# tree that passed and .pgwt-check.mode = "fast" or "full" beside it.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
@@ -566,16 +566,17 @@ if [[ $FAST -eq 0 ]]; then
 fi
 
 if [[ $fail -ne 0 ]]; then
-    echo; echo "CHECK FAILED"; rm -f .pgwt-check.stamp; exit 1
+    echo; echo "CHECK FAILED"; rm -f .pgwt-check.stamp .pgwt-check.mode; exit 1
 fi
 
 # Stamp the exact tree (tracked + untracked, minus ignored) that passed.
 mode=full
 [[ $FAST -eq 0 ]] || mode=fast
 if ! tree_hash=$(scripts/tree-hash.sh) || [[ -z "$tree_hash" ]] ||
-   ! printf '%s %s\n' "$tree_hash" "$mode" > .pgwt-check.stamp; then
+   ! printf '%s\n' "$mode" > .pgwt-check.mode ||
+   ! printf '%s\n' "$tree_hash" > .pgwt-check.stamp; then
     echo "CHECK FAILED: cannot write tree/mode stamp"
-    rm -f .pgwt-check.stamp
+    rm -f .pgwt-check.stamp .pgwt-check.mode
     exit 1
 fi
 echo; echo "CHECK PASSED ($mode) — stamp $tree_hash"
