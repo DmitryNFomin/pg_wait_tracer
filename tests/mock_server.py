@@ -1591,11 +1591,14 @@ def _handle_request_inner(cmd, req_id, msg):
                 # in this window, so nothing to classify is vacuously complete.
                 # tests/test_protocol_drift.py compares this protocol surface;
                 # keep it in sync with emit_transitions_response() in src/server.c.
+                # entered includes the three capped-out pairs too:
+                # IO->LWLock (40), LWLock->CPU (50), LWLock->ClientRead (40).
+                # Their 130 entries plus the 1670 shown sum to total=1800.
                 "idle_classification_complete": True, "nodes": [
-            {"name": "CPU*", "total_ms": 4800, "count": 690, "sampled_ms": 0, "class": "CPU", "event_id": 0, "idle": False},
-            {"name": "Client:ClientRead", "total_ms": 9153, "count": 900, "sampled_ms": 0, "class": "Client", "event_id": 0x06000000, "idle": True},
-            {"name": "IO:DataFileRead", "total_ms": 2100, "count": 120, "sampled_ms": 0, "class": "IO", "event_id": 0x01000015, "idle": False},
-            {"name": "LWLock:WALInsert", "total_ms": 900, "count": 90, "sampled_ms": 0, "class": "LWLock", "event_id": 0x04000007, "idle": False},
+            {"name": "CPU*", "total_ms": 4800, "count": 690, "entered": 1030, "sampled_ms": 0, "class": "CPU", "event_id": 0, "idle": False},
+            {"name": "Client:ClientRead", "total_ms": 9153, "count": 900, "entered": 600, "sampled_ms": 0, "class": "Client", "event_id": 0x06000000, "idle": True},
+            {"name": "IO:DataFileRead", "total_ms": 2100, "count": 120, "entered": 100, "sampled_ms": 0, "class": "IO", "event_id": 0x01000015, "idle": False},
+            {"name": "LWLock:WALInsert", "total_ms": 900, "count": 90, "entered": 70, "sampled_ms": 0, "class": "LWLock", "event_id": 0x04000007, "idle": False},
         ], "links": [
             {"source": "Client:ClientRead", "target": "CPU*", "value": 900, "duration_ms": 9000.0},
             {"source": "CPU*", "target": "Client:ClientRead", "value": 560, "duration_ms": 5000.0},

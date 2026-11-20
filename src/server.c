@@ -7951,17 +7951,11 @@ static void emit_transitions_response(const struct pgwt_server *srv,
         return;
     }
 
-    /* Classification status for the encountered Timeout NODE ids. No Timeout
-     * nodes means vacuously complete (nothing to classify), not "the catalog is
-     * good". The raw node pass applies the request filter, and
-     * pgwt_block_agg_add_event() accumulates old_event nodes, covering every
-     * link's source event; raw res link rows are request-filtered and capped.
-     * Link-only targets cannot reach a rendered graph unclassified:
-     * transitionsDataError() in web/static/lib/builders/transitions.js checks
-     * BOTH endpoints of every link against the node-name set and rejects the
-     * WHOLE payload with 'missing node: ' + name if either is absent, before
-     * any graph is built. Thus checking node ids suffices for the idle
-     * verdicts below. */
+    /* Classify the complete node table, including entered-only targets.
+     * Targets are accumulated with links before max_rows is applied, so
+     * every endpoint receives the same identity and idle metadata. The client
+     * still rejects incomplete graphs; it is not a classification backstop.
+     * No Timeout nodes means there is nothing to classify. */
     int idle_classification_complete = 1;
     for (int i = 0; i < n_nodes; i++) {
         uint32_t event_id = nodes_arr[i].event_id;
@@ -8028,6 +8022,7 @@ static void emit_transitions_response(const struct pgwt_server *srv,
          * total_ms == 0 cannot: zero-duration exact records still count
          * (test_window_clip case 6e-4, closing exactly at `to`). */
         cjson_add_uint64(node, "count", nodes_arr[i].count);
+        cjson_add_uint64(node, "entered", nodes_arr[i].entered);
         cJSON_AddNumberToObject(node, "sampled_ms",
                                 (double)nodes_arr[i].sampled_ns / 1e6);
         /* U2 / P3 wire 5: the UI's DFG node click pivots on the event —
