@@ -409,7 +409,7 @@ int main(int argc,char **argv)
         tb_guard=cases[i];printf("REACHED recovery %s\n",tb_guard);fflush(stdout);
         bool ok=i<3?recovery_cycles(i==0?PGWT_POOL_CAPTURE_ARRIVAL:i==1?PGWT_POOL_TRANSPORT_QUEUE:PGWT_POOL_CORE_STAGING):
             i==3?recovery_baseline():i==4?recovery_proofs():i<7?recovery_excluded(i==5):i==7?recovery_backoff():i==8?recovery_retained():i==9?recovery_counter_change():i==10?recovery_retained_seal():i==11?recovery_classes():i==12?recovery_proof_time():i==13?recovery_proof_fault():i==14?recovery_stale_round():recovery_time_identity();
-        if(!ok)return 1;printf("recovery %s PASS\n",tb_guard);++ran;
+        if(!ok){return 1;} printf("recovery %s PASS\n",tb_guard); ++ran;
     }
     printf("capacity recovery: %u/%u PASS\n",ran,ran);return ran?0:2;
 }
