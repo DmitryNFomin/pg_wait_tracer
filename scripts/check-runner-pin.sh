@@ -99,6 +99,23 @@ else
                 refuse "$f:$lineno runs-on is indirected through an unresolvable context ($value) — refusing"
                 continue
             fi
+            # Gate pools represent different kernel capabilities. EL8 has
+            # one named consumer; Ubuntu jobs must never select its label.
+            job="$(sed -n "1,${lineno}p" "$f" | sed -nE 's/^  ([A-Za-z0-9_-]+):.*$/\1/p' | sed -n '$p')"
+            has_el8=0; has_ubuntu=0
+            if printf '%s' "$value" | grep -qE '(^|[^[:alnum:]_-])gate-box-el8([^[:alnum:]_-]|$)'; then
+                has_el8=1
+            fi
+            if printf '%s' "$value" | grep -qE '(^|[^[:alnum:]_-])gate-box([^[:alnum:]_-]|$)'; then
+                has_ubuntu=1
+            fi
+            if [[ "$job" == box-tier-el8 ]]; then
+                if (( has_el8 != 1 || has_ubuntu != 0 )); then
+                    fail "$f:$lineno box-tier-el8 must target gate-box-el8, never gate-box"
+                fi
+            elif (( has_el8 )); then
+                fail "$f:$lineno job '$job' must not target gate-box-el8 (reserved for box-tier-el8)"
+            fi
             if printf '%s' "$value" | grep -qE '(ubuntu|macos|windows)-latest'; then
                 fail "$f:$lineno runs-on uses a FLOATING image ($value). Pin it (ubuntu-24.04) — see the RUNNER IMAGE PIN header in .github/workflows/ci.yml for what must be true before the pin moves."
                 continue

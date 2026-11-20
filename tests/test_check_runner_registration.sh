@@ -483,5 +483,143 @@ else
 fi
 
 echo
+# Exercise the real provisioning registration block with host commands mocked.
+# No packages, users, services, network calls or eBPF are touched on this host.
+if python3 -B - "$SCRIPT_DIR/provision-runner.sh" <<'PY'
+from pathlib import Path
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+
+source = Path(sys.argv[1]).read_text()
+preamble = source[:source.index('if [[ $(id -u)')]
+registration = source[source.index('# EL8 must never enter'):]
+SHA = '70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613'
+
+
+def exercise(source_block, os_name, *, token='fixture-token', name=None,
+             existing=False, service='missing'):
+    with tempfile.TemporaryDirectory(prefix='pgwt-registration-') as tmp:
+        home = Path(tmp) / 'runner'
+        home.mkdir()
+        # These scripts stand in for the pinned release's files, extracted
+        # only by the mocked tar command on a fresh installation.
+        assets = Path(tmp) / 'assets'
+        (assets / 'bin').mkdir(parents=True)
+        for relative, body in {
+            'config.sh': 'printf "CONFIG %s\\n" "$*"; touch "$RUNNER_HOME/.runner"',
+            'svc.sh': 'printf "SERVICE %s\\n" "$*"',
+            'bin/installdependencies.sh': 'echo DEPENDENCIES',
+        }.items():
+            file = assets / relative
+            file.write_text('#!/bin/bash\n' + body + '\n')
+            file.chmod(0o755)
+        if existing:
+            subprocess.run(['cp', '-R', str(assets) + '/.', str(home)], check=True)
+            (home / '.runner').touch()
+        mocks = r'''
+log() { printf '%s\n' "$*"; }
+id() { return 1; }
+useradd() { echo "USER $*"; }
+chown() { :; }
+visudo() { echo VALIDATE_SUDOERS; }
+install() { echo INSTALL_SUDOERS; }
+curl() { echo "DOWNLOAD $*"; }
+sha256sum() {
+    read -r digest file
+    [[ "$digest" == "$EXPECTED_SHA" ]] || return 98
+    echo CHECKSUM
+}
+sudo() {
+    [[ "$1 $2" == '-u runner' ]] || return 97
+    shift 2
+    if [[ "$1" == tar ]]; then
+        echo EXTRACT
+        cp -R "$ASSETS/." "$RUNNER_HOME"
+    else
+        "$@"
+    fi
+}
+systemctl() {
+    case "$1" in
+        list-unit-files)
+            [[ "$SERVICE_STATE" != missing ]] || return 1
+            echo 'actions.runner.fixture.service enabled' ;;
+        is-active) [[ "$SERVICE_STATE" == active ]] ;;
+        start) echo START_SERVICE ;;
+        --no-pager) return 0 ;;
+        *) return 96 ;;
+    esac
+}
+LOCK_WAIT_SECONDS=0
+'''
+        block = source_block.replace('RUNNER_HOME=/opt/actions-runner',
+                                     'export RUNNER_HOME=' + shlex.quote(str(home)))
+        block = block.replace('/tmp/$RUNNER_TARBALL', tmp + '/$RUNNER_TARBALL')
+        script = Path(tmp) / 'test.sh'
+        script.write_text(preamble + mocks + block)
+        env = dict(os.environ, PGWT_RUNNER_TOKEN=token, PGWT_RUNNER_NAME='',
+                   EXPECTED_SHA=SHA, ASSETS=str(assets), SERVICE_STATE=service)
+        args = ['bash', str(script), os_name]
+        if name:
+            args += ['--runner-name', name]
+        result = subprocess.run(args, env=env, text=True, capture_output=True)
+        assert result.returncode == 0, result
+        return result.stdout
+
+
+def assert_registration(block):
+    for os_name, label, default in (
+        ('ubuntu', 'self-hosted,linux,x64,gate-box', 'pgwt-gate'),
+        ('el8', 'self-hosted,linux,x64,gate-box-el8', 'pgwt-gate-el8'),
+    ):
+        output = exercise(block, os_name)
+        configs = [shlex.split(line)[1:] for line in output.splitlines() if line.startswith('CONFIG ')]
+        assert len(configs) == 1, (os_name, 'one registration', output)
+        args = configs[0]
+        assert args[args.index('--labels') + 1] == label, (os_name, 'runner labels', args)
+        assert args[args.index('--name') + 1] == default, (os_name, 'default name', args)
+        assert args[args.index('--token') + 1] == 'fixture-token', 'environment token forwarded'
+        assert '--ephemeral' not in args and '--work' in args, 'persistent runner'
+        assert 'actions-runner-linux-x64-2.337.0.tar.gz' in output, 'runner version pin'
+        for event in ('USER --system', 'VALIDATE_SUDOERS', 'INSTALL_SUDOERS', 'CHECKSUM',
+                      'EXTRACT', 'DEPENDENCIES', 'SERVICE install runner', 'SERVICE start'):
+            assert event in output, (os_name, event, output)
+        assert output.index('CHECKSUM') < output.index('EXTRACT') < output.index('DEPENDENCIES') < output.index('CONFIG '), 'verified extraction and dependencies before config'
+        for state in ('active', 'inactive'):
+            again = exercise(block, os_name, existing=True, service=state)
+            assert 'CONFIG ' not in again and 'DOWNLOAD ' not in again, 'idempotent installation/registration'
+            assert ('START_SERVICE' in again) == (state == 'inactive'), 'existing service recovery'
+        without_token = exercise(block, os_name, token='')
+        assert 'CONFIG ' not in without_token and 'USER ' not in without_token, 'no-token skip'
+    custom = exercise(block, 'el8', name='el8-sibling')
+    assert '--name el8-sibling --labels' in custom, 'runner name override'
+    el9 = exercise(block, 'el9')
+    assert 'CONFIG ' not in el9 and 'runner registration skipped: OS=el9' in el9, 'EL9 remains unregistered'
+
+
+assert_registration(registration)
+print('PASS: Ubuntu/EL8 registration, pinned verified extraction, dependencies, user, service, idempotence, token/name and EL9 skip')
+for label, replacement in (
+    ('--labels self-hosted,linux,x64,gate-box-el8 ', '--labels self-hosted,linux,x64,gate-box '),
+    ('--labels self-hosted,linux,x64,gate-box ', '--labels self-hosted,linux,x64,gate-box-el8 '),
+):
+    assert label in registration, 'mutant must change executable config'
+    try:
+        assert_registration(registration.replace(label, replacement))
+    except AssertionError as failure:
+        assert 'runner labels' in str(failure), ('mutant failed wrong assertion', failure)
+        print('PASS: registration pool-swap mutant RED at runner labels:', label.strip())
+    else:
+        raise AssertionError('registration pool-swap mutant survived')
+PY
+then
+    report true "Ubuntu/EL8 runner registration and both pool-swap mutants"
+else
+    report false "Ubuntu/EL8 runner registration and both pool-swap mutants"
+fi
+
 echo "$tests_passed/$tests_run passed"
 [[ $tests_failed -eq 0 ]]
