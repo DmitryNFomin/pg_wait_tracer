@@ -41,7 +41,28 @@ FAST=0
 [[ "${1:-}" == "--fast" ]] && FAST=1
 
 fail=0
-step() { printf '\n\033[1m=== %s ===\033[0m\n' "$1"; }
+step_name=
+step_started=$SECONDS
+step_times=()
+finish_step() {
+    if [[ -n "$step_name" ]]; then
+        step_times+=("$((SECONDS - step_started))"$'\t'"$step_name")
+    fi
+}
+print_timings() {
+    finish_step
+    printf '\nStep timings (elapsed seconds, slowest first):\n'
+    if [[ -n "$step_name" ]]; then
+        printf '%s\n' "${step_times[@]}" | sort -t $'\t' -k1,1nr
+    fi
+}
+trap print_timings EXIT
+step() {
+    finish_step
+    step_name=$1
+    step_started=$SECONDS
+    printf '\n\033[1m=== %s ===\033[0m\n' "$1"
+}
 run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
