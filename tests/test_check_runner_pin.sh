@@ -756,6 +756,33 @@ def guard(workflow, launcher, shared):
     assert 'cleanup_gate_cell.py "$PGWT_CI_CELL"' in job, 'cell-scoped cancellation cleanup'
 
 
+def guard_el8(workflow):
+    jobs = re.findall(r'(?ms)^  box-tier-el8:\n(.*?)(?=^  [\w-]+:|\Z)', workflow)
+    assert len(jobs) == 1, 'missing/ambiguous box-tier-el8 job'
+    job = jobs[0]
+    assert '    needs: changed_files' in job, 'EL8 changed-files dependency'
+    assert "    if: ${{ github.event_name != 'pull_request' || needs.changed_files.outputs.src_changed == 'true' }}" in job, 'EL8 src PR/non-PR gating'
+    assert "github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || fromJSON('[\"self-hosted\",\"gate-box-el8\"]')" in job, 'EL8 fork-safe runner selection'
+    assert '          OS: el8' in job and 'PGWT_EXPECT_PHASE_PROBES: "0"' in job, 'EL8 kernel capabilities'
+    # All remaining steps, locks, cleanup, summaries and artifacts must have
+    # the same behavior as the existing Ubuntu tier.
+    ubuntu = re.findall(r'(?ms)^  box-tier-ubuntu:\n(.*?)(?=^  [\w-]+:|\Z)', workflow)[0]
+    normal = job.replace('box-tier-el8', 'box-tier-ubuntu').replace('gate-box-el8', 'gate-box').replace('OS: el8', 'OS: ubuntu').replace('PGWT_EXPECT_PHASE_PROBES: "0"', 'PGWT_EXPECT_PHASE_PROBES: "1"').replace('provision-runner.sh el8', 'provision-runner.sh ubuntu').replace('### EL8 full box tier', '### Ubuntu full box tier')
+    assert normal[normal.index('    runs-on:'):] == ubuntu[ubuntu.index('    runs-on:'):], 'EL8 full-tier behavior diverged'
+
+
+guard_el8(workflow)
+for old, new in (("needs.changed_files.outputs.src_changed == 'true'", "false"),
+                 ('PGWT_EXPECT_PHASE_PROBES: "0"', 'PGWT_EXPECT_PHASE_PROBES: "1"'),
+                 ('gate-box-el8', 'gate-box')):
+    try:
+        guard_el8(workflow.replace(old, new))
+    except AssertionError:
+        continue
+    raise AssertionError('EL8 workflow mutant survived: ' + old)
+print('PASS: EL8 src/event gating, fork safety, phase expectation, shared behavior; 3 mutants red')
+
+
 guard(workflow, launcher, shared)
 print('PASS: full box tier job, fork refusal, single bounded lock, shared entry point, evidence and cancellation')
 controls = [
@@ -814,6 +841,37 @@ then
     report true 'full box tier workflow and shared entry point'
 else
     report false 'full box tier workflow and shared entry point'
+fi
+
+# The real pin guard, not a parallel assertion, rejects both pool swaps.
+for direction in el8-to-ubuntu ubuntu-to-el8; do
+    repo="$tmpdir/pool-$direction"
+    write_good "$repo"
+    if [[ "$direction" == el8-to-ubuntu ]]; then
+        cat >> "$repo/.github/workflows/ci.yml" <<'YML'
+  box-tier-el8:
+    runs-on: [self-hosted, gate-box]
+YML
+        expect_fail "$repo" 'box-tier-el8 must target gate-box-el8' 'EL8 job in Ubuntu pool mutant'
+    else
+        cat >> "$repo/.github/workflows/ci.yml" <<'YML'
+  box-tier-ubuntu:
+    runs-on: [self-hosted, gate-box-el8]
+YML
+        expect_fail "$repo" "must not target gate-box-el8" 'Ubuntu job in EL8 pool mutant'
+    fi
+done
+repo="$tmpdir/pool-good"
+write_good "$repo"
+cat >> "$repo/.github/workflows/ci.yml" <<'YML'
+  box-tier-el8:
+    runs-on: [self-hosted, gate-box-el8]
+YML
+run_guard "$repo" env
+if [[ "$code" == 0 ]]; then
+    report true 'separate EL8 and Ubuntu pools accepted'
+else
+    report false "separate EL8 and Ubuntu pools: $out"
 fi
 
 echo "runner-pin guard self-test: $((tests_run - tests_failed))/$tests_run passed"

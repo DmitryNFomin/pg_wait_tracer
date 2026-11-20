@@ -19,10 +19,10 @@
 #     machine, same labels, so CI's `[self-hosted, gate-box]` targeting sees
 #     it as just another box in the pool): GitHub runner names must be
 #     unique per repo, so a second box registering as "pgwt-gate" again
-#     would collide with the first. Labels are deliberately NOT
-#     parameterized here — every gate box, however many there are, carries
-#     the exact same `self-hosted,linux,x64,gate-box` set so CI never has to
-#     know how many boxes are in the pool.
+#     would collide with the first. Ubuntu boxes keep the
+#     `self-hosted,linux,x64,gate-box` labels. EL8 uses its own
+#     `self-hosted,linux,x64,gate-box-el8` pool and defaults to
+#     pgwt-gate-el8; the pools must never overlap.
 #
 # ubuntu/el8/el9 install everything `make box-check` needs for the LIVE tier
 # (tests/run_all.sh --require-live): build deps for the daemon + pgwt-server
@@ -88,10 +88,10 @@ OS="${1:-}"
 shift || true
 
 # --runner-token / PGWT_RUNNER_TOKEN: optional, only consumed by the "GitHub
-# Actions runner" block near the bottom of this script (OS=ubuntu only).
+# Actions runner" block near the bottom of this script (OS=ubuntu or el8).
 RUNNER_TOKEN="${PGWT_RUNNER_TOKEN:-}"
-# --runner-name / PGWT_RUNNER_NAME: optional, defaults to "pgwt-gate" (the
-# original box's name) below — see the "GitHub Actions runner" block.
+# --runner-name / PGWT_RUNNER_NAME: optional, defaults to "pgwt-gate" for
+# Ubuntu or "pgwt-gate-el8" for EL8 — see the "GitHub Actions runner" block.
 RUNNER_NAME="${PGWT_RUNNER_NAME:-}"
 LOCK_WAIT=600
 while [[ $# -gt 0 ]]; do
@@ -130,7 +130,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-RUNNER_NAME="${RUNNER_NAME:-pgwt-gate}"
+if [[ "$OS" == el8 ]]; then
+    RUNNER_NAME="${RUNNER_NAME:-pgwt-gate-el8}"
+else
+    RUNNER_NAME="${RUNNER_NAME:-pgwt-gate}"
+fi
 if [[ "$LOCK_WAIT" != unbounded && ! "$LOCK_WAIT" =~ ^0*[1-9][0-9]*$ ]]; then
     echo "Invalid --lock-wait: $LOCK_WAIT (expected a positive integer or unbounded)" >&2
     exit 2
@@ -823,7 +827,7 @@ EOF
 #      ephemeral-VM runner, a separate, --ephemeral registration).
 #    - labels self-hosted,linux,x64,gate-box ; name $RUNNER_NAME (default
 #      pgwt-gate, override with --runner-name/PGWT_RUNNER_NAME for a
-#      sibling box).
+#      sibling box); EL8 uses gate-box-el8 and defaults to pgwt-gate-el8.
 #    - one job at a time: config.sh's default (no extra flag needed) — the
 #      box is shared with agents running `make box-check`, and every timing
 #      test step already serialises on /tmp/pgwt-box-check.lock, but a
@@ -838,14 +842,9 @@ EOF
 #      re-registering is a deliberate, separate step, not something a bare
 #      re-run of this script does.
 # ---------------------------------------------------------------------------
-# Restored on review (#749 nit 9): a bare `-n "$RUNNER_TOKEN"` check would
-# register an el8 4.18 box into the SAME `self-hosted,linux,x64,gate-box`
-# pool as the ubuntu gate boxes, with identical labels -- CI treats every
-# box in that pool as interchangeable, and ci.yml has no el8 job at all
-# today (only a comment), so an el8 runner in that pool is pure risk with
-# no corresponding benefit yet. Re-add el8 (its own label set) only
-# alongside real el8 CI job support.
-if [[ "$OS" == "ubuntu" && -n "$RUNNER_TOKEN" ]]; then
+# EL8 must never enter the Ubuntu gate-box pool. Its separate label is
+# consumed only by box-tier-el8 in ci.yml; EL9 remains unregistered.
+if [[ ( "$OS" == "ubuntu" || "$OS" == "el8" ) && -n "$RUNNER_TOKEN" ]]; then
     RUNNER_HOME=/opt/actions-runner
     RUNNER_VERSION=2.337.0
     RUNNER_TARBALL="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
@@ -891,7 +890,11 @@ EOF
     if [[ -f "$RUNNER_HOME/.runner" ]]; then
         log "runner already registered — leaving registration alone (remove $RUNNER_HOME/.runner and re-run with a fresh token to re-register)"
     else
-        log "registering runner '$RUNNER_NAME' with GitHub (labels: self-hosted,linux,x64,gate-box)"
+        if [[ "$OS" == el8 ]]; then
+            log "registering runner '$RUNNER_NAME' with GitHub (labels: self-hosted,linux,x64,gate-box-el8)"
+        else
+            log "registering runner '$RUNNER_NAME' with GitHub (labels: self-hosted,linux,x64,gate-box)"
+        fi
         # Note: GitHub's documented config.sh invocation takes --token on
         # the command line, so the registration token is briefly visible to
         # anyone who can read /proc/*/cmdline on this box while config.sh
@@ -900,13 +903,23 @@ EOF
         # this script can avoid; the token is single-use and expires in
         # ~1h (minted just before this script is invoked — see the comment
         # at the top of this block).
-        sudo -u runner "$RUNNER_HOME/config.sh" \
-            --unattended \
-            --url "$RUNNER_REPO_URL" \
-            --token "$RUNNER_TOKEN" \
-            --name "$RUNNER_NAME" \
-            --labels self-hosted,linux,x64,gate-box \
-            --work _work
+        if [[ "$OS" == el8 ]]; then
+            sudo -u runner "$RUNNER_HOME/config.sh" \
+                --unattended \
+                --url "$RUNNER_REPO_URL" \
+                --token "$RUNNER_TOKEN" \
+                --name "$RUNNER_NAME" \
+                --labels self-hosted,linux,x64,gate-box-el8 \
+                --work _work
+        else
+            sudo -u runner "$RUNNER_HOME/config.sh" \
+                --unattended \
+                --url "$RUNNER_REPO_URL" \
+                --token "$RUNNER_TOKEN" \
+                --name "$RUNNER_NAME" \
+                --labels self-hosted,linux,x64,gate-box \
+                --work _work
+        fi
     fi
 
     # `|| true`: under set -e/pipefail, `systemctl list-unit-files` exits 1
@@ -936,16 +949,14 @@ EOF
     systemctl --no-pager status 'actions.runner.*.service' 2>/dev/null || true
 else
     if [[ -n "$RUNNER_TOKEN" ]]; then
-        log "skipping GitHub Actions runner install/registration: OS=$OS, not ubuntu (see the OS guard above)"
+        log "skipping GitHub Actions runner install/registration: OS=$OS, not ubuntu/el8 (see the OS guard above)"
     else
         log "no --runner-token / PGWT_RUNNER_TOKEN given — skipping GitHub Actions runner install/registration"
     fi
 fi
 
-# Real finding from review (#749 nit 6): `provision-runner.sh el8
-# --runner-token` exits 0 having only logged the skip above, mid-output --
-# a reader scanning just the final summary line would see a plain success
-# with no sign the runner was never touched. Repeat it here.
+# Repeat an unsupported registration request in the final summary so it
+# cannot be mistaken for a registered runner (EL9 has no CI runner pool).
 runner_summary=""
-[[ "$OS" != "ubuntu" && -n "$RUNNER_TOKEN" ]] && runner_summary=" (runner registration skipped: OS=$OS, not ubuntu)"
+[[ "$OS" != "ubuntu" && "$OS" != "el8" && -n "$RUNNER_TOKEN" ]] && runner_summary=" (runner registration skipped: OS=$OS, not ubuntu/el8)"
 log "provisioning complete ($OS) in $((SECONDS - PROVISION_START))s (lock wait ${LOCK_WAIT_SECONDS}s)$runner_summary"
