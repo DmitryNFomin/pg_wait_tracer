@@ -107,6 +107,9 @@ struct pgwt_pid_state {
     u64 init_ts;
     u32 init_stored;
     u32 init_store_failed; /* test-only store suppression after bootstrap fired */
+    u32 bootstrap_fired; /* diagnostic: handler entered, even if pointer read fails */
+    u32 wp_ever_live;    /* sticky across watchpoint detach/reseed; no per-wait write */
+    u64 cookie;         /* fork lifetime; 0 = not allocated by on_fork */
 };
 
 enum pgwt_query_attribution_quality {
@@ -204,10 +207,18 @@ enum pgwt_lifecycle_type {
     PGWT_LIFECYCLE_QUERY_TEXT = 4,
 };
 
+/* Transport v2 EXIT disposition. Default-ring producers leave this zero.
+ * The upper half of the old type word was unused (types are 1..4). */
+#define PGWT_EXIT_DISPOSITION 0x01U
+#define PGWT_EXIT_BOOTSTRAP_FIRED 0x02U
+#define PGWT_EXIT_INIT_STORED 0x04U
+#define PGWT_EXIT_WP_EVER_LIVE 0x08U
+#define PGWT_EXIT_FLAGS_MASK 0x0fU
 struct pgwt_lifecycle_event {
-    u32 type;       /* enum pgwt_lifecycle_type */
+    u16 type;       /* enum pgwt_lifecycle_type, LE low half of old type word */
+    u16 exit_flags; /* PGWT_EXIT_*; diagnostic only, transport v2 EXIT only */
     u32 pid;
-    u64 addr;       /* for INIT: PGPROC->wait_event_info address */
+    u64 addr;       /* INIT: wait address; transport v2 EXIT: stored init_ts */
     u64 timestamp;
 };
 

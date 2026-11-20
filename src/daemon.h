@@ -4,6 +4,8 @@
 
 #include "pg_wait_tracer.h"
 #include "backend.h"
+#include "init_loss_diag.h"
+#include "attach_timeline.h"
 #include "event_writer.h"
 #include "summary_writer.h"
 #include "query_text.h"
@@ -155,7 +157,9 @@ struct pgwt_counters {
      * drain's pass cap was ever reached — the latter means a tick WAS short. */
     uint64_t tick_drain_records_total;   /* records recovered by tick drains */
     uint64_t tick_drain_max_records;     /* deepest single-tick backlog seen */
-    uint64_t tick_drain_truncated_total; /* ticks whose drain hit a bound */
+    uint64_t tick_drain_truncated_total; /* ticks bounded or still merge-held */
+    uint64_t tick_drain_pending_records; /* latest copy: queued/held envelopes;
+                                         * exact-perf only, not kernel backlog */
     /* Which bound the LAST truncated tick drain hit. Exists so the loud
      * WARN's reported bound is ASSERTABLE (tests/test_tick_drain.c B7)
      * rather than merely plausible: the message and this field are set from
@@ -164,6 +168,7 @@ struct pgwt_counters {
         PGWT_TICK_DRAIN_BOUND_NONE = 0,
         PGWT_TICK_DRAIN_BOUND_RECORDS,
         PGWT_TICK_DRAIN_BOUND_TIME,
+        PGWT_TICK_DRAIN_BOUND_MERGE,
     } tick_drain_last_bound;
 
     /* T8 measured-CPU observability (docs/ROADMAP_AND_STATUS.md).
@@ -290,15 +295,22 @@ struct pgwt_daemon {
     pid_t lifecycle_refused_pids[MAX_BACKENDS];
     int lifecycle_refused_count;
     bool lifecycle_refused_overflow; /* sticky: never claim no opportunity after overflow */
+    struct pgwt_init_diagnostics init_diagnostics;
+    bool attach_timeline_enabled; /* --attach-timeline; diagnostic only */
+    struct pgwt_attach_timeline *attach_timeline;
+
     /* BPF */
     struct pg_wait_tracer_bpf *skel;
     struct ring_buffer *rb;          /* lifecycle ringbuf consumer */
     struct ring_buffer *event_rb;    /* trace event ringbuf consumer */
     /* U1b: B owns the opaque state; calloc keeps the route off by default. */
     bool exact_perf;                /* --exact-perf, experimental opt-in */
+    bool exact_perf_idle_round;     /* opt-in certification demand on coverage ticks */
+    bool test_fork_wakeup_adaptive; /* test-only paired control; default force */
     struct pgwt_percpu_transport *percpu_transport;
     struct pgwt_transport_callbacks transport;
     struct pgwt_merge_capture *merge_capture;
+    int merge_counter_errno[PGWT_MERGE_COUNTERS]; /* last snapshot, diagnostics only */
     pgwt_attach_report_fn attach_report;
     void *attach_report_ctx;
     struct pgwt_merge_capture_sink merge_sink;
@@ -522,6 +534,8 @@ struct pgwt_daemon {
      * fully processed records. Zero means an intentional unbounded drain
      * (shutdown/finalization). Single-threaded: only the event callback reads
      * these while consume is active. */
+    /* Any service yield keeps the next main-loop wait from sleeping. */
+    bool        service_backlog;
     uint32_t    event_drain_callback_limit;
     uint32_t    event_drain_callbacks_current;
 
@@ -596,6 +610,9 @@ int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin);
  * (#416): the defect was the ORDER of the steps inside it, so a test that
  * called a narrower seam could not have seen it. */
 void pgwt_handle_timer(struct pgwt_daemon *d);
+/* Shared timer duties, preserving the default order around its display drain.
+ * The timerfd and expiration diagnostics have already been handled. */
+void pgwt_tick_duties(struct pgwt_daemon *d);
 int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d);
 /* Process one decoded L payload (FORK/INIT/EXIT or QUERY_TEXT), after wire
  * validation. Shared by the default ring callback and B; never dispatches

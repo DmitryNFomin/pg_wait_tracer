@@ -40,7 +40,12 @@ def bpf_mutants():
          ("wait pointer read error", "wait indirect read error")),
         ("on_bootstrap", "count_map_fail(PGWT_BPF_FAIL_WAIT_READ);", ("wait bootstrap pointer error",)),
         ("accum_add", "count_map_fail(PGWT_BPF_FAIL_ACCUM_UPDATE);", ("accum insert error",)),
-        ("on_fork", "count_map_fail(PGWT_BPF_FAIL_FORK_STATE_UPDATE);", ("fork state insert error",)),
+        # on_fork's first increment (lifetime cookie exhaustion, under
+        # exact_perf_mode) is unreachable in this mode-zero harness, so no
+        # mutant is built for it here (None); tests/transport_bpf_harness.h
+        # checks it ("cookie exhaustion counted"). The second is the insert.
+        ("on_fork", "count_map_fail(PGWT_BPF_FAIL_FORK_STATE_UPDATE);",
+         (None, "fork state insert error")),
         ("on_report_query_id", "count_ring_fail(PGWT_RING_FAIL_QUERY_TEXT);",
          ("text reserve error", "query text read outcome")),
         ("on_executor_start", "count_ring_fail(PGWT_RING_FAIL_PG13_QUERY_TEXT);",
@@ -52,6 +57,8 @@ def bpf_mutants():
         if len(matches) != len(expected):
             raise RuntimeError(f"stale increment anchors for {name}: {len(matches)} != {len(expected)}")
         for index, (match, assertion) in enumerate(zip(matches, expected)):
+            if assertion is None:
+                continue
             mutant = body[:match.start()] + "(void)0;" + body[match.end():]
             yield f"{name}-increment-{index + 1}", source.replace(body, mutant, 1), assertion
 

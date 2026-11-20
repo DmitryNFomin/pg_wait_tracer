@@ -84,8 +84,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_core_evidence_codec \
             test_core_merge_contract \
             test_core_merge_adapter \
-            test_transport_wire test_transport_producers test_percpu_transport \
-            test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure \
+            test_transport_wire test_transport_producers test_percpu_transport test_transport_diagnostics \
+            test_ringbuf_metrics test_backend_init test_backend_recovery test_counter_vector test_writer_failure \
             test_coverage_verdict test_coverage_writer
 
 .PHONY: all clean check
@@ -109,6 +109,11 @@ check: all
 
 test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^
+
+# Host-only recovery/FORK regression; generated sources live in a temp directory.
+test_backend_recovery: test_backend_recovery.c build_backend_recovery.py test_sampled_attr_io.py \
+                       ../src/backend.c ../src/backend_init.c $(wildcard ../src/*.h)
+	CC='$(CC)' CFLAGS='$(CFLAGS)' python3 -B build_backend_recovery.py --output $@
 
 test_backend_init: test_backend_init.c ../src/backend_init.c ../src/backend_init.h ../src/backend.h ../src/pg_wait_tracer.h
 	$(CC) $(CFLAGS) -o $@ test_backend_init.c ../src/backend_init.c
@@ -1220,15 +1225,15 @@ test_core_evidence_report: test_core_evidence_report.c evidence_json.c evidence_
 
 test_core_evidence_codec: test_core_evidence_codec.c evidence_json.c evidence_json.h ../src/core/evidence_codec.c ../src/core/evidence_codec.h ../src/core/evidence_replay.c ../src/core/evidence_replay.h ../src/core/wait_metrics.c ../src/core/contract_json.c ../src/core/pgwt_core.h ../src/core/contract_json.h
 	$(CC) $(CFLAGS) -I../src -std=c11 -o $@ $(filter %.c,$^)
-test_core_merge_contract: test_core_merge_contract.c ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json
+test_core_merge_contract: test_core_merge_contract.c ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json ../src/core/pgwt_diagnostics.h
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
 
 # U1a adapter: wire goldens, then unchanged merge-v1 rows (synthetic only).
-test_core_merge_adapter: test_core_merge_adapter.c test_core_merge_contract.c merge_adapter_goldens.h ../src/core/merge_adapter.c ../src/core/pgwt_merge_adapter.h ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json
+test_core_merge_adapter: test_core_merge_adapter.c test_core_merge_contract.c merge_adapter_goldens.h ../src/core/merge_adapter.c ../src/core/pgwt_merge_adapter.h ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json ../src/core/pgwt_diagnostics.h
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ test_core_merge_adapter.c ../src/core/merge_adapter.c ../src/core/merge.c
 
 # U1b-0: frozen wire bytes, A1 producer placeholder, B transport seams.
-test_transport_wire: test_transport_wire.c ../src/pgwt_transport_wire.h ../src/merge_capture.h ../src/core/pgwt_merge_adapter.h ../src/core/pgwt_merge.h
+test_transport_wire: test_transport_wire.c ../src/pgwt_transport_wire.h ../src/bpf/transport_producer.h ../src/pg_wait_tracer.h ../src/merge_capture.h ../src/core/pgwt_merge_adapter.h ../src/core/pgwt_merge.h ../src/core/pgwt_diagnostics.h
 	$(CC) $(CFLAGS) -std=c11 -Wextra -Werror -o $@ test_transport_wire.c
 
 # A1's same-file standalone probe loader will use --probe on Linux. Keep
@@ -1240,8 +1245,12 @@ endif
 test_transport_producers: test_transport_producers.c ../src/pgwt_transport_wire.h $(TRANSPORT_PRODUCER_DEPS)
 	$(CC) $(CFLAGS) -std=c11 -Wextra -Werror -o $@ test_transport_producers.c $(TRANSPORT_PRODUCER_LIBS)
 
-test_percpu_transport: test_percpu_transport.c ../src/percpu_transport.c ../src/percpu_transport.h ../src/merge_capture.c ../src/merge_capture.h ../src/pgwt_transport_wire.h ../src/core/merge_adapter.c ../src/core/pgwt_merge_adapter.h ../src/core/merge.c ../src/core/pgwt_merge.h $(TRANSPORT_PRODUCER_DEPS)
+test_percpu_transport: test_percpu_transport.c ../src/percpu_transport.c ../src/percpu_transport.h ../src/merge_capture.c ../src/merge_capture.h ../src/pgwt_transport_wire.h ../src/core/merge_adapter.c ../src/core/pgwt_merge_adapter.h ../src/core/merge.c ../src/core/pgwt_merge.h $(TRANSPORT_PRODUCER_DEPS) ../src/core/pgwt_diagnostics.h ../src/transport_diagnostics.h
 	$(CC) $(CFLAGS) -std=c11 -Wextra -Werror -o $@ test_percpu_transport.c ../src/percpu_transport.c ../src/merge_capture.c ../src/core/merge_adapter.c ../src/core/merge.c $(TRANSPORT_PRODUCER_LIBS)
+
+# Portable diagnostic fill/schedule tests on both Mac and Linux; never load BPF.
+test_transport_diagnostics: test_transport_diagnostics.c test_percpu_transport.c ../src/percpu_transport.c ../src/percpu_transport.h ../src/merge_capture.c ../src/merge_capture.h ../src/core/merge_adapter.c ../src/core/merge.c ../src/core/pgwt_merge.h ../src/core/pgwt_diagnostics.h ../src/transport_diagnostics.h
+	$(CC) $(CFLAGS) -std=c11 -Wextra -Werror -DPGWT_TRANSPORT_HOST_TEST -o $@ test_transport_diagnostics.c ../src/percpu_transport.c ../src/merge_capture.c ../src/core/merge_adapter.c ../src/core/merge.c
 
 test_ringbuf_metrics: test_ringbuf_metrics.c ../src/counter_vector.c ../src/counter_vector.h ../src/ringbuf_metrics.h ../src/provider.h ../src/pg_wait_tracer.h
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)

@@ -1100,6 +1100,7 @@ test_core_evidence_fuzz.py
 # Lifecycle and query-text ring-drop metrics aggregate every CPU. Refs #871.
 test_ringbuf_metrics
 test_backend_init
+test_backend_recovery
 test_backend_init_order.py
 test_backend_attach_race.py
 test_backend_exit_accounting.py
@@ -1124,9 +1125,33 @@ test_block_type_sites.py
 test_pilot_route.py
 test_consumer_boundary.sh
 
+# Refs #871: exhausted-pool identity, high-water marks and round phase diagnostics.
+test_transport_diagnostics
+
+# Portable cost-round compatibility replay, pool/token mutants and timing.
+test_capture_bookkeeping.py
+
+# Refs #871: daemon-issued transient-capacity REARM, accounting and recovery mutants.
+test_capture_recovery.py
+
+# Receipt-only INIT loss evidence, classification fields and wrong-label mutant.
+test_init_loss_diagnostics.py
+
+# Opt-in attachment timing: field/quantile goldens, production hooks and mutants.
+test_attach_timeline.py
+
+# PG13 bounded bulk row lookup, shared miss cache and built mutants.
+test_pgbs_resolver.py
+
+# Portable startup refusal messages and regenerated-skeleton link provenance.
+test_transport_startup.py
+
 # Coverage live-gate logic: BPF-free host controls for the box test.
 test_coverage_live_helpers.py
 test_coverage_drain.py
 
 # Compile/link-only capability guard: no BPF on the host.
 test_libbpf_positions.py
+
+# T-cov: exact_perf publishes its own certified coverage, durable gaps and heartbeat.
+test_exact_perf_coverage.py

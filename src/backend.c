@@ -18,6 +18,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
+#include <ctype.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "pg_wait_tracer.skel.h"
@@ -288,6 +290,9 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
             .init_ts = prev.init_ts,
             .init_stored = prev.init_stored,
             .init_store_failed = prev.init_store_failed,
+            .bootstrap_fired = prev.bootstrap_fired,
+            .wp_ever_live = 1,
+            .cookie = d->exact_perf ? prev.cookie : 0,
             /* S3: exact CPU is accumulated by the sched_switch program into
              * cpu_ns_total/on_cpu_ts. Seed the base at 0 (deltas count from
              * attach); open the on-CPU stretch here iff the backend is running
@@ -389,6 +394,9 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
     int target_fd = open_watchpoint_target(be->pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
     be->wp_fd = pgwt_open_watchpoint_disabled(be->pid, be->wp_addr, wp_prog_fd);
+    if (d->attach_timeline)
+        pgwt_timeline_phase(d->attach_timeline, be->pid, be->init_diag_cookie,
+                            PGWT_TL_WAIT_OPEN, be->wp_fd >= 0);
     if (be->wp_fd < 0) {
         int error = errno;
         pgwt_debug_block_end(d, "watchpoint_open_failed", be->pid, started_ns);
@@ -416,6 +424,9 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
 
     started_ns = pgwt_debug_block_begin(d);
     int enable_rc = pgwt_watchpoint_enable(be->wp_fd);
+    if (d->attach_timeline)
+        pgwt_timeline_phase(d->attach_timeline, be->pid, be->init_diag_cookie,
+                            PGWT_TL_WAIT_ENABLE, enable_rc == 0);
     if (enable_rc != 0) {
         int error = errno;
         pgwt_debug_block_end(d, "watchpoint_enable_failed", be->pid, started_ns);
@@ -652,75 +663,132 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
  * life and reads CPU* = 0. There was no recovery: the timer GC only reaps DEAD
  * backends, never re-attaches a missed live one.
  *
- * This re-scans /proc each tick and attaches any postmaster child that still
+ * This reads the postmaster children each tick and attaches any child that still
  * lacks a live watchpoint but is now resolvable AND initialized (its PGPROC is
  * in shared memory — the same predicate handle_fork uses to attach directly).
  * Idempotent: a backend already holding a live watchpoint (wp_fd >= 0) is
  * skipped cheaply. A freshly-forked backend still in InitProcess points at its
  * process-LOCAL dummy (addr_is_shared != 1) and is left to its bootstrap
- * watchpoint, which WILL fire for it. Cheap: one /proc pass, the same
- * resolution the scan uses. Returns the number of backends recovered. */
+ * watchpoint, which WILL fire for it. Unavailable children lists fall back
+ * to the full /proc walk, with the same eligibility checks. Returns the
+ * number of backends recovered. */
+static int recover_unattached_backend(struct pgwt_daemon *d, pid_t pid)
+{
+    if (pid <= 0)
+        return 0;
+
+    /* Already attached with a live watchpoint — nothing to recover. This
+     * is the common case (every healthy backend), kept cheap. */
+    struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+    if (be && (be->wp_fd >= 0 || be->wp_attach_exit_race))
+        return 0;
+
+    /* Postmaster child? (ppid == postmaster, field 4 of /proc/pid/stat). */
+    char stat_path[64];
+    snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
+    FILE *f = fopen(stat_path, "r");
+    if (!f)
+        return 0;
+    char stat_line[512];
+    if (!fgets(stat_line, sizeof(stat_line), f)) { fclose(f); return 0; }
+    fclose(f);
+    char *last_paren = strrchr(stat_line, ')');
+    if (!last_paren)
+        return 0;
+    char state;
+    int ppid;
+    if (sscanf(last_paren + 1, " %c %d", &state, &ppid) != 2)
+        return 0;
+    if (ppid != d->postmaster_pid)
+        return 0;
+
+    if (pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions,
+                                     pid))
+        return 0;
+
+    /* Resolvable AND initialized (PGPROC in shm)? Attach directly — the
+     * level-triggered version of handle_fork's direct-attach fast path. A
+     * still-initializing backend (local dummy) is left to bootstrap. */
+    uint64_t ptr = pgwt_resolve_backend_wait_addr(d, pid);
+    uint64_t started_ns = pgwt_debug_block_begin(d);
+    int addr_shared = ptr != 0 ? pgwt_addr_is_shared(pid, ptr) : 0;
+    pgwt_debug_block_end(d, "backend_addr_shared", pid, started_ns);
+    if (ptr != 0 && addr_shared == 1) {
+        if (pgwt_handle_init(d, pid, ptr, 0) == 0) {
+            /* Recovery runs outside lifecycle receipt: its cookie need not
+             * be this child's FORK cookie. Credit the observed lifetime only
+             * after confirming that INIT really completed attachment. */
+            if (d->attach_timeline) {
+                be = pgwt_find_backend(&d->backends, pid);
+                if (be && be->wp_fd >= 0 && be->init_attached)
+                    pgwt_timeline_recovered(d->attach_timeline, pid);
+            }
+            if (d->verbose)
+                fprintf(stderr, "INFO: recovered unattached backend PID %d "
+                        "(initial-scan straddle race)\n", pid);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int pgwt_recover_unattached_backends(struct pgwt_daemon *d)
 {
     if (!pgwt_mode_uses_watchpoints(d))
         return 0;
 
-    DIR *proc = opendir("/proc");
-    if (!proc)
-        return 0;
-
-    int recovered = 0;
-    struct dirent *ent;
-    while ((ent = readdir(proc)) != NULL) {
-        pid_t pid = atoi(ent->d_name);
-        if (pid <= 0)
-            continue;
-
-        /* Already attached with a live watchpoint — nothing to recover. This
-         * is the common case (every healthy backend), kept cheap. */
-        struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
-        if (be && (be->wp_fd >= 0 || be->wp_attach_exit_race))
-            continue;
-
-        /* Postmaster child? (ppid == postmaster, field 4 of /proc/pid/stat). */
-        char stat_path[64];
-        snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
-        FILE *f = fopen(stat_path, "r");
-        if (!f)
-            continue;
-        char stat_line[512];
-        if (!fgets(stat_line, sizeof(stat_line), f)) { fclose(f); continue; }
-        fclose(f);
-        char *last_paren = strrchr(stat_line, ')');
-        if (!last_paren)
-            continue;
-        char state;
-        int ppid;
-        if (sscanf(last_paren + 1, " %c %d", &state, &ppid) != 2)
-            continue;
-        if (ppid != d->postmaster_pid)
-            continue;
-
-        if (pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions,
-                                         pid))
-            continue;
-
-        /* Resolvable AND initialized (PGPROC in shm)? Attach directly — the
-         * level-triggered version of handle_fork's direct-attach fast path. A
-         * still-initializing backend (local dummy) is left to bootstrap. */
-        uint64_t ptr = pgwt_resolve_backend_wait_addr(d, pid);
-        uint64_t started_ns = pgwt_debug_block_begin(d);
-        int addr_shared = ptr != 0 ? pgwt_addr_is_shared(pid, ptr) : 0;
-        pgwt_debug_block_end(d, "backend_addr_shared", pid, started_ns);
-        if (ptr != 0 && addr_shared == 1) {
-            if (pgwt_handle_init(d, pid, ptr, 0) == 0) {
-                recovered++;
-                if (d->verbose)
-                    fprintf(stderr, "INFO: recovered unattached backend PID %d "
-                            "(initial-scan straddle race)\n", pid);
-            }
+    /* seq_file may return a page per read, even with a larger buffer. Read
+     * through EOF; a full buffer may end mid-PID and requires a fallback.
+     * The kernel's list is non-atomic; a missed birth is covered by the next
+     * tick (level-triggered recovery). */
+    const size_t capacity = 65536;
+    char path[96];
+    snprintf(path, sizeof(path), "/proc/%d/task/%d/children",
+             d->postmaster_pid, d->postmaster_pid);
+    char *children = malloc(capacity + 1);
+    int fd = children ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+    ssize_t n = -1;
+    if (fd >= 0) {
+        n = 0;
+        while ((size_t)n < capacity) {
+            ssize_t got = read(fd, children + n, capacity - (size_t)n);
+            if (got < 0 && errno == EINTR)
+                continue;
+            if (got < 0) { n = -1; break; }
+            if (got == 0) break;
+            n += got;
         }
     }
+    if (fd >= 0) close(fd);
+    int recovered = 0;
+    if (n >= 0 && (size_t)n < capacity) {
+        if (memchr(children, '\0', (size_t)n))
+            goto fallback;
+        children[n] = '\0';
+        char *p = children;
+        while (*p) {
+            while (isspace((unsigned char)*p)) p++;
+            if (!*p) break;
+            char *end;
+            errno = 0;
+            long pid = strtol(p, &end, 10);
+            if (!isdigit((unsigned char)*p) || errno || end == p || pid <= 0 || pid > INT_MAX ||
+                (*end && !isspace((unsigned char)*end)))
+                goto fallback;
+            recovered += recover_unattached_backend(d, (pid_t)pid);
+            p = end;
+        }
+        free(children);
+        return recovered;
+    }
+fallback:
+    free(children);
+    DIR *proc = opendir("/proc");
+    if (!proc)
+        return recovered;
+    struct dirent *ent;
+    while ((ent = readdir(proc)) != NULL)
+        recovered += recover_unattached_backend(d, atoi(ent->d_name));
     closedir(proc);
     return recovered;
 }
@@ -1035,16 +1103,21 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
                 existing->pgbs_resolve_fast_until_ns = 0;
                 existing->pgbs_resolve_attempts = 0;
                 pgwt_sampler_enroll_backend(existing, now_ns());
-                return 0;
             }
-            pgwt_handle_exit(d, child_pid);
+            else
+                pgwt_handle_exit(d, child_pid);
         }
-        else
-            return 0;
     }
 
-    struct pgwt_backend *be = alloc_backend(&d->backends, child_pid,
-                                            d->pg_major_version == 13);
+    /* Recovery may create an entry without completing attachment. Retry it
+     * on FORK; only a live watchpoint or bootstrap already owns enrollment. */
+    struct pgwt_backend *be = pgwt_find_backend(&d->backends, child_pid);
+    if (be && (!pgwt_mode_uses_watchpoints(d) || be->wp_fd >= 0 ||
+               be->bootstrap_fd >= 0))
+        return 0;
+    if (!be)
+        be = alloc_backend(&d->backends, child_pid,
+                           d->pg_major_version == 13);
     if (!be) {
         /* Even without state_map evidence for a later EXIT, allocation refusal
          * is a real enrollment failure and must gate this capture. */
@@ -1054,6 +1127,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     }
 
     pgwt_sampler_enroll_backend(be, now_ns());
+    be->init_diag_cookie = d->init_diagnostics.receipt_cookie;
 
     /* Sampled mode: no bootstrap watchpoint. Register the backend now; the
      * sampler lazily resolves wp_addr once the backend sets the pointer. */
@@ -1074,8 +1148,14 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     int bootstrap_prog_fd = bpf_program__fd(d->skel->progs.on_bootstrap);
     int target_fd = open_watchpoint_target(child_pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
+    if (d->attach_timeline)
+        pgwt_timeline_phase(d->attach_timeline, child_pid, be->init_diag_cookie,
+                            PGWT_TL_BOOT_START, true);
     be->bootstrap_fd = pgwt_open_watchpoint(child_pid, d->my_wait_ptr_addr,
                                              bootstrap_prog_fd);
+    if (d->attach_timeline)
+        pgwt_timeline_phase(d->attach_timeline, child_pid, be->init_diag_cookie,
+                            PGWT_TL_BOOT_END, be->bootstrap_fd >= 0);
     if (be->bootstrap_fd < 0) {
         int error = errno;
         pgwt_debug_block_end(d, "bootstrap_watchpoint_open_failed", child_pid, started_ns);
@@ -1221,6 +1301,7 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
             remember_enrollment_refusal(d, pid);
             return -1;
         }
+        be->init_diag_cookie = d->init_diagnostics.receipt_cookie;
     }
     pgwt_sampler_enroll_backend(be, now_ns());
 
@@ -1244,11 +1325,14 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
     }
     if (init_ts != 0)
         be->init_ts = init_ts;
+    if (d->attach_timeline)
+        pgwt_timeline_init(d->attach_timeline, pid, be->init_diag_cookie, init_ts);
 
     /* Ring delivery after a sweep (or the direct-attach race) must not
      * reopen/reseed an already live watchpoint. */
     if (be->wp_fd >= 0) {
         be->init_attached = true;
+        pgwt_init_diag_attached(&d->init_diagnostics, pid, be->init_diag_cookie);
         return 0;
     }
 
@@ -1291,6 +1375,7 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
         return -1;
     }
     be->init_attached = true;
+    pgwt_init_diag_attached(&d->init_diagnostics, pid, be->init_diag_cookie);
 
     uint64_t started_ns = pgwt_debug_block_begin(d);
     int cmdline_rc = pgwt_parse_cmdline(pid, &be->meta);
@@ -1363,8 +1448,19 @@ int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
      * Deleting the entry below makes repeated EXIT cleanup idempotent. */
     uint64_t init_ts;
     bool before_attach;
-    if (pgwt_exit_init_lost(be, pid, d, read_init_state, &init_ts, &before_attach))
+    const char *branch;
+    if (pgwt_exit_init_lost_diagnostic(be, pid, d, read_init_state, &init_ts, &before_attach, &branch)) {
+        if (d->attach_timeline)
+            pgwt_timeline_loss(d->attach_timeline, pid,
+                be ? be->init_diag_cookie : d->init_diagnostics.receipt_cookie);
+        /* Failure-only clock read: upper bound on the just-completed state
+         * lookup, taken before either diagnostic can block on stderr. */
+        uint64_t read_after_ns = pgwt_debug_monotonic_ns();
         record_init_loss(d, pid, init_ts, exit_ts);
+        pgwt_init_diag_print(stderr, &d->init_diagnostics, (uint32_t)pid,
+            be ? be->init_diag_cookie : d->init_diagnostics.receipt_cookie,
+            branch, read_after_ns);
+    }
     else if (before_attach && pgwt_mode_uses_watchpoints(d) &&
              !enrollment_failure_counted(d, pid)) {
         /* Exact refusal evidence already has a failure class. Overflow only
@@ -1406,9 +1502,14 @@ int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
     int seed_fd = bpf_map__fd(d->skel->maps.exact_seed_map);
     uint32_t key = pid;
     started_ns = pgwt_debug_block_begin(d);
-    bpf_map_delete_elem(state_fd, &key);
-    bpf_map_delete_elem(attr_fd, &key);
-    bpf_map_delete_elem(seed_fd, &key);
+    /* Flagged producer retirement is synchronous in on_exit. A delayed
+     * userspace EXIT must not delete state belonging to a reused PID. A2
+     * owns lifetime-bound attachment retirement; no proof is asserted here. */
+    if (!d->exact_perf) {
+        bpf_map_delete_elem(state_fd, &key);
+        bpf_map_delete_elem(attr_fd, &key);
+        bpf_map_delete_elem(seed_fd, &key);
+    }
     pgwt_debug_block_end(d, "backend_state_delete", pid, started_ns);
 
     /* #379: the pid's state_map entry is gone, so pgwt_read_state_map will

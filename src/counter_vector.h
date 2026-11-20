@@ -41,6 +41,8 @@ extern const char *const pgwt_counter_component_names[PGWT_COUNTER_COMPONENTS];
 struct pgwt_counter_vector {
     struct pgwt_counter_value components[PGWT_COUNTER_COMPONENTS];
     bool valid;
+    /* Diagnostic only; zero means the failure did not supply an errno. */
+    int read_errno[PGWT_COUNTER_COMPONENTS];
 };
 struct pgwt_counter_sources {
     int fail_fd, site_fd, event_ring_fd;

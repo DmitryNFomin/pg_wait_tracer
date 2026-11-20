@@ -5,6 +5,7 @@
  * after both structural checks and a live coherent read accept it. */
 #define _GNU_SOURCE
 #include "backend_status_layout.h"
+#include "backend.h"
 #include "spawn.h"
 
 #include <ctype.h>
@@ -2247,8 +2248,169 @@ static uint64_t scan_shared_for_entry(pid_t pid,
     return matches == 1 ? found : 0;
 }
 
-static int resolve_entry_fd(pid_t backend_pid, int mem_fd,
-    const struct PgBackendStatusLayout *layout, uint64_t *resolved)
+/* Distinguish a retired mm from an unreadable band in a live mapping. EIO
+ * alone is not retirement: /proc/pid/mem also uses it for unmapped addresses.
+ * Probe the validated anchor on EIO; EOF/ESRCH there proves retirement. */
+static ssize_t resolver_read(int fd, void *buf, size_t size, uint64_t addr,
+                            uint64_t anchor_pid_addr, bool *gone)
+{
+    ssize_t n;
+    do {
+        n = pread(fd, buf, size, (off_t)addr);
+    } while (n < 0 && errno == EINTR);
+    *gone = n == 0 || (n < 0 && errno == ESRCH);
+    if (n < 0 && errno == EIO) {
+        uint32_t pid;
+        ssize_t probe;
+        do {
+            probe = pread(fd, &pid, sizeof(pid), (off_t)anchor_pid_addr);
+        } while (probe < 0 && errno == EINTR);
+        *gone = probe == 0 || (probe < 0 && errno == ESRCH);
+    }
+    return n;
+}
+
+/* REL_13_STABLE: pgstat.c NumBackendStatSlots and pgstat_initialize();
+ * postinit.c InitializeMaxBackends(); miscadmin.h AuxProcType (7 types).
+ * The SQL settings are postmaster settings, so they describe the running
+ * allocation, including the autovacuum launcher. MyBackendId is read from
+ * the same controlled backend whose row passed coherent validation; SQL's
+ * pg_stat_get_backend_idset() indexes a compact copy, not this array. */
+static bool set_pg13_extent(struct PgBackendStatusLayout *layout,
+    uint32_t backend_id, uint64_t connections, uint64_t autovac_workers,
+    uint64_t workers, uint64_t wal_senders)
+{
+    layout->status_array_base = 0;
+    layout->status_array_slots = 0;
+    if (layout->major != 13 || !layout->struct_size || !backend_id ||
+        !connections || !autovac_workers || connections > INT32_MAX ||
+        autovac_workers > INT32_MAX || workers > INT32_MAX ||
+        wal_senders > INT32_MAX)
+        return false;
+    uint64_t max_backends = connections + autovac_workers + 1 + workers + wal_senders;
+    const uint64_t aux_types = 7;
+    if (max_backends > INT32_MAX - aux_types || backend_id > max_backends)
+        return false;
+    uint64_t delta = (uint64_t)(backend_id - 1) * layout->struct_size;
+    if (delta >= layout->status_anchor)
+        return false;
+    uint64_t base = layout->status_anchor - delta;
+    uint64_t slots = max_backends + aux_types;
+    if (!layout->pointer_width || base % layout->pointer_width ||
+        slots > (UINT64_MAX - base) / layout->struct_size)
+        return false;
+    layout->status_array_base = base;
+    layout->status_array_slots = (uint32_t)slots;
+    return true;
+}
+
+static bool status_array_bounds(const struct PgBackendStatusLayout *layout,
+    uint64_t map_start, uint64_t map_end, uint64_t *start, uint64_t *end)
+{
+    uint64_t base = layout->status_array_base, stride = layout->struct_size;
+    uint64_t slots = layout->status_array_slots;
+    if (layout->major != 13 || !base || !slots || !stride ||
+        base < map_start || base >= map_end ||
+        slots > (map_end - base) / stride || layout->status_anchor < base ||
+        (layout->status_anchor - base) % stride ||
+        (layout->status_anchor - base) / stride >= slots)
+        return false;
+    if (start) *start = base;
+    if (end) *end = base + slots * stride;
+    return true;
+}
+
+/* Use the proved PG13 array extent; retain the old mapping/16384-distance
+ * bound when it is unavailable. A mapping alone is not an array extent.
+ * Read bounded contiguous bands, then visit candidates in the original order:
+ * anchor, -1, +1, -2, +2, ... . Only matching PIDs get a coherent re-read. */
+static uint64_t resolve_entry_fd(int mem_fd, uint64_t map_start,
+    uint64_t map_end, pid_t backend_pid,
+    const struct PgBackendStatusLayout *layout)
+{
+    const uint64_t max_rows = 16384;
+    const size_t band_rows = 256;
+    uint64_t anchor = layout->status_anchor, stride = layout->struct_size;
+    bool bounded = status_array_bounds(layout, map_start, map_end,
+                                        &map_start, &map_end);
+    if (!stride || anchor < map_start || anchor >= map_end ||
+        stride > map_end - anchor || !layout->st_procpid.present ||
+        !layout->st_procpid.width || layout->st_procpid.width > 8 ||
+        layout->st_procpid.offset > stride ||
+        layout->st_procpid.width > stride - layout->st_procpid.offset ||
+        stride > SIZE_MAX / (2 * band_rows))
+        return 0;
+    uint64_t below = (anchor - map_start) / stride;
+    uint64_t above = (map_end - anchor - stride) / stride;
+    if (!bounded && below > max_rows) below = max_rows;
+    if (!bounded && above > max_rows) above = max_rows;
+    uint8_t *buffers = malloc(2 * band_rows * (size_t)stride);
+    if (!buffers) return 0;
+    struct pgwt_pgbs_expected expected = {.pid = backend_pid};
+    struct pgwt_pgbs_snapshot snapshot;
+    uint64_t found = 0;
+    for (uint64_t first = 0; first <= below || first <= above;
+         first += band_rows) {
+        uint64_t lo[2] = {0}, count[2] = {0};
+        bool bulk_ok[2] = {false, false};
+        if (first <= below) {
+            count[0] = below - first + 1;
+            if (count[0] > band_rows) count[0] = band_rows;
+            lo[0] = anchor - (first + count[0] - 1) * stride;
+        }
+        if (first <= above) {
+            count[1] = above - first + 1;
+            if (count[1] > band_rows) count[1] = band_rows;
+            lo[1] = anchor + first * stride;
+        }
+        for (unsigned side = 0; side < 2; ++side) {
+            if (count[side]) {
+                bool gone;
+                size_t size = (size_t)(count[side] * stride);
+                bulk_ok[side] = resolver_read(mem_fd,
+                    buffers + side * band_rows * stride,
+                    size, lo[side], anchor + layout->st_procpid.offset,
+                    &gone) == (ssize_t)size;
+                if (gone) goto done;
+            }
+        }
+        for (uint64_t i = 0; i < band_rows; ++i) {
+            for (unsigned side = 0; side < 2; ++side) {
+                if (i >= count[side] || (first == 0 && i == 0 && side == 0))
+                    continue;
+                uint64_t row = side == 0 ? count[side] - 1 - i : i;
+                uint64_t base = lo[side] + row * stride, procpid = 0;
+                if (bulk_ok[side]) {
+                    memcpy(&procpid, buffers + side * band_rows * stride +
+                           row * stride + layout->st_procpid.offset,
+                           layout->st_procpid.width);
+                } else {
+                    bool gone;
+                    ssize_t n = resolver_read(mem_fd, &procpid,
+                        layout->st_procpid.width,
+                        base + layout->st_procpid.offset,
+                        anchor + layout->st_procpid.offset, &gone);
+                    if (gone) goto done;
+                    /* A partial/error band can still contain readable rows. */
+                    if (n != layout->st_procpid.width) continue;
+                }
+                if (procpid == (uint32_t)backend_pid &&
+                    candidate_ok(mem_fd, base, layout, &expected, NULL,
+                                 &snapshot)) {
+                    found = base;
+                    goto done;
+                }
+            }
+        }
+    }
+done:
+    free(buffers);
+    return found;
+}
+
+static int resolve_preseed_entry_fd(pid_t backend_pid, int mem_fd,
+    const struct PgBackendStatusLayout *layout, uint64_t *resolved,
+    struct pgwt_pgbs_resolve_stats *stats)
 {
     *resolved = 0;
     if (!layout || backend_pid <= 0 ||
@@ -2285,37 +2447,10 @@ static int resolve_entry_fd(pid_t backend_pid, int mem_fd,
         mem_fd = open_mem(backend_pid);
     if (mem_fd < 0)
         return PGWT_PGBS_PRESEED_FAILED;
-    struct pgwt_pgbs_expected expected = {.pid = backend_pid};
-    struct pgwt_pgbs_snapshot snapshot;
-    uint64_t found = 0;
-    const uint64_t max_rows = 16384;
-    for (uint64_t distance = 0; distance <= max_rows && !found; distance++) {
-        for (int direction = distance == 0 ? 0 : -1;
-             direction <= 1; direction += 2) {
-            uint64_t delta = distance * layout->struct_size;
-            uint64_t base;
-            if (direction < 0) {
-                if (delta > layout->status_anchor - map_start)
-                    continue;
-                base = layout->status_anchor - delta;
-            } else {
-                if (delta > map_end - layout->status_anchor)
-                    continue;
-                base = layout->status_anchor + delta;
-            }
-            if (base < map_start || base + layout->struct_size > map_end)
-                continue;
-            uint64_t procpid = 0;
-            if (read_field_value(mem_fd, base, &layout->st_procpid,
-                                 &procpid) == 0 &&
-                procpid == (uint32_t)backend_pid &&
-                candidate_ok(mem_fd, base, layout, &expected, NULL,
-                             &snapshot)) {
-                found = base;
-                break;
-            }
-        }
-    }
+    if (stats && !status_array_bounds(layout, map_start, map_end, NULL, NULL))
+        ++stats->extent_fallbacks;
+    uint64_t found = resolve_entry_fd(mem_fd, map_start, map_end,
+                                      backend_pid, layout);
     if (owns_fd)
         close(mem_fd);
     *resolved = found;
@@ -2324,10 +2459,11 @@ static int resolve_entry_fd(pid_t backend_pid, int mem_fd,
 }
 
 uint64_t pgwt_pgbs_resolve_entry(
-    pid_t backend_pid, const struct PgBackendStatusLayout *layout)
+    pid_t backend_pid, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_resolve_stats *stats)
 {
     uint64_t base = 0;
-    resolve_entry_fd(backend_pid, -1, layout, &base);
+    resolve_preseed_entry_fd(backend_pid, -1, layout, &base, stats);
     return base;
 }
 
@@ -2364,7 +2500,7 @@ int pgwt_pgbs_read_preseed(pid_t pid, uint64_t my_be_entry_addr,
             goto done;
     } else if (!base) {
         /* An unresolved PG13 row does not prove there is no command. */
-        if (resolve_entry_fd(pid, fd, layout, &base) != PGWT_PGBS_PRESEED_ROW)
+        if (resolve_preseed_entry_fd(pid, fd, layout, &base, NULL) != PGWT_PGBS_PRESEED_ROW)
             goto done;
     }
     rc = PGWT_PGBS_PRESEED_FAILED;
@@ -2452,6 +2588,43 @@ int pgwt_pgbs_read_retirement(pid_t pid, pid_t postmaster_pid, int stat_fd,
     }
     return pgwt_pgbs_retirement_proof(accepted, pid, layout, current,
                                       before, after, result, &row);
+}
+
+static uint64_t resolve_clock_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+}
+
+uint64_t pgwt_pgbs_resolve_cached(struct pgwt_backend *be,
+    const struct PgBackendStatusLayout *layout, uint64_t now_ns, bool force,
+    struct pgwt_pgbs_resolve_stats *stats)
+{
+    if (!be) return 0;
+    if (be->pgbs_addr || (!force && be->pgbs_resolve_attempts &&
+                         now_ns < be->pgbs_resolve_retry_ns))
+        return be->pgbs_addr;
+    uint64_t started = stats ? resolve_clock_ns() : 0;
+    be->pgbs_addr = pgwt_pgbs_resolve_entry(be->pid, layout, stats);
+    if (stats) {
+        int saved = errno;
+        ++stats->calls;
+        if (!be->pgbs_addr) ++stats->misses;
+        stats->total_ns += resolve_clock_ns() - started;
+        errno = saved;
+    }
+    if (be->pgbs_addr) {
+        be->pgbs_resolve_attempts = 0;
+        be->pgbs_resolve_retry_ns = 0;
+    } else {
+        unsigned shift = be->pgbs_resolve_attempts < 5
+            ? be->pgbs_resolve_attempts++ : 5;
+        uint64_t delay = UINT64_C(100000000) << shift;
+        be->pgbs_resolve_retry_ns = now_ns > UINT64_MAX - delay
+            ? UINT64_MAX : now_ns + delay;
+    }
+    return be->pgbs_addr;
 }
 
 static int postmaster_connection(pid_t postmaster_pid, int *port,
@@ -3056,6 +3229,10 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                                 const char *pg_binary,
                                 struct pgwt_pgbs_exclusion_set *exclusions)
 {
+    if (layout) {
+        layout->status_array_base = 0;
+        layout->status_array_slots = 0;
+    }
     if (!layout || layout->source == PGWT_PGBS_SOURCE_NONE) {
         if (layout)
             degrade_unvalidated(layout, "no discovered layout to validate");
@@ -3115,12 +3292,21 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     char command[256];
     const char *validation_step = "controlled PID handshake";
     int observed = send_psql(
-        &controlled, "SELECT 'controlled',pg_backend_pid(),"
-                     "pg_size_bytes(current_setting('track_activity_query_size'));");
+        &controlled, layout->major == 13
+            ? "SELECT 'controlled',pg_backend_pid(),"
+              "pg_size_bytes(current_setting('track_activity_query_size')),"
+              "current_setting('max_connections'),"
+              "current_setting('autovacuum_max_workers'),"
+              "current_setting('max_worker_processes'),"
+              "current_setting('max_wal_senders');"
+            : "SELECT 'controlled',pg_backend_pid(),"
+              "pg_size_bytes(current_setting('track_activity_query_size'));");
     pid_t controlled_pid = 0;
     uint64_t controlled_start_time = 0;
     unsigned long long activity_buffer_size = 0;
-    char controlled_line[128];
+    unsigned long long connections = 0, autovac_workers = 0, workers = 0, wal_senders = 0;
+    uint32_t controlled_backend_id = 0;
+    char controlled_line[256];
     int remaining_ms = deadline_remaining_ms(step_deadline_ms);
     if (observed == 0 &&
         read_proc_output_bounded(&controlled, controlled_line,
@@ -3131,6 +3317,10 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
         controlled_pid > 0 && activity_buffer_size >= 2 &&
         activity_buffer_size <= UINT32_MAX) {
         layout->activity_buffer_size = (uint32_t)activity_buffer_size;
+        if (layout->major == 13 &&
+            sscanf(controlled_line, "controlled|%*d|%*u|%llu|%llu|%llu|%llu",
+                   &connections, &autovac_workers, &workers, &wal_senders) != 4)
+            connections = 0; /* Unknown extent retains the legacy bound. */
         (void)pgwt_pgbs_pid_start_time(controlled_pid,
                                         &controlled_start_time);
         int excluded = pgwt_pgbs_exclusion_add(exclusions, controlled_pid);
@@ -3198,6 +3388,16 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
             idle_marker, &idle_snapshot);
         if (!idle_base)
             observed = -1;
+        else if (layout->major == 13 && layout->my_backend_id_addr) {
+            int fd = open_mem(controlled_pid);
+            if (fd >= 0) {
+                if (pread_exact(fd, &controlled_backend_id,
+                                sizeof(controlled_backend_id),
+                                layout->my_backend_id_addr) < 0)
+                    controlled_backend_id = 0;
+                close(fd);
+            }
+        }
     }
 
     snprintf(command, sizeof(command),
@@ -3407,6 +3607,14 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     if (layout->validation == PGWT_PGBS_VALIDATION_VALIDATED) {
         if (layout->major < 14) {
             layout->status_anchor = idle_base;
+            if (idle_base == first_base && idle_base == second_base) {
+                /* An unknown extent must not discard the retained base
+                 * hint for the counted sampler batch resolver. */
+                uint64_t retained_base = layout->status_array_base;
+                if (!set_pg13_extent(layout, controlled_backend_id,
+                        connections, autovac_workers, workers, wal_senders))
+                    layout->status_array_base = retained_base;
+            }
             set_detail(layout,
                        "controlled backend retired before capture; idle/active state and activity markers validated; query ID ABSENT");
         } else
@@ -3636,6 +3844,10 @@ void pgwt_pgbs_log(const struct PgBackendStatusLayout *layout)
                 layout->st_query_id_signed ? "signed" : "unsigned");
     fprintf(stderr, "\nINFO: PgBackendStatus validation detail: %s\n",
             layout->detail);
+    if (layout->major == 13)
+        fprintf(stderr, "INFO: PG13 status array base=0x%" PRIx64
+                " slots=%u (unknown extent uses legacy scan bound)\n",
+                layout->status_array_base, layout->status_array_slots);
 
     if (layout->fallback_mask) {
         fprintf(stderr, "WARN: PgBackendStatus layout fallback:");

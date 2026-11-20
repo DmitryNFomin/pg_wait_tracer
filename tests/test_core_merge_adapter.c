@@ -13,7 +13,11 @@ static ma *live_adapters[64];
 static pgwt_merge *live_cores[64];
 static ma *tracked_adapter_create(const ma_config *config, pgwt_merge_reason *error)
 {
+#ifdef PGWT_ADAPTER_PRODUCTION_TEST
+    ma *a=ma_create_production(config,error);
+#else
     ma *a=ma_create(config,error);
+#endif
     if (a) {
         for (size_t i=0;i<64;++i) if (!live_adapters[i]) { live_adapters[i]=a; return a; }
         ma_destroy(a); fputs("adapter test registry exhausted\n",stderr); exit(2);
@@ -43,6 +47,35 @@ static void tracked_core_destroy(pgwt_merge *m)
 #define ma_destroy tracked_adapter_destroy
 #define pgwt_merge_create tracked_core_create
 #define pgwt_merge_destroy tracked_core_destroy
+
+/* Run the same goldens, negative guards and frozen N/Q rows with both table
+ * implementations. Invalid duplicate tables deliberately retain the linear
+ * validator; production insertion rejects duplicates before indexing. */
+static bool indexed_test_mode;
+static ma_result indexed_test_map(const ma *a,const ma_envelope *e,const ma_table *table,
+                                  uint64_t d,const ma_snapshot *s)
+{
+    if (!indexed_test_mode || !table ||
+        (table->lifetime_count && !table->lifetimes) ||
+        (table->binding_count && !table->bindings) ||
+        table->lifetime_count>128 || table->binding_count>128)
+        return ma_map(a,e,table,d,s);
+    size_t lifetimes[256]={0},bindings[256]={0};
+    ma_table t=*table;
+    t.lifetime_index=lifetimes;t.binding_index=bindings;t.index_slots=256;
+    for(size_t i=0;i<t.lifetime_count;++i){
+        size_t slot=ma_lifetime_bucket(&t,t.lifetimes[i].pid,t.lifetimes[i].g,NULL);
+        if(lifetimes[slot]){t.lifetime_index=NULL;break;}
+        lifetimes[slot]=i+1;
+    }
+    for(size_t i=0;i<t.binding_count;++i){
+        size_t slot=ma_binding_bucket(&t,t.bindings[i].query_id,NULL);
+        if(bindings[slot]){t.binding_index=NULL;break;}
+        bindings[slot]=i+1;
+    }
+    return ma_map(a,e,&t,d,s);
+}
+#define ma_map indexed_test_map
 
 static const char *active_guard;
 #define MUST(expr) do { if (!(expr)) { \
@@ -101,7 +134,12 @@ static bool setup(premises *p, pgwt_merge_mode mode)
     for (size_t s = 0; s < 4; ++s)
         p->sources[s] = (ma_source_decl){.mechanism = s < 2 ? MA_WATCHPOINT_PERF : MA_ORDERED_RING,
                                         .qualification_complete = true};
-    p->config = (ma_config){.mode = mode, .synthetic_premises = true,
+    p->config = (ma_config){.mode = mode, .synthetic_premises =
+#ifdef PGWT_ADAPTER_PRODUCTION_TEST
+                            false,
+#else
+                            true,
+#endif
                             .sources = p->sources, .source_count = 4};
     pgwt_merge_reason error;
     p->adapter = ma_create(&p->config, &error);
@@ -581,9 +619,26 @@ static bool adapter_row(const json_node *root, const json_node *row, const char 
             /* Only row41 is adapter-driven: a concrete coverage interruption. */
             MUST(number(member(row,"id"))==41);
             e.kind=MA_ATTACH_EVENT; e.attach_event=MA_INTERRUPTED; e.control_pid=30;
-        } else MUST(string_is(kind,"CHECK"));
+        } else MUST(string_is(kind,"CHECK") || string_is(kind,"REARM"));
         ma_snapshot s=from_counters(member(n,"C") ? counters(&c.f,member(n,"C")) : named_counters(&c.f,"C0"));
-        status=deliver(&p,m,&e,optional_number(member(n,"d"),0),&s);
+        if (string_is(kind,"REARM")) {
+            /* Explicit contract-fixture control, never a daemon wire input. */
+            pgwt_merge_attachment fresh[32]; size_t nf=0;
+            const json_node *ps=member(n,"proofs");
+            MUST(ps && ps->kind==J_OBJECT);
+            for (const json_node *q=ps->child;q;q=q->next) {
+                MUST(nf<32);
+                const json_node *id=identity(&c.f,q->key);
+                fresh[nf++]=(pgwt_merge_attachment){.pid=number(member(id,"pid")),
+                    .g=number(member(id,"g")),.next_q=number(member(q,"next_q")),
+                    .identity_proved=true,.sequence_proved=true};
+            }
+            pgwt_merge_input in={.kind=PGWT_MERGE_REARM,
+                .observation={.d=optional_number(member(n,"d"),0),.counters={.known=s.valid}},
+                .attachments=fresh,.attachment_count=nf,.attachment_proofs_fresh=true,.identity_repaired=true};
+            memcpy(in.observation.counters.value,s.value,sizeof(s.value));
+            status=pgwt_merge_feed(m,&in);
+        } else status=deliver(&p,m,&e,optional_number(member(n,"d"),0),&s);
         statuses[index]=status; processed[index]=true;
         if (status==PGWT_MERGE_EXIT_REQUIRED) break;
     }
@@ -970,8 +1025,11 @@ static const adapter_guard adapter_guards[]={
     {"escalation_markers",escalation_markers}
 };
 
-static int adapter_main(int argc, char **argv)
+int adapter_main(int argc, char **argv)
 {
+    if(argc>1 && !strcmp(argv[1],"--indexed")){
+        indexed_test_mode=true;--argc;++argv;
+    }
     if (argc==3 && !strcmp(argv[1],"--guard")) {
         for (size_t i=0;i<sizeof(adapter_guards)/sizeof(adapter_guards[0]);++i)
             if (!strcmp(argv[2],adapter_guards[i].name)) {
@@ -1023,6 +1081,7 @@ static int adapter_main(int argc, char **argv)
     free_document(d); return 0;
 }
 
+#ifndef PGWT_ADAPTER_EMBEDDED
 int main(int argc, char **argv)
 {
     int result=adapter_main(argc,argv);
@@ -1032,3 +1091,5 @@ int main(int argc, char **argv)
     }
     return result;
 }
+
+#endif

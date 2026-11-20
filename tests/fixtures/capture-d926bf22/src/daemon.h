@@ -1,0 +1,588 @@
+/* daemon.h — Daemon state and event loop */
+#ifndef PGWT_DAEMON_H
+#define PGWT_DAEMON_H
+
+#include "pg_wait_tracer.h"
+#include "backend.h"
+#include "event_writer.h"
+#include "summary_writer.h"
+#include "query_text.h"
+#include "backend_meta.h"
+#include "map_reader.h"
+#include "snapshot.h"
+#include "provider.h"
+#include "sampler.h"
+#include "escalation.h"
+#include "anomaly.h"
+#include "effective_cores.h"
+#include "backend_status_layout.h"
+#include "exact_probe.h"
+#include "phase_capability.h"
+#include "pgss_resolver.h"
+#include "merge_capture.h"
+#include "percpu_transport.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+/* Forward declaration for skeleton */
+struct pg_wait_tracer_bpf;
+struct ring_buffer;
+struct pgwt_control;
+struct pgwt_sampler;
+struct pgwt_percpu_transport;
+
+/* Self-observability counters (D6). Plain uint64 increments on the
+ * single-threaded event path — exposed via the control socket
+ * (src/control.c) with stable snake_case metric names. */
+struct pgwt_counters {
+    uint64_t events_total;             /* trace events consumed from event_ringbuf */
+    uint64_t lifecycle_events_total;   /* fork/init/exit/query_text events */
+    uint64_t wp_attach_failures_total; /* attach/enable failure on live or unknown target;
+                                      * includes bootstrap and validation refusals */
+    uint64_t wp_attach_exit_race_total; /* attach/enable failure with original target gone */
+    uint64_t prev_events_total;        /* events_total at previous timer tick */
+    double   events_per_sec;           /* recent rate, refreshed each tick */
+
+    /* Sampled tier (A2). Maintained by the sampler in sampler.c. */
+    uint64_t samples_total;            /* SAMPLES records written */
+    uint64_t prev_samples_total;       /* samples_total at previous timer tick */
+    double   samples_per_sec;          /* recent sample rate, refreshed each tick */
+    uint64_t sample_read_faults_total; /* process_vm_readv partial/EFAULT fallbacks */
+    uint64_t pgbackend_layout_fallbacks_total; /* fields rejected by Stage 1
+                                                 * layout validation */
+    /* At-tick attribution reads of CONNECTED backends that fail (torn,
+     * short, foreign pid, out-of-range state). Not the command gate and not
+     * comparable with noncmd_cpu_samples_total (#693). */
+    uint64_t sampled_attr_tick_read_failures_total;
+    /* Coherent, identity-confirmed at-tick reads whose attribution context is
+     * absent (st_databaseid OR st_userid InvalidOid — see
+     * PGWT_PGBS_ATTR_NO_CONTEXT). Expected to equal (backends without a full
+     * db+user context) x (ticks), so a steady nonzero is normal, not a fault:
+     * on PG18 that is the eight aux processes, and an autovacuum worker joins
+     * them while it runs (database set, st_userid InvalidOid). 0 on PG13,
+     * whose activity source never targets those backends (#693). */
+    uint64_t sampled_attr_tick_no_context_total;
+    /* SCOPE (#294): every sampled_attr_shadow_* counter below compares the
+     * TARGET-LOOP status read against the uprobe map — the read taken BEFORE
+     * the batched wait_event_info read, and therefore BEFORE the #294
+     * post-batch command-gate recheck. For an on-CPU sample the recheck can
+     * OVERRIDE the cmd_open these counters compared, so
+     * sampled_attr_shadow_cmd_open_mismatch_total is NOT the rate at which the
+     * shipped gate disagreed with the uprobe: it is the rate at which the
+     * pre-recheck read did. It stayed at ~29% across the #294 fix precisely
+     * because it watches the earlier read. The decision-relevant pair is
+     * cmd_gate_order_recovered_total / cmd_gate_order_at_risk_total below,
+     * which is how often the shipped gate overrode that read (~54-60%
+     * of the at-risk set, measured on gate-2). Do not read a high
+     * shadow-mismatch rate as "the sampler's command gate is wrong". */
+    uint64_t sampled_attr_shadow_total; /* coherent tick/map pairs compared */
+    uint64_t sampled_attr_shadow_mismatch_total; /* effective tuples differing */
+    uint64_t sampled_attr_shadow_active_total; /* at-tick cmd_open comparisons */
+    uint64_t sampled_attr_shadow_active_mismatch_total; /* active st_query_id !=
+                                                          * raw last_query_id */
+    uint64_t sampled_attr_shadow_cmd_open_mismatch_total;
+    uint64_t sampled_attr_shadow_query_id_mismatch_total;
+    uint64_t sampled_idle_in_command_total; /* #128: samples whose idle wait
+                                             * event contradicts the tick's
+                                             * cmd_open (read skew, or a
+                                             * client wait inside a command)
+                                             * — never a command boundary */
+    /* Stage 4 sampled query-text resolver. pending is a live gauge; the rest
+     * are lifetime outcomes. Updated atomically by the async pgss worker. */
+    uint64_t sampled_text_pending;
+    uint64_t sampled_text_resolved_total;
+    uint64_t sampled_text_absent_total;
+    uint64_t sampled_text_evicted_total;
+    uint64_t sampled_text_error_total;
+    uint64_t sampled_text_retry_exhausted_total;
+    /* Actual pg_stat_statements(true) lookup scans. */
+    uint64_t sampled_text_pgss_scans_total;
+
+    /* Capture hardening (T4). All of these mean "something the operator
+     * must know about is happening" — each is paired with a loud log. */
+    uint64_t writer_push_fail_total; /* every rejected event/sample push call */
+    uint64_t init_state_read_fail_total; /* sticky unknown INIT accounting */
+    uint64_t state_map_full_total;     /* userspace state_map inserts failed (map full, CAP-1) */
+    uint64_t lifecycle_init_lost_total; /* INIT evidence/missing state, never attached */
+    uint64_t lifecycle_init_lost_with_opportunity_total; /* lost minus no-opportunity; gates integrity */
+    uint64_t lifecycle_init_lost_no_opportunity_total; /* init_ts > last sweep start */
+    /* exit - INIT, no-opportunity only; upper bound including daemon delay
+     * when exit_ts_source=observation (no EXIT record timestamp available). */
+    uint64_t lifecycle_init_lost_untraced_ns_total;
+    uint64_t invalid_wait_reads_total; /* wait_event_info reads with a garbage class byte (CAP-2/5) */
+    uint64_t state_reseeds_total;      /* frozen-stale state_map entries reseeded by
+                                        * pgwt_sweep_stale_state (seed→arm race repair) */
+
+    /* Sampler timer is one-shot by design (anti-aliasing jitter, SMP-5), so
+     * expirations never coalesce. Lateness against the ARMED period is the
+     * signal: sampler_tick_late_ns_total / sampler_ticks_total is mean
+     * lateness per tick in nanoseconds; both terms come from the timer alone.
+     * Dividing this mean by the nominal period (1e9 / --sample-rate) gives
+     * the fraction of sampling time lost to lateness. The timer health check
+     * measures scheduling delay, not the accuracy of the CPU figure. */
+    uint64_t sampler_ticks_total;         /* sampler timerfd ticks consumed */
+    uint64_t sampler_tick_late_ns_total;  /* cumulative ns late vs ARMED period */
+
+    /* #416 per-tick event-ring drain (live-display conservation). The tick
+     * used to be built from whatever the epoll loop happened to have drained,
+     * so a long wait's single closing record could miss it entirely. These
+     * say how deep the backlog at tick time actually is, and whether the
+     * drain's pass cap was ever reached — the latter means a tick WAS short. */
+    uint64_t tick_drain_records_total;   /* records recovered by tick drains */
+    uint64_t tick_drain_max_records;     /* deepest single-tick backlog seen */
+    uint64_t tick_drain_truncated_total; /* ticks bounded or still merge-held */
+    uint64_t tick_drain_pending_records; /* latest copy: queued/held envelopes;
+                                         * exact-perf only, not kernel backlog */
+    /* Which bound the LAST truncated tick drain hit. Exists so the loud
+     * WARN's reported bound is ASSERTABLE (tests/test_tick_drain.c B7)
+     * rather than merely plausible: the message and this field are set from
+     * the same decision, so a WARN naming the wrong bound fails a test. */
+    enum pgwt_tick_drain_bound {
+        PGWT_TICK_DRAIN_BOUND_NONE = 0,
+        PGWT_TICK_DRAIN_BOUND_RECORDS,
+        PGWT_TICK_DRAIN_BOUND_TIME,
+        PGWT_TICK_DRAIN_BOUND_MERGE,
+    } tick_drain_last_bound;
+
+    /* T8 measured-CPU observability (docs/ROADMAP_AND_STATUS.md).
+     * Lifetime totals over the exact tier's measured intervals — the closed
+     * ringbuf transitions plus the terminal/de-escalation flush records (open
+     * intervals are display-time only and never counted here). All stay 0 on a
+     * legacy-capability daemon (cpu_ns carries the UNKNOWN sentinel).
+     *  - cpu_ns_total:          measured on-CPU ns of we==0 gaps (clamped to gap)
+     *  - offcpu_ns_total:       the gap−cpu remainder (runqueue/throttle/unacct)
+     *  - cpu_clamped_ns_total:  cpu_ns that EXCEEDED its gap wall (clock skew)
+     *  - wait_gap_cpu_ns_total: cpu measured during WAIT-labeled gaps — the
+     *                           self-check quantity (should stay ≈0: a sleeping
+     *                           task burns no CPU). */
+    uint64_t cpu_ns_total;
+    uint64_t offcpu_ns_total;
+    uint64_t cpu_clamped_ns_total;
+    uint64_t wait_gap_cpu_ns_total;
+
+    /* Multi-window view fail-safe (issue #97, src/snapshot.c sat_sub):
+     * number of windowed-delta fields that went DOWN across the window (an
+     * open stretch closed under a different label) and were clamped to 0
+     * instead of wrapping. Non-zero means the affected window's other rows
+     * can read > 100% of DB Time by that stretch's wall (an open stretch's
+     * majority flipped as it grew, or its category resolved late). Exported
+     * as ring_delta_clamps_total. */
+    uint64_t ring_delta_clamps_total;
+
+    /* Multi-window conservation self-check (issue #202, snapshot.h
+     * overshoot_ns): Σ ns by which a window's top-level rows exceeded its
+     * DB Time. ring_delta_clamps_total above only sees a field going DOWN,
+     * so it is blind to over-attribution — #202 was 18330 ms of rows
+     * against 15255 ms of DB Time with clamped_fields 0. Non-zero here
+     * means time was counted against more than one bucket in that window.
+     * Exported as ring_delta_overshoot_ns_total. */
+    uint64_t ring_delta_overshoot_ns_total;
+
+    /* Live command-gate observability (issue #98, map_reader.h
+     * pgwt_live_cmd_gate_*). The live CPU* classification is marker-driven;
+     * these say how much of it was NOT decided by markers — never silent:
+     *  - live_cmd_markers_total:      CMD_START/CMD_END markers swept live
+     *  - live_cpu_unmarked_ns_total:  wall ns of client we==0 closed records
+     *                                 filed as CPU* because their pid had no
+     *                                 marker yet (the server's seen_cmd rule)
+     *  - live_cpu_gate_fallback_total: closed records classified by the
+     *                                 emission-time gate because the per-pid
+     *                                 accumulator was full (no sweep state) */
+    uint64_t live_cmd_markers_total;
+    uint64_t live_cpu_unmarked_ns_total;
+    uint64_t live_cpu_gate_fallback_total;
+
+    /* T2 decomposed-AAS observability (docs/AAS_SEMANTICS_DECISION.md). */
+    uint64_t noncmd_cpu_samples_total; /* client we==0 readings outside a command (not recorded) */
+    uint64_t cmd_gate_recovered_total; /* on-CPU client samples the edge-gate missed, recovered
+                                        * from debug_query_string ground truth (EL9 fix) */
+    /* #294 read-ORDER recheck (sampler.h pgwt_sampler_recheck_cmd_gate). The
+     * at-risk population splits into exactly three outcomes, so none can hide:
+     *
+     *   at_risk == recovered + confirmed_closed + read_failed
+     *
+     * Only `recovered` and `read_failed` are counted here; confirmed_closed is
+     * the remainder. The samples the recheck did NOT rescue —
+     * confirmed_closed AND read_failed — are what build_batch then drops into
+     * noncmd_cpu_samples_total, alongside any backend type the CPU policy
+     * never admits (logger). So cmd_gate_order_read_failed_total is a SUBSET
+     * of noncmd_cpu_samples_total, NOT a term to be added alongside it:
+     * measured at 200 Hz on gate-2, at_risk 13955 = recovered 7575 +
+     * confirmed 6379 + read_failed 1, and noncmd 6380 = 6379 + 1.
+     *
+     * #693: in the #675 gate-3 arms, cmd_gate_order_read_failed_total had
+     * delta 0 vs noncmd 892. sampled_attr_tick_* is a different, unrelated
+     * quantity over a different population: target-ticks, not at-risk on-CPU
+     * samples. Comparing the two is meaningless.
+     *
+     * A cmd_gate_order_read_failed_total rate above ~0 means fresh gate reads
+     * are failing and those samples were dropped, not counted. (That is this
+     * counter only; sampled_attr_tick_read_failures_total above is a
+     * different read of a different field.) */
+    uint64_t cmd_gate_order_at_risk_total;
+    uint64_t cmd_gate_order_recovered_total;
+    uint64_t cmd_gate_order_read_failed_total;
+    uint64_t io_worker_samples_total;  /* io_worker readings taken (excluded from AAS) */
+    uint64_t io_worker_busy_total;     /* ... of which busy (on-CPU or a real wait) */
+    uint64_t prev_io_worker_samples;   /* snapshots at previous display tick */
+    uint64_t prev_io_worker_busy;
+    double   io_worker_busy_pct;       /* busy% over the last display interval */
+};
+
+/* View modes */
+enum pgwt_view {
+    PGWT_VIEW_TIME_MODEL = 0,
+    PGWT_VIEW_SYSTEM_EVENT,
+    PGWT_VIEW_SESSION_EVENT,
+    PGWT_VIEW_HISTOGRAM,
+    PGWT_VIEW_QUERY_EVENT,
+    PGWT_VIEW_ACTIVE,
+};
+
+/* Exit reasons (for supervision loop) */
+enum pgwt_exit_reason {
+    PGWT_EXIT_NORMAL = 0,   /* signal, duration, or count */
+    PGWT_EXIT_PG_DEAD,      /* postmaster died */
+};
+
+/* Sort modes (for active sessions view) */
+enum pgwt_sort_mode {
+    PGWT_SORT_WAIT_TIME = 0,  /* default: by current wait duration */
+    PGWT_SORT_DB_TIME,
+    PGWT_SORT_PID,
+    PGWT_SORT_EVENT,
+};
+
+/* Output formats */
+enum pgwt_format {
+    PGWT_FMT_TUI = 0,   /* screen-clearing interactive (default for TTY) */
+    PGWT_FMT_TEXT,       /* no screen clear, timestamp per interval (default for pipe) */
+    PGWT_FMT_JSON,       /* JSONL — one JSON object per interval (future) */
+    PGWT_FMT_CSV,        /* flat rows, one per event per interval (future) */
+};
+
+struct pgwt_daemon {
+    /* BPF */
+    struct pg_wait_tracer_bpf *skel;
+    struct ring_buffer *rb;          /* lifecycle ringbuf consumer */
+    struct ring_buffer *event_rb;    /* trace event ringbuf consumer */
+    /* U1b: B owns the opaque state; calloc keeps the route off by default. */
+    bool exact_perf;                /* --exact-perf, experimental opt-in */
+    struct pgwt_percpu_transport *percpu_transport;
+    struct pgwt_transport_callbacks transport;
+    struct pgwt_merge_capture *merge_capture;
+    pgwt_attach_report_fn attach_report;
+    void *attach_report_ctx;
+    struct pgwt_merge_capture_sink merge_sink;
+
+    /* epoll */
+    int epoll_fd;
+    int timer_fd;
+    int sample_timer_fd;   /* high-rate sampler tick (sampled/tiered); -1 if unused */
+    uint64_t sample_armed_ns;      /* the jittered period last armed */
+    uint64_t sample_armed_at_ns;   /* CLOCK_MONOTONIC instant it was armed */
+    int signal_fd;
+
+    /* Configuration */
+    pid_t       postmaster_pid;
+    /* Address of the global the daemon dereferences to reach each backend's
+     * wait_event_info. On PG17+ this is `my_wait_event_info` (a uint32* that
+     * already points AT the field). On PG<17 (use_myproc=true) it is the
+     * `MyProc` PGPROC* global; dereferencing it yields the backend's PGPROC,
+     * to which pgproc_wait_offset is added to reach wait_event_info. */
+    uint64_t    my_wait_ptr_addr;
+    bool        use_myproc;          /* PG<17: my_wait_ptr_addr is MyProc (PGPROC*) */
+    int         pgproc_wait_offset;  /* offsetof(PGPROC, wait_event_info); 0 if N/A */
+    bool        wait_offset_validated; /* PG<17: a resolved addr held a sane value */
+    uint64_t    my_be_entry_addr; /* address of MyBEEntry (for query_id) */
+    uint64_t    debug_query_string_addr; /* VA of debug_query_string global;
+                                          * non-NULL in a backend == inside a
+                                          * command (same window pg_stat_activity
+                                          * state='active' spans). Read per-pid by
+                                          * the sampler as the race-free command
+                                          * gate (0 = symbol not resolved). */
+    int         interval;         /* seconds */
+    int         duration;         /* seconds, 0 = unlimited */
+    enum pgwt_view view;
+    const char *event_filter;     /* for histogram view */
+    pid_t       pid_filter;       /* for session_event detail */
+    bool        verbose;
+    /* INIT diagnostics use CLOCK_MONOTONIC, as do BPF timestamps. The sweep
+     * start is published only on completion; nested cleanup sees the previous
+     * completed sweep. A sweep may attach/retire, never consume lifecycle. */
+    bool        init_sweep_active;
+    uint64_t    init_last_sweep_start_ns;
+    uint64_t    lifecycle_batch_start_ns;
+    uint64_t    lifecycle_batch_records;
+    uint64_t    last_epoll_return_ns;
+    pid_t       lifecycle_exit_pid; /* current EXIT, also during its pre-sweep */
+    uint64_t    lifecycle_exit_ts;
+    bool        quiet;               /* suppress view output (record only) */
+    int         pg_major_version;   /* 14, 15, 16, 17, or 18 */
+    int         st_query_id_offset; /* 0 = not available */
+    int         st_activity_offset; /* st_activity_raw in PgBackendStatus, 0 = N/A */
+    /* Stage 1 shadow descriptor.  Existing st_*_offset fields above remain
+     * the only offsets consumed by the sampler/BPF paths until Stage 2. */
+    struct PgBackendStatusLayout backend_status_layout;
+    struct pgwt_pgbs_exclusion_set pgbs_validation_exclusions;
+
+    /* PG13 query attribution (Route B1 via pg_stat_statements). PG13 has no
+     * in-core query_id; when pgss is loaded its post_parse_analyze hook
+     * populates PlannedStmt.queryId (matching pg_stat_statements.queryid). We
+     * uprobe ExecutorStart(QueryDesc*) and walk QueryDesc->plannedstmt->queryId
+     * into the SAME state_map query_id slot the PG17+ path uses, so both tiers
+     * work unchanged. Active only when use_pg13_query_attr is true. */
+    bool        pgss_loaded;            /* pg_stat_statements in postmaster maps */
+    bool        use_pg13_query_attr;    /* PG13 + pgss: use ExecutorStart uprobe */
+    int         pg13_qd_plannedstmt_off; /* offsetof(QueryDesc, plannedstmt) */
+    int         pg13_ps_queryid_off;     /* offsetof(PlannedStmt, queryId) */
+    int         pg13_qd_sourcetext_off;  /* offsetof(QueryDesc, sourceText) */
+    enum pgwt_format format;         /* output format (TUI/TEXT/JSON/CSV) */
+    int         count;               /* max intervals, 0 = unlimited */
+    int         tick;                /* current interval number */
+    uint64_t    query_id_filter;     /* filter query_event to one query, 0 = no filter */
+    enum pgwt_sort_mode sort_mode;   /* sort mode for active view */
+    bool        replay_mode;             /* true when running --replay */
+    bool        daemon_mode;             /* true when running --daemon */
+
+    /* Capture tier (A2). mode picks the provider; default PGWT_MODE_FULL
+     * (today's watchpoint behavior). sample_rate_hz is the sampled tier's
+     * fixed rate (1..1000, default 10). */
+    enum pgwt_mode mode;
+    int         sample_rate_hz;
+    int         escalation_budget_s;     /* tiered: full-fidelity s / rolling hour */
+    const struct pgwt_capture_provider *provider; /* active provider vtable */
+    struct pgwt_sampler *sampler;        /* sampled-tier state, NULL if unused */
+    struct pgwt_escalation escalation;   /* tiered escalation engine (D5/A4) */
+    struct pgwt_exact_probe_bundle exact_probes; /* Stage 3 exact-only links */
+    struct pgwt_anomaly anomaly;         /* anomaly-trigger rules engine (D5/A5) */
+    /* Anomaly config (parsed flags; copied into anomaly state after init so
+     * --anomaly-* overrides apply on top of the rate-derived defaults). */
+    double      anomaly_aas_factor;      /* --anomaly-aas-factor (<=0 = default) */
+    int         anomaly_aas_ticks;       /* --anomaly-aas-ticks (<=0 = default) */
+    double      anomaly_lock_fraction;   /* --anomaly-lock-fraction (<0 = default) */
+    double      anomaly_lock_min_aas;    /* --anomaly-lock-min-aas (<0 = default, ESC-4) */
+    int         anomaly_cooldown_s;      /* --anomaly-cooldown-s (<0 = default) */
+    int         anomaly_window_s;        /* --anomaly-window-s: per-trigger
+                                          * escalation duration (<=0 = default) */
+    double      anomaly_cpu_capacity;    /* --anomaly-cpu-capacity; 0 = discover */
+    double      anomaly_cpu_min_aas;     /* --anomaly-cpu-min-aas (<0 = default) */
+    double      anomaly_cpu_margin;      /* --anomaly-cpu-margin (<0 = default) */
+    double      anomaly_cpu_cusum_k;     /* --anomaly-cpu-cusum-k (<0 = default) */
+    double      anomaly_cpu_cusum_h;     /* --anomaly-cpu-cusum-h (<0 = default) */
+    double      anomaly_cpu_cusum_cap;   /* --anomaly-cpu-cusum-cap (<0 = default) */
+    double      anomaly_cpu_coverage_gap_s; /* --anomaly-cpu-coverage-gap-s */
+    bool        anomaly_cpu_cusum_disabled; /* independent CPU-guard switch */
+
+    /* AAS-1 Stage 2: target postmaster effective logical-core capacity.
+     * Stage 3 refreshes it on every anomaly/sampler tick; modes without an
+     * armed anomaly engine retain the display-tick refresh for metrics. */
+    struct pgwt_effective_cores_resolver cpu_capacity_resolver;
+    struct pgwt_effective_cores_result effective_cores;
+    /* T2: the pgstat_report_activity uprobe attached and the BackendState
+     * layout is known — the command-open gate is live. When false, we==0
+     * classification falls back to the pre-T2 behavior (all exact CPU counts
+     * as CPU) instead of silently mislabeling everything idle. */
+    bool        cmd_gate_active;
+    /* T8 measured CPU (docs/ROADMAP_AND_STATUS.md). cpu_accounting: the
+     * exact tier measures per-interval CPU (BPF se.sum_exec_runtime deltas) and
+     * the trace carries real cpu_ns; when false the daemon runs legacy
+     * gap-inference and stamps the UNKNOWN sentinel. schedstat_ok: field 1 of
+     * /proc/<pid>/schedstat is readable, so the userspace seed/flush/live paths
+     * can read the same accumulator. The startup probe sets both (and reports
+     * the tier loudly + in control-socket status). */
+    bool        cpu_accounting;
+    bool        exact_cpu_active;       /* sched_switch hot body armed */
+    bool        schedstat_ok;
+    uint32_t    lightweight_mode;        /* 1 = BPF accumulator only (no ringbuf) */
+    uint32_t    skip_query_id;          /* 1 = skip query_id reads in BPF */
+    uint32_t    skip_usdt;             /* 1 = skip USDT query lifecycle probes */
+    enum pgwt_exit_reason exit_reason;   /* why the event loop exited */
+    char        pgdata[512];             /* stored for restart detection */
+
+    /* Trace file recording */
+    const char *trace_dir;                  /* NULL = disabled */
+    int         trace_retention;            /* hours, default 24 */
+    double      trace_retention_gb;          /* size cap in GiB, 0 = off (DUR-3) */
+    /* Group allowed to read trace files. NULL only when --trace-dir is off
+     * or no candidate group exists on this host (#500): the default is
+     * resolved by pgwt_default_trace_group() to a group that actually
+     * EXISTS — "dba" when the site created it, else the group PostgreSQL
+     * runs under. It used to be the literal "dba" unconditionally, which
+     * left every trace root-only on a host without that group. */
+    const char *trace_group;
+    struct pgwt_event_writer *event_writer;     /* NULL if disabled */
+    struct pgwt_summary_writer *summary_writer; /* NULL if disabled */
+    struct pgwt_query_text_capture *query_text_capture; /* NULL if disabled */
+    struct pgwt_pgss_resolver *pgss_resolver;            /* PG14+ async text */
+    struct pgwt_backend_meta_writer *backend_meta;       /* NULL if disabled */
+    struct pgwt_phase_record phase_capabilities; /* independent of attach policy/outcomes */
+    uint64_t phase_capability_write_failures;    /* per process; every failure also WARNs */
+
+    /* Time windows */
+#define PGWT_MAX_WINDOWS 3
+    int         num_windows;                    /* 0 = no windowing */
+    int         windows[PGWT_MAX_WINDOWS];      /* window sizes in seconds */
+    struct pgwt_ring ring;                       /* snapshot ring buffer */
+
+    /* Event stream */
+    struct pgwt_accumulator *event_accum;   /* heap-allocated, cumulative from events */
+
+    /* Control socket (D4) — created when trace_dir is set */
+    struct pgwt_control *control;           /* NULL if disabled/unavailable */
+    struct pgwt_counters counters;          /* self-observability (D6) */
+
+    /* Log-once latches for loud degradation warnings (T4). The counters
+     * above keep counting; the log fires once so it cannot flood. */
+    bool state_map_full_logged;      /* CAP-1 */
+    bool seen_qids_full_logged;      /* CAP-6 */
+    bool invalid_wait_reads_logged;  /* CAP-2/5 backstop */
+    bool cmd_gate_order_read_failed_logged;  /* #294 recheck, one-shot */
+    bool tick_drain_truncated_logged;        /* #416 drain cap, one-shot */
+
+    /* State */
+    struct pgwt_backend_table backends;
+    struct pgwt_accumulator accum;
+    volatile bool running;
+    uint64_t start_ts;
+
+    /* PGWT_DEBUG_DUMP_STATE main-loop liveness probe. These fields are read
+     * and updated only when the debug env is set; production takes no clocks
+     * and emits no diagnostics. debug_timer_entries is deliberately separate
+     * from tick: tick advances only after handle_timer completes, so it cannot
+     * tell "never entered" from "entered and stalled before completion". */
+    bool        debug_dump_state;
+    uint64_t    debug_loop_iterations;
+    uint64_t    debug_timer_entries;
+    uint64_t    debug_timer_expirations;
+    uint64_t    debug_max_timer_expirations;
+    uint64_t    debug_last_loop_ts_ns;
+    uint64_t    debug_max_loop_gap_ns;
+    uint64_t    debug_event_callbacks_total;
+    uint64_t    debug_event_callback_ns_total;
+    uint64_t    debug_event_callback_max_ns;
+    uint64_t    debug_event_drain_yields;
+    int         debug_timer_settime_rc;   /* 0 or saved -errno */
+    int         debug_timer_epoll_rc;     /* 0 or saved -errno */
+
+    /* Deterministic event-drain stall reproducer. A nonzero delay is injected
+     * into only the first PGWT_TEST_EVENT_DELAY_COUNT trace callbacks, keeping
+     * the test fault bounded even if a producer never stops. Never enabled in
+     * production; parsed and announced once during daemon init. */
+    uint32_t    test_event_callback_delay_us;
+    uint32_t    test_event_callback_delays_left;
+    bool        test_no_event_drain_budget;
+
+    /* Per-main-loop consume budget. ring_buffer__consume() has no record
+     * limit, so the callback returns a private stop sentinel after this many
+     * fully processed records. Zero means an intentional unbounded drain
+     * (shutdown/finalization). Single-threaded: only the event callback reads
+     * these while consume is active. */
+    /* Any service yield keeps the next main-loop wait from sleeping. */
+    bool        service_backlog;
+    uint32_t    event_drain_callback_limit;
+    uint32_t    event_drain_callbacks_current;
+
+    /* Placed at end of struct to survive field overflow corruption */
+    char       *pg_binary_saved;        /* heap-allocated postgres binary path for USDT */
+};
+
+/* PGWT_DEBUG_DUMP_STATE duration probe shared by the daemon loop and the
+ * synchronous backend/watchpoint paths it dispatches. The env-off case is
+ * inline: no helper call and, critically, no clock syscall. Durations above
+ * 50ms emit one STATEDUMP-BLOCK line. */
+uint64_t pgwt_debug_monotonic_ns(void);
+void pgwt_debug_block_report(const char *op, pid_t pid, uint64_t started_ns);
+
+static inline uint64_t pgwt_debug_block_begin(const struct pgwt_daemon *d)
+{
+    return d->debug_dump_state ? pgwt_debug_monotonic_ns() : 0;
+}
+
+static inline void pgwt_debug_block_end(const struct pgwt_daemon *d,
+                                        const char *op, pid_t pid,
+                                        uint64_t started_ns)
+{
+    (void)d;
+    if (started_ns)
+        pgwt_debug_block_report(op, pid, started_ns);
+}
+
+/* True when watchpoints should be attached RIGHT NOW.
+ *   FULL    — always (the original watchpoint behavior).
+ *   SAMPLED — never (registry only, the sampler reads memory directly).
+ *   TIERED  — only while escalated: the sampler runs always-on and full
+ *             fidelity is armed for bounded windows. De-escalated, tiered
+ *             behaves exactly like sampled (no traps on PG).
+ * Used by the fork/exit lifecycle to decide whether a new backend gets a
+ * bootstrap watchpoint, and by the daemon to gate watchpoint-only setup. */
+static inline bool pgwt_mode_uses_watchpoints(const struct pgwt_daemon *d)
+{
+    if (d->mode == PGWT_MODE_SAMPLED)
+        return false;
+    if (d->mode == PGWT_MODE_TIERED)
+        return d->escalation.active && d->escalation.admitting;
+    if (d->mode == PGWT_MODE_COOP)
+        return false;   /* A6: capture comes from the extension, not watchpoints
+                           (and the stub refuses activation in this build) */
+    return true;   /* PGWT_MODE_FULL */
+}
+
+/* True when the mode runs the always-on userspace sampler (sampled + tiered).
+ * Distinct from pgwt_mode_uses_watchpoints(): in tiered mode BOTH can be true
+ * at once (sampler always on, watchpoints on during an escalation window). */
+static inline bool pgwt_mode_uses_sampler(const struct pgwt_daemon *d)
+{
+    return d->mode == PGWT_MODE_SAMPLED || d->mode == PGWT_MODE_TIERED;
+}
+
+/* Initialize daemon: load BPF, attach tracepoints, scan backends. */
+int pgwt_daemon_init(struct pgwt_daemon *d);
+
+/* #464/#108: resolve the canonical query__execute__* sites from BIN and
+ * publish them into the BPF exec_site_allow map. Returns 0 when the
+ * allowlist is in place and the caller may attach the execution probes,
+ * -1 when it could not be established, in which case the caller MUST NOT
+ * attach them (with both PortalRun sites live every plannable non-SELECT
+ * is counted twice). Non-static because the execution phase markers are
+ * bundle members now and src/exact_probe.c attaches them.  */
+int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin);
+
+/* One display tick: drain the event ring, build the display from the
+ * cumulative accumulator plus the live state_map, print, maintain.
+ * Non-static ONLY so tests/test_tick_drain.c can drive the real handler
+ * (#416): the defect was the ORDER of the steps inside it, so a test that
+ * called a narrower seam could not have seen it. */
+void pgwt_handle_timer(struct pgwt_daemon *d);
+/* Shared timer duties, preserving the default order around its display drain.
+ * The timerfd and expiration diagnostics have already been handled. */
+void pgwt_tick_duties(struct pgwt_daemon *d);
+int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d);
+/* Process one decoded L payload (FORK/INIT/EXIT or QUERY_TEXT), after wire
+ * validation. Shared by the default ring callback and B; never dispatches
+ * back into transport. Includes exit bookkeeping and the per-record sweep. */
+int pgwt_process_lifecycle_payload(struct pgwt_daemon *d,
+                                  void *data, size_t data_sz);
+/* Single dispatch for every raw event-ring drain (including provider,
+ * escalation and open-snapshot callers). Keeps B out of those files. */
+int pgwt_consume_event_ring(struct pgwt_daemon *d, bool bounded);
+
+/* Run the main event loop. Returns on signal or duration timeout. */
+int pgwt_daemon_run(struct pgwt_daemon *d);
+
+/* Clean up all resources. */
+void pgwt_daemon_cleanup(struct pgwt_daemon *d);
+
+/* T8: fold one measured interval's cpu_ns into the lifetime CPU counters
+ * (docs/ROADMAP_AND_STATUS.md). Call once per emitted exact-tier
+ * TRANSITIONS record — the closed ringbuf path (event_stream.c) and the
+ * terminal/de-escalation flush (escalation.c). A marker or an UNKNOWN cpu_ns
+ * is a no-op. we==0 splits into cpu_ns_total (clamped to dur) + offcpu_ns_total
+ * (+ cpu_clamped_ns_total for the overshoot); a wait-labeled gap folds its
+ * cpu_ns into wait_gap_cpu_ns_total (the ≈0 self-check). */
+void pgwt_counters_add_cpu(struct pgwt_daemon *d, uint32_t we,
+                            uint64_t dur_ns, uint64_t cpu_ns);
+
+#endif /* PGWT_DAEMON_H */

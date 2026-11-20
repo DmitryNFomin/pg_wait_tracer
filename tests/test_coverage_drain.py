@@ -95,6 +95,12 @@ int pgwt_writer_coverage_seal(struct pgwt_event_writer *w, uint64_t obs,
 { assert(w == &writer && obs == wall); sealed_w = mark; return 0; }
 int pgwt_is_idle_event(uint32_t event) { (void)event; abort(); }
 
+/* This suite exercises the shared-ring branch of shutdown. exact_perf's
+ * gather/producer binding is exercised by test_exact_perf_coverage.py. */
+static void cov_gather(struct pgwt_daemon *daemon, struct pgwt_cov_tick_in *in,
+                        struct pgwt_counter_vector *cv)
+{ (void)daemon; (void)in; (void)cv; abort(); }
+
 @FUNCTIONS@
 
 struct pgwt_counter_vector pgwt_daemon_counter_vector(struct pgwt_daemon *daemon)
@@ -400,9 +406,9 @@ def main():
                  "            cov_take_pending(t);",
                  "            { cov_set_pending(t, in); cov_take_pending(t); }"),
                 ("frozen-shutdown-counters", "T4", "T4 shutdown rereads final callback failures",
-                 "    pgwt_cov_collect_tick(&in, &cv, d, &ops);\n    if (pgwt_cov_tracker_seal",
+                 "    pgwt_cov_collect_tick(&in, &cv, d, &ops);\nseal:\n    if (pgwt_cov_tracker_seal",
                  "    pgwt_cov_collect_tick(&in, &cv, d, &ops);\n"
-                 "    cv = d->final_drain_counters;\n    if (pgwt_cov_tracker_seal"),
+                 "seal:\n    cv = d->final_drain_counters;\n    if (pgwt_cov_tracker_seal"),
             ]
             for name, case, intended, old, new in mutants:
                 assert snapshot.count(old) == 1, (name, snapshot.count(old))

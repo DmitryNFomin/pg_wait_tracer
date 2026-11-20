@@ -80,7 +80,7 @@ env = dict(os.environ, ASAN_OPTIONS='halt_on_error=1:exitcode=86',
            UBSAN_OPTIONS='halt_on_error=1:exitcode=87:print_stacktrace=1')
 with tempfile.TemporaryDirectory(prefix='pgwt-merge-adapter-mutants-') as tmp:
     work = Path(tmp)
-    for name in ['src/core/pgwt_merge.h', 'src/core/pgwt_merge_adapter.h', 'src/core/merge.c',
+    for name in ['src/core/pgwt_merge.h', 'src/core/pgwt_diagnostics.h', 'src/core/pgwt_merge_adapter.h', 'src/core/merge.c',
                  'tests/test_core_merge_adapter.c', 'tests/test_core_merge_contract.c',
                  'tests/merge_adapter_goldens.h']:
         dest = work / name
@@ -105,7 +105,12 @@ with tempfile.TemporaryDirectory(prefix='pgwt-merge-adapter-mutants-') as tmp:
     expected_sweep = 'adapter goldens: 12/12; guard sweep: 31/31'
     if expected_sweep not in base.stdout:
         raise SystemExit('ERROR: baseline did not reach every registered guard')
-    print('adapter baseline: golden 12/12, guard sweep 31/31, end-to-end 78/78 PASS')
+    indexed = subprocess.run([str(binary), '--indexed', str(repo / 'contracts/merge-v1/examples.json')],
+                             capture_output=True, text=True, env=env)
+    if indexed.returncode or expected_sweep not in indexed.stdout or '78/78 N/Q cases' not in indexed.stdout:
+        print(indexed.stdout + indexed.stderr)
+        raise SystemExit('ERROR: indexed adapter baseline/guard sweep failed')
+    print('adapter baseline: golden 12/12, guard sweep 31/31, end-to-end 78/78 PASS, both linear and indexed')
     killed = 0
     for name, guard, replacements in mutations:
         changed = original
@@ -114,15 +119,19 @@ with tempfile.TemporaryDirectory(prefix='pgwt-merge-adapter-mutants-') as tmp:
                 raise SystemExit(f'ERROR: {name}: mutation anchor is not unique')
             changed = changed.replace(before, after)
         build(changed)
-        result = subprocess.run([str(binary), '--guard', guard],
-                                capture_output=True, text=True, env=env)
-        # Exit 1 alone cannot classify a crash, setup failure or unrelated test.
-        if (result.returncode != 1 or f'REACHED {guard}\n' not in result.stdout or
-            f'adapter ASSERT {guard}:' not in result.stderr or
-            any(x in result.stderr for x in ['AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'])):
-            print(result.stdout + result.stderr)
-            raise SystemExit(f'ERROR: {name}: survived or failed outside intended assertion')
-        print(f'{name}: KILLED at {guard}')
+        for table_mode in ([], ['--indexed']):
+            result = subprocess.run([str(binary), *table_mode, '--guard', guard],
+                                    capture_output=True, text=True, env=env)
+            # Exit 1 alone cannot classify a crash, setup failure or unrelated test.
+            if (result.returncode != 1 or f'REACHED {guard}\n' not in result.stdout or
+                f'adapter ASSERT {guard}:' not in result.stderr or
+                any(x in result.stderr for x in ['AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'])):
+                print(result.stdout + result.stderr)
+                raise SystemExit(f'ERROR: {name}: survived or failed outside intended assertion ({table_mode})')
+        print(f'{name}: KILLED at {guard} (linear and indexed)')
         killed += 1
     print(f'adapter mutants: {killed}/{len(mutations)} killed; guard sweep 31/31 PASS')
+# B uses this existing registered mutation entry point; registration files are
+# frozen during the parallel A1/B units.
+subprocess.run([sys.executable, str(repo / 'tests/percpu_transport_mutants.py')], check=True)
 PY

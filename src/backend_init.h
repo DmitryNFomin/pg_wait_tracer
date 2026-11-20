@@ -25,4 +25,9 @@ bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
                          void *ctx, pgwt_init_state_reader read_state,
                          uint64_t *init_ts, bool *before_attach);
 
+/* Same decision, with the branch that supplied it; no extra map reads. */
+bool pgwt_exit_init_lost_diagnostic(const struct pgwt_backend *be, pid_t pid,
+    void *ctx, pgwt_init_state_reader read_state, uint64_t *init_ts,
+    bool *before_attach, const char **branch);
+
 #endif

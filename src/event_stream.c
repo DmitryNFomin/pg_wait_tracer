@@ -70,6 +70,8 @@ int pgwt_process_trace_payload(struct pgwt_daemon *d,
 
     (void)data_sz;
 
+    if (!d->exact_perf)
+        pgwt_init_diag_trace(&d->init_diagnostics, 0, evt);
     d->counters.events_total++;
     if (d->debug_dump_state)
         d->debug_event_callbacks_total++;

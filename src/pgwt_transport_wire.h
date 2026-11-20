@@ -1,5 +1,6 @@
-/* Transport-only v1 envelope. All integers on the wire are little-endian.
- * Payloads and the v4 capture format are unchanged. No producer in U1b-0. */
+/* Transport-only v2 envelope. All integers on the wire are little-endian.
+ * EXIT reuses addr for init_ts and the upper type half for disposition.
+ * Sizes/offsets and the v4 capture format are unchanged; v1 is rejected. */
 #ifndef PGWT_TRANSPORT_WIRE_H
 #define PGWT_TRANSPORT_WIRE_H
 
@@ -15,7 +16,7 @@ typedef uint32_t __u32;
 typedef uint64_t __u64;
 #endif
 
-#define PGWT_WIRE_VERSION 1
+#define PGWT_WIRE_VERSION 2
 enum {
     PGWT_WIRE_TRACE = 1, PGWT_WIRE_LIFECYCLE = 2,
     PGWT_WIRE_TEXT = 3, PGWT_WIRE_BOUNDARY = 4
