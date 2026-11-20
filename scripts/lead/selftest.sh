@@ -270,6 +270,72 @@ printf 'RUNNING agent/fix-612 [issue-612]\n' > "$DISP"
 check "escalation: first turn's RUNNING passes" 0 '{"stop_hook_active": false}'
 check "escalation: same queue, no new disposition this turn, blocks again" 2 '{"stop_hook_active": false}'
 
+# GNU stat emits stdout before failing BSD's -f %m invocation. Exercise
+# both mtime readers through that behaviour even when this suite runs on Mac.
+GNU_BIN="$TMP/gnu-stat-bin"
+mkdir -p "$GNU_BIN"
+cat > "$GNU_BIN/stat" <<'STAT_SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STAT_CALLS"
+if [ "$1" = -f ]; then
+  printf 'File: "%s"\nType: fixture-filesystem\n' "$3"
+  exit 1
+fi
+if [ "$1" = -c ] && [ "$2" = %Y ]; then
+  python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$3"
+else
+  exit 1
+fi
+STAT_SHIM
+chmod +x "$GNU_BIN/stat"
+export STAT_CALLS="$TMP/stat-calls"
+write_empty_cache; write_dq "$DQ_READY"; rm -f "$DISP"
+out=$(printf '%s' '{"stop_hook_active": false}' | PATH="$GNU_BIN:$PATH" "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 2 ] && printf '%s' "$out" | /usr/bin/grep -q 'issue-612' \
+   && /usr/bin/grep -Fxq -- "-f %m $CACHE" "$STAT_CALLS" \
+   && /usr/bin/grep -Fxq -- "-c %Y $CACHE" "$STAT_CALLS" \
+   && /usr/bin/grep -Fxq -- "-f %m $DQ" "$STAT_CALLS" \
+   && /usr/bin/grep -Fxq -- "-c %Y $DQ" "$STAT_CALLS"; then
+  pass=$((pass+1)); echo 'ok   GNU stat fallback: fresh cache and queue still enforce escalation'
+else
+  fail=$((fail+1)); echo "FAIL GNU stat fallback for fresh cache and queue (rc=$rc)"
+  printf '%s\n' "$out"
+fi
+python3 - "$DQ" <<'STALE_QUEUE'
+import os, sys, time
+old = time.time() - 1200
+os.utime(sys.argv[1], (old, old))
+STALE_QUEUE
+out=$(printf '%s' '{"stop_hook_active": false}' | PATH="$GNU_BIN:$PATH" "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$out" | /usr/bin/grep -q 'DISPATCH QUEUE: STALE or missing'; then
+  pass=$((pass+1)); echo 'ok   GNU stat fallback: stale queue suspends escalation'
+else
+  fail=$((fail+1)); echo "FAIL GNU stat fallback for stale queue (rc=$rc)"
+  printf '%s\n' "$out"
+fi
+python3 - "$CACHE" <<'STALE_CACHE'
+import os, sys, time
+old = time.time() - 1200
+os.utime(sys.argv[1], (old, old))
+STALE_CACHE
+cat > "$TMP/sweep.sh" <<'REFRESH_SHIM'
+#!/usr/bin/env bash
+printf '== sweep-TEST refreshed ==\n'
+REFRESH_SHIM
+chmod +x "$TMP/sweep.sh"
+out=$(printf '%s' '{"hook_event_name": "SubagentStop"}' | PATH="$GNU_BIN:$PATH" "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 0 ] && /usr/bin/grep -q 'refresh ok' "$TMP/.sweep.log" \
+   && /usr/bin/grep -q 'sweep-TEST refreshed' "$CACHE"; then
+  pass=$((pass+1)); echo 'ok   GNU stat fallback: stale cache refreshes successfully'
+else
+  fail=$((fail+1)); echo "FAIL GNU stat fallback for stale cache (rc=$rc)"
+  printf '%s\n' "$out"
+fi
+rm -f "$TMP/sweep.sh"
+
 # ---- case 18: SubagentStop must leave dispositions byte-for-byte intact ---
 # The marker cannot satisfy either finding, so exit 0 proves the gate was
 # skipped rather than accidentally satisfied. Real payloads omit stop_active.

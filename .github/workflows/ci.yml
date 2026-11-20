@@ -128,6 +128,11 @@ jobs:
           python3 -m pip install playwright==1.60.0 websockets pillow numpy
           python3 -m playwright install --with-deps chromium
 
+      # Keep a real directory: tick.py compares the resolved process cwd
+      # against /private/tmp/pgwt-codex, so a symlink to /tmp is insufficient.
+      - name: Prepare shared Codex clone root
+        run: sudo mkdir -p /private/tmp && sudo chmod 1777 /private/tmp
+
       - name: Run full check and require its full-mode verdict
         run: |
           set -euo pipefail

@@ -49,12 +49,16 @@ same code" reasoning as check-box-evidence.sh and held.sh).
 import glob
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
 
 
+# The Mac shares one worktree inventory; CI has its own checkout.
 REPO_ROOT = "/Users/dmitryfomin/work/git/pg_wait_tracer"
+if not Path(REPO_ROOT).is_dir():
+    REPO_ROOT = str(Path(__file__).resolve().parents[2])
 
 
 def git_read(*args):

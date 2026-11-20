@@ -62,7 +62,10 @@ PR="${1:?usage: check-box-evidence.sh <pr-number>}"
 case "$PR" in
   ''|*[!0-9]*) echo "UNKNOWN: '$PR' is not a PR number"; exit 3 ;;
 esac
-cd /Users/dmitryfomin/work/git/pg_wait_tracer || { echo "UNKNOWN: cannot cd to repo root"; exit 3; }
+# Share the Mac's worktree inventory; use the checkout itself on CI.
+REPO_ROOT=/Users/dmitryfomin/work/git/pg_wait_tracer
+[ -d "$REPO_ROOT" ] || REPO_ROOT="$(dirname "$0")/../.."
+cd "$REPO_ROOT" || { echo "UNKNOWN: cannot cd to repo root"; exit 3; }
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
