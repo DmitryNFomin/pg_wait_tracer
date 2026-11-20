@@ -112,7 +112,7 @@ def run(command, tree, check=True):
 
 def daemon_binding(tree):
     source = (tree / "src/open_snapshot.c").read_text()
-    names = ["cov_capture_gap", "pgwt_coverage_start", "cov_thread_cpu_ns", "cov_clock",
+    names = ["cov_capture_gap", "cov_publish_startup_gap", "pgwt_coverage_start", "cov_thread_cpu_ns", "cov_clock",
              "cov_read_counters", "cov_publish", "cov_perf_positions", "cov_perf_counters",
              "cov_gather", "pgwt_coverage_tick", "pgwt_coverage_shutdown"]
     bodies = []

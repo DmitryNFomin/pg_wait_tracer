@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "pgwt_diagnostics.h"
+#include "pgwt_discovery.h"
 
 /* Pure C11 merge-v1 coordinator. Source indices are numeric CPUs, then E, L.
  * Inputs are consumed synchronously. Payload bytes are copied into fixed slots.
@@ -53,13 +54,16 @@ typedef struct {
     /* Nonzero stable metadata identity: DATA WAIT requires this ID; TEXT
      * supplies it. Availability survives TEXT publication within an epoch. */
     uint64_t dependency_id;
+    pgwt_discovery_origin discovery; /* retained attempt membership, not raw payload */
     const void *payload;
     size_t payload_size;
 } pgwt_merge_record;
 typedef enum {
     PGWT_MERGE_DATA, PGWT_MERGE_TEXT, PGWT_MERGE_BOUNDARY,
     PGWT_MERGE_LOSS, PGWT_MERGE_FAULT, PGWT_MERGE_CHECK,
-    PGWT_MERGE_REARM, PGWT_MERGE_WRITER_REJECTED
+    PGWT_MERGE_REARM, PGWT_MERGE_WRITER_REJECTED,
+    PGWT_MERGE_ADMIT_DISCOVERY, PGWT_MERGE_CONFIRM_DISCOVERY,
+    PGWT_MERGE_TERMINAL_DISCOVERY
 } pgwt_merge_input_kind;
 typedef struct {
     pgwt_merge_input_kind kind;
@@ -67,6 +71,7 @@ typedef struct {
     pgwt_merge_record record;       /* TEXT uses source,o,payload,dependency_id */
     size_t source;                 /* BOUNDARY/LOSS */
     uint64_t w, p, n;               /* boundary cutoff/position or LOST count */
+    pgwt_discovery_attempt discovery; /* discovery controls: no source position */
     pgwt_merge_reason reason;       /* FAULT: closed reason list above */
     pgwt_allocation_failure allocation; /* FAULT diagnostic, ignored by rules */
     const pgwt_merge_attachment *attachments; /* REARM: complete fresh proofs */
@@ -138,6 +143,8 @@ pgwt_merge_report pgwt_merge_get_report(const pgwt_merge *);
 /* epoch_invalid in the aggregate report is sticky across REARM. Query each
  * affected epoch here; last_invalid_epoch is the latest affected epoch. */
 pgwt_merge_epoch_report pgwt_merge_get_epoch_report(const pgwt_merge *, uint64_t epoch);
+bool pgwt_merge_discovery_state(const pgwt_merge *, uint64_t pid, uint64_t cookie,
+                                 pgwt_discovery_state *);
 const char *pgwt_merge_reason_name(pgwt_merge_reason);
 
 #endif

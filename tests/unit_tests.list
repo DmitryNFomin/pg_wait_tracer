@@ -1153,3 +1153,5 @@ test_libbpf_positions.py
 
 # T-cov: exact_perf publishes its own certified coverage, durable gaps and heartbeat.
 test_exact_perf_coverage.py
+# Discovery admission consumer oracle and strict startup-gap endpoint. Refs #988.
+test_discovery_admission.py

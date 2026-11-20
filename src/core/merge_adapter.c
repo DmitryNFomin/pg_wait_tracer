@@ -240,8 +240,17 @@ ma_result ma_map(const ma *a, const ma_envelope *e, const ma_table *t,
     if (!a || !e || !t || e->version != 1 ||
         (t->lifetime_count && !t->lifetimes) || (t->binding_count && !t->bindings) ||
         (t->held && t->source_count != a->count) ||
-        (unsigned)e->kind > MA_ATTACH_EVENT || (unsigned)e->origin > MA_ADMIN)
+        (unsigned)e->kind > MA_DISCOVERY_CONTROL || (unsigned)e->origin > MA_ADMIN)
         return faulted(r, PGWT_MERGE_MALFORMED_ENVELOPE);
+    if (e->kind == MA_DISCOVERY_CONTROL) {
+        if (e->size || (unsigned)e->discovery.kind > PGWT_DISC_TERMINAL)
+            return faulted(r, PGWT_MERGE_MALFORMED_ENVELOPE);
+        r.input[0].kind = e->discovery.kind == PGWT_DISC_ADMIT ? PGWT_MERGE_ADMIT_DISCOVERY :
+            e->discovery.kind == PGWT_DISC_CONFIRM ? PGWT_MERGE_CONFIRM_DISCOVERY :
+            PGWT_MERGE_TERMINAL_DISCOVERY;
+        r.input[0].discovery = e->discovery;
+        return r;
+    }
     bool positioned = e->kind == MA_TRACE || e->kind == MA_LIFECYCLE ||
                       e->kind == MA_TEXT || e->kind == MA_BOUNDARY;
     if ((positioned || e->kind == MA_LOSS) && e->source >= a->count)
@@ -285,7 +294,7 @@ ma_result ma_map(const ma *a, const ma_envelope *e, const ma_table *t,
     if (e->origin != MA_EXACT) return faulted(r, PGWT_MERGE_UNKNOWN_EVIDENCE);
     pgwt_merge_input *in = &r.input[0];
     pgwt_merge_record record = {.source = e->source, .o = e->position,
-        .payload = e->bytes, .payload_size = e->size};
+        .payload = e->bytes, .payload_size = e->size, .discovery = e->discovery_origin};
     if (e->kind == MA_TEXT) {
         if (le(e->bytes, 4) != 4) return faulted(r, PGWT_MERGE_MALFORMED_ENVELOPE);
         pgwt_merge_dependency dep;
@@ -304,6 +313,7 @@ ma_result ma_map(const ma *a, const ma_envelope *e, const ma_table *t,
         record.t = le(e->bytes, 8);
         record.rank = PGWT_MERGE_TRANS;
         uint64_t old = le(e->bytes + 12, 4), flags = le(e->bytes + 20, 4);
+        record.discovery.marker = record.discovery.marker || (old >= 0xfffffff0 && old <= 0xfffffff7);
         if (!record.pid || (flags & 1) || old == 0xfffffff4 || old == 0xfffffff5)
             return faulted(r, PGWT_MERGE_UNKNOWN_EVIDENCE);
         if (a->mode == PGWT_MERGE_Q) { record.q = e->q; record.has_q = e->has_q; }

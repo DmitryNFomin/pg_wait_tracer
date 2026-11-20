@@ -651,6 +651,23 @@ static void cov_capture_gap(void *ctx, const struct pgwt_capture_gap *gap)
     pgwt_cov_tracker_capture_gap(&d->coverage, d->event_writer, gap);
 }
 
+static bool cov_publish_startup_gap(void *ctx, const struct pgwt_capture_gap *gap)
+{
+    struct pgwt_daemon *d = ctx;
+    if (!d->event_writer || !d->coverage.watermarks || d->coverage.gap_failed) return false;
+    /* Supporting DATA precedes the close; reject before appending a close
+     * if publishing those bytes failed. */
+    if (gap->kind == PGWT_CAPTURE_GAP_PREEXISTING_END &&
+        pgwt_writer_publish(d->event_writer) != 0) return false;
+    pgwt_cov_tracker_capture_gap(&d->coverage, d->event_writer, gap);
+    if (d->coverage.gap_failed) return false;
+    if (pgwt_writer_publish(d->event_writer) != 0) {
+        d->coverage.gap_failed = true;
+        return false;
+    }
+    return true;
+}
+
 void pgwt_coverage_start(struct pgwt_daemon *d,
                           const struct pgwt_counter_vector *base)
 {
@@ -691,6 +708,7 @@ void pgwt_coverage_start(struct pgwt_daemon *d,
             if (fd < 0 || bpf_map_lookup_elem(fd, &pid, &state) != 0 || !state.cookie)
                 pids[count++] = pid;
         }
+        pgwt_capture_startup_publisher(d->merge_capture, cov_publish_startup_gap);
         if (pgwt_capture_coverage_begin(d->merge_capture, d->start_ts, pids, count, cov_capture_gap) != 0)
             d->coverage.watermarks = false;
     }

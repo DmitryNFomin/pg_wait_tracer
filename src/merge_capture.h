@@ -115,15 +115,32 @@ struct pgwt_capture_config {
      * attachment proof of every fork-seeded lifetime at FORK consumption.
      * Without unit A2 no proof exists and every such generation VOIDs. */
     bool test_attach_premise;
+    /* Checked, synchronous startup coverage publication. Success includes
+     * flushing the supporting records and durable coverage evidence. */
+    bool (*publish_startup_gap)(void *, const struct pgwt_capture_gap *);
 };
 struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *);
-/* Begin boot coverage after the startup backend scan. The copied pids are
- * alive backends without a fork cookie. Later cookie-less TRACE/lifecycle
- * records add missing pids and reopen coverage loss from boot_start if needed.
- * Only a received EXIT retires a pid; a missing EXIT leaves the gap open. */
+/* Begin boot coverage before advertising it. PID-only scan entries remain
+ * unresolved until the producer supplies their retained lifetime binding.
+ * Neither an empty scan nor a received cookie-less EXIT proves completeness. */
 int pgwt_capture_coverage_begin(struct pgwt_merge_capture *, uint64_t boot_start,
                                  const uint32_t *pids, size_t count,
                                  void (*persist)(void *, const struct pgwt_capture_gap *));
+typedef struct {
+    size_t unresolved;
+    bool census_complete, closed;
+    uint64_t census_fence, closure;
+} pgwt_capture_discovery_report;
+/* Producer supplies retained lifetime binding, never a current-PID lookup.
+ * cookie is reserved even when identity insertion/attachment failed. */
+int pgwt_capture_discovery_inventory(struct pgwt_merge_capture *, uint64_t pid, uint64_t cookie);
+int pgwt_capture_discovery_census(struct pgwt_merge_capture *, uint64_t fence,
+                                  bool completeness_proved, uint64_t d, const ma_snapshot *);
+int pgwt_capture_discovery_control(struct pgwt_merge_capture *, const pgwt_discovery_attempt *,
+                                   uint64_t d, const ma_snapshot *);
+pgwt_capture_discovery_report pgwt_capture_discovery_status(const struct pgwt_merge_capture *);
+void pgwt_capture_startup_publisher(struct pgwt_merge_capture *,
+                                     bool (*)(void *, const struct pgwt_capture_gap *));
 /* Exclusive certified-through bound, read BEFORE publishing the trace. */
 bool pgwt_capture_certified_through(const struct pgwt_merge_capture *, uint64_t *);
 /* Successful FRONTIER publications, without computing age statistics. */

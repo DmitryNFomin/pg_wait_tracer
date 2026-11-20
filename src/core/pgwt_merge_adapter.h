@@ -7,7 +7,7 @@
  * Source indices are CPU numeric order, then E,L. Payloads use explicit LE v1. */
 typedef enum { MA_NOT_ATTEMPTED, MA_PENDING, MA_PROVED, MA_FAILED } ma_proof;
 typedef enum { MA_TRACE, MA_LIFECYCLE, MA_TEXT, MA_BOUNDARY, MA_LOSS,
-               MA_CHECK, MA_WRITER_REJECT, MA_ATTACH_EVENT } ma_kind;
+               MA_CHECK, MA_WRITER_REJECT, MA_ATTACH_EVENT, MA_DISCOVERY_CONTROL } ma_kind;
 typedef enum { MA_EXACT, MA_SAMPLE, MA_ADMIN } ma_origin;
 typedef enum { MA_NONE, MA_WATCHPOINT_PERF, MA_ORDERED_RING } ma_mechanism;
 typedef enum { MA_NO_BOUNDARY, MA_RING_BOUNDARY, MA_IDLE_PERF } ma_boundary;
@@ -38,6 +38,8 @@ typedef struct {
     ma_boundary boundary;
     ma_attach_event attach_event;
     uint64_t facts_known, facts_true;
+    pgwt_discovery_attempt discovery;
+    pgwt_discovery_origin discovery_origin;
     const unsigned char *bytes;
 } ma_envelope;
 typedef struct {
