@@ -126,6 +126,8 @@ int pgwt_capture_coverage_begin(struct pgwt_merge_capture *, uint64_t boot_start
                                  void (*persist)(void *, const struct pgwt_capture_gap *));
 /* Exclusive certified-through bound, read BEFORE publishing the trace. */
 bool pgwt_capture_certified_through(const struct pgwt_merge_capture *, uint64_t *);
+/* Successful FRONTIER publications, without computing age statistics. */
+uint64_t pgwt_capture_frontier_count(const struct pgwt_merge_capture *);
 /* Full current counter checkpoint for the exact_perf coverage tick. */
 int pgwt_merge_capture_coverage_checkpoint(struct pgwt_daemon *);
 /* Returns 1 for a record outside the covered population (TRACE/lifecycle

@@ -96,6 +96,12 @@ uint32_t pgwt_percpu_transport_cpu_id(const struct pgwt_daemon *, size_t);
 int pgwt_percpu_transport_open(struct pgwt_daemon *d);
 int pgwt_percpu_transport_epoll_fd(const struct pgwt_daemon *d);
 int pgwt_percpu_transport_poll(struct pgwt_daemon *d);
+/* Called only by the 1 s coverage timer. Off by default. Schedule at most
+ * one normal completion round if no FRONTIER arrived since the last tick;
+ * an already open round coalesces the demand. This never promotes W. */
+void pgwt_percpu_transport_coverage_tick(struct pgwt_daemon *);
+void pgwt_transport_coverage_tick(struct pgwt_percpu_transport *, bool enabled,
+                                   uint64_t frontiers);
 /* A service budget shared by nested calls; tick entry can start a fresh
  * slice, retaining the capture-duration deadline from the main loop. */
 void pgwt_percpu_transport_begin_pass(struct pgwt_daemon *, uint64_t capture_deadline_ns);

@@ -30,6 +30,8 @@ struct pgwt_percpu_transport {
     bool requested, fencing, suspended, finished, draining;
     bool prepared, configured, opened, serviced;
     bool e_seen, l_seen;
+    bool idle_round_pending;
+    uint64_t coverage_tick_frontiers;
     /* Producer positions of E and L read once after every ack of this round,
      * only when a frozen target is still unreached. Never moved by traffic. */
     bool cut_taken, pass_empty;
@@ -620,6 +622,17 @@ static int recover_capacity(struct pgwt_percpu_transport *t, uint64_t now)
     t->recovery_at = now > UINT64_MAX - t->recovery_delay ? UINT64_MAX : now + t->recovery_delay;
     return 1;
 }
+void pgwt_transport_coverage_tick(struct pgwt_percpu_transport *t, bool enabled,
+                                   uint64_t frontiers)
+{
+    if (!t) return;
+    /* Time requests evidence, never supplies it. Leave draining, E/L,
+     * higher-round acknowledgements and the counter checkpoint to poll(). */
+    t->idle_round_pending = enabled && frontiers == t->coverage_tick_frontiers &&
+                            !t->requested && !t->suspended && !t->finished;
+    t->coverage_tick_frontiers = frontiers;
+}
+
 int pgwt_transport_poll(struct pgwt_percpu_transport *t, bool waiting)
 {
     if (!t || t->finished) return -EINVAL;
@@ -645,7 +658,8 @@ int pgwt_transport_poll(struct pgwt_percpu_transport *t, bool waiting)
         int rc = accounting(t);
         if (rc < 0 || t->suspended) return rc;
     }
-    if (!t->requested && (t->count || waiting)) {
+    if (!t->requested && (t->count || waiting || t->idle_round_pending)) {
+        t->idle_round_pending = false;
         t->requested = true; t->requested_at = now;
         ++t->stats.rounds_requested;
         int rc = request(t, false);
@@ -1545,6 +1559,12 @@ int pgwt_percpu_transport_poll(struct pgwt_daemon *d)
     }
     t->last_service_at = now; t->serviced = true;
     return pgwt_transport_poll(t, pgwt_capture_waiting(d->merge_capture));
+}
+void pgwt_percpu_transport_coverage_tick(struct pgwt_daemon *d)
+{
+    if (d && d->exact_perf)
+        pgwt_transport_coverage_tick(d->percpu_transport, d->exact_perf_idle_round,
+                                     pgwt_capture_frontier_count(d->merge_capture));
 }
 void pgwt_percpu_transport_begin_pass(struct pgwt_daemon *d, uint64_t deadline)
 {

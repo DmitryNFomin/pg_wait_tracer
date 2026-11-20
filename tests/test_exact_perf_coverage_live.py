@@ -102,10 +102,13 @@ def incomplete_loss(result):
     assert result["verdict"] == "incomplete" and "capture_loss" in result["reasons"], result
 
 
-def start_daemon(binary, pm, trace):
+def start_daemon(binary, pm, trace, *, idle_round=False, debug=False):
     trace.mkdir()
     env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
     env["PGWT_TEST_EXACT_ATTACH_PREMISE"] = "1"
+    env.pop("PGWT_DEBUG_DUMP_STATE", None)
+    if debug:
+        env["PGWT_DEBUG_DUMP_STATE"] = "1"
     release = os.uname().release
     if not (release.startswith("4.18.") and ".el8" in release):
         env["PGWT_TEST_EXACT_UNCERTIFIED_KERNEL"] = "1"
@@ -113,6 +116,8 @@ def start_daemon(binary, pm, trace):
     error = log.open("w")
     command = [str(binary), "--mode", "full", "--exact-perf", "--pid", str(pm),
                "-T", str(trace), "-i", "5", "-q"]
+    if idle_round:
+        command += ["--exact-perf-idle-round"]
     print("RUN " + shlex.join(command), flush=True)
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=error, env=env)
     try:
@@ -232,19 +237,32 @@ def preexisting_gate(pm, root, reader):
         time.sleep(1)
         assert idle.poll() is None, "pre-existing idle connection is alive"
         trace = root / "preexisting"
-        daemon, error, log = start_daemon(TRACER, pm, trace)
+        daemon, error, log = start_daemon(TRACER, pm, trace, debug=True)
         try:
+            # Measure a sustained quiet interval before making any assertion
+            # about W. Reading the first heartbeat says nothing about progress.
+            time.sleep(10)
+            assert daemon.poll() is None, ("idle daemon exited", log.read_text())
             records, _ = read_trace(trace)
             boot = records[0][3]
             w = max(r[3] for r in records if r[1] == "WATERMARK")
-            assert w > boot, "startup frontier advances even while uncovered"
+            ticks = [dict((k, int(v)) for k, v in re.findall(r"(\w+)=(\d+)", line))
+                     for line in log.read_text().splitlines() if line.startswith("COVERAGE-TICK:")]
+            assert ticks, "idle coverage tick measurement"
+            latest = ticks[-1]
+            print(f"IDLE-W: w_minus_boot_ns={w - boot} rounds_requested={latest['rounds_requested']} "
+                  f"frontiers={latest['frontiers']} data_records={latest['data_records']}", flush=True)
             startup_gaps = [r for r in records if r[1] == "GAP_OPEN" and r[2] == 1 and r[3] == boot]
             assert startup_gaps, "startup PAUSE gap begins at boot_start"
             assert not any(r[1] == "GAP_CLOSE" for r in records), "startup auxiliaries keep PAUSE open"
-            incomplete_loss(verdict(reader, trace, w - 1, w))
+            incomplete_loss(verdict(reader, trace, boot + 1, boot + 2))
             idle.stdin.close()
             idle.wait(timeout=5)
             exited = time.monotonic_ns()
+            # The default remains demand driven. Supply post-exit DATA before
+            # requiring a later frontier; the ten-second measurement above
+            # has no workload and makes no frontier-progress assumption.
+            sql("SELECT pg_sleep(3)")
             wait_for(daemon, lambda: w_now(trace) > exited + SEC, 10, "watermark advances after idle backend exit")
             after = verdict(reader, trace, exited + SEC // 4, exited + SEC // 2)
             incomplete_loss(after)
@@ -260,6 +278,60 @@ def preexisting_gate(pm, root, reader):
         if idle.poll() is None:
             idle.kill()
             idle.wait(timeout=5)
+
+
+def task_cpu_ticks(pid):
+    """utime+stime (fields 14/15), keyed by TID, from the live proc task set.
+
+    Sample every thread; after shutdown the production helper diagnostics
+    identify which TIDs are helpers, excluding resolver/reader threads.
+    """
+    result = {}
+    for path in Path(f"/proc/{pid}/task").glob("*/stat"):
+        fields = path.read_text().rsplit(")", 1)[1].split()
+        result[int(path.parent.name)] = int(fields[11]) + int(fields[12])
+    assert result, "live task CPU samples"
+    return result
+
+
+def idle_cost_gate(pm, root):
+    for enabled in (False, True):
+        option = "on" if enabled else "off"
+        trace = root / f"idle-cost-{option}"
+        daemon, error, log = start_daemon(TRACER, pm, trace, idle_round=enabled)
+        try:
+            start_w = w_now(trace)
+            start_cpu = task_cpu_ticks(daemon.pid)
+            started = time.monotonic()
+            progress = [start_w]
+            # Exactly one 60 s quiet interval per option; no cost threshold.
+            for _ in range(60):
+                time.sleep(1)
+                assert daemon.poll() is None, ("idle cost daemon exited", log.read_text())
+                progress.append(w_now(trace))
+            elapsed = time.monotonic() - started
+            end_cpu = task_cpu_ticks(daemon.pid)
+            stop(daemon)
+            error.close()
+            helpers = [int(tid) for tid in re.findall(r"exact-perf: schedstat role=helper tid=(\d+)", log.read_text())]
+            assert helpers and len(helpers) == len(set(helpers)), "helper TID diagnostics"
+            assert all(tid in start_cpu and tid in end_cpu for tid in helpers), "both CPU samples for every helper"
+            ticks = sum(end_cpu[tid] - start_cpu[tid] for tid in helpers)
+            cpu_pct = 100 * ticks / os.sysconf("SC_CLK_TCK") / elapsed
+            advance = (progress[-1] - start_w) / SEC
+            print(f"IDLE-PROGRESS: option={option} helper_count={len(helpers)} "
+                  f"w_minus_start_s={[round((w - start_w) / SEC, 3) for w in progress]}", flush=True)
+            print(f"IDLE-COST: option={option} helper_cpu_pct_of_one_core={cpu_pct:.6f} "
+                  f"w_advance_s={advance:.6f}", flush=True)
+            # Shutdown asks for a final round; progress/cost above exclude it.
+            _, _, voids = qb_prefix(trace / "merge-qualification.bin")
+            assert not voids, ("idle cost capture VOID", voids, log.read_text())
+            assert all(a <= b for a, b in zip(progress, progress[1:])), "idle W never regresses"
+            if enabled:
+                assert progress[-1] > start_w, "opt-in idle rounds advance W"
+        finally:
+            stop(daemon)
+            error.close()
 
 
 def main():
@@ -288,6 +360,7 @@ def main():
             kill_gate(pm, db, pgb, root, reader)
             saturation_gate(pm, db, pgb, root, reader)
             preexisting_gate(pm, root, reader)
+            idle_cost_gate(pm, root)
         finally:
             sql(f"DROP DATABASE {db}")
     return 0

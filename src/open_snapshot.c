@@ -277,6 +277,7 @@ void pgwt_collect_open_intervals(struct pgwt_daemon *d,
 #include "coverage_record.h"
 #include "idle_rule.h"
 #include "merge_capture.h"
+#include "percpu_transport.h"
 
 void pgwt_cov_floors_begin(struct pgwt_cov_floors *f, uint64_t snap_ns)
 {
@@ -833,21 +834,29 @@ void pgwt_coverage_tick(struct pgwt_daemon *d)
         return;
     uint64_t cpu0 = cov_thread_cpu_ns();
     uint64_t wall0 = now_ns();
+    pgwt_percpu_transport_coverage_tick(d);
     struct pgwt_cov_tick_in in;
     struct pgwt_counter_vector cv;
     cov_gather(d, &in, &cv);
     pgwt_cov_tracker_tick(&d->coverage, d->event_writer, &in);
     d->coverage.tick_cpu_ns += cov_thread_cpu_ns() - cpu0;
-    if (d->debug_dump_state)
+    if (d->debug_dump_state) {
+        struct pgwt_transport_stats ts = pgwt_transport_stats(d->percpu_transport);
+        struct pgwt_capture_stats cs = pgwt_capture_stats(d->merge_capture);
         fprintf(stderr, "COVERAGE-TICK: obs=%llu W=%llu fence=%llu consumer=%llu "
-                "promotions=%llu heartbeats=%llu duration_ns=%llu\n",
+                "promotions=%llu heartbeats=%llu duration_ns=%llu "
+                "rounds_requested=%llu frontiers=%llu data_records=%llu\n",
                 (unsigned long long)in.observation_ns,
                 (unsigned long long)d->coverage.w_ns,
                 (unsigned long long)d->coverage.fence_pos,
                 (unsigned long long)d->coverage.consumer_pos,
                 (unsigned long long)d->coverage.promotions,
                 (unsigned long long)d->coverage.heartbeats,
-                (unsigned long long)(now_ns() - wall0));
+                (unsigned long long)(now_ns() - wall0),
+                (unsigned long long)ts.rounds_requested,
+                (unsigned long long)cs.frontiers,
+                (unsigned long long)cs.released_data);
+    }
 }
 
 void pgwt_coverage_shutdown(struct pgwt_daemon *d)

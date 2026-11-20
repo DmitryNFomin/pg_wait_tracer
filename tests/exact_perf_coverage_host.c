@@ -173,11 +173,12 @@ static struct scan scan(struct fixture *h)
     struct pgwt_event_reader r;
     C(pgwt_reader_open(&r, h->writer.current_path) == 0, "read trace file");
     for (int i=0; i<r.num_blocks; ++i) {
-        struct pgwt_coverage_record rec;
-        uint64_t obs;
-        int rc = pgwt_reader_coverage_record(&r, i, &rec, &obs);
-        C(rc >= 0, "coverage decode");
-        if (rc == 0) {
+        struct pgwt_block_info info;
+        C(pgwt_reader_block_info(&r, i, &info) == 0, "read block type");
+        if (info.block_type == PGWT_BLOCK_COVERAGE) {
+            struct pgwt_coverage_record rec;
+            uint64_t obs;
+            C(pgwt_reader_coverage_record(&r, i, &rec, &obs) == 0, "coverage decode");
             C(s.n<128, "coverage record bound");
             s.records[s.n] = rec;
             int kind = rec.kind == PGWT_COVK_BOOT ? PGWT_COV_REC_FILE : rec.kind;
@@ -414,7 +415,7 @@ static void preexisting(void)
 }
 /* Exercise the production transport receipt/token path: no-cookie records
  * return before queueing, but must still update the coverage population. */
-static void uncovered_record(struct fixture *h, uint32_t pid, uint64_t at, unsigned type)
+static void transport_setup(struct fixture *h)
 {
     if (!h->d.transport) {
         struct pgwt_transport_io io = {.ctx=&h->d, .now=tb_now,
@@ -426,6 +427,10 @@ static void uncovered_record(struct fixture *h, uint32_t pid, uint64_t at, unsig
         h->d.transport=pgwt_transport_create(cpus,2,64,&io);
         C(h->d.transport,"uncovered transport construction");
     }
+}
+static void uncovered_record(struct fixture *h, uint32_t pid, uint64_t at, unsigned type)
+{
+    transport_setup(h);
     unsigned char bytes[48]={0};
     tb_le(bytes+(type?16:0),at,8);
     tb_le(bytes+(type?4:8),pid,4);
@@ -578,6 +583,135 @@ static void sync_failure(void)
     frontier(h,b+2100);tick(h,b+2100,b+2100,b+2100);
     struct scan s=scan(h);C(count(&s,PGWT_COVK_WATERMARK)==2,"no W after failed GAP fsync even after rearm");cleanup(h);
 }
+/* Run the verbatim daemon coverage tick, including its idle policy binding.
+ * Only kernel I/O is stubbed. The subsequent wire boundaries/acks pass through
+ * the real portable transport and core before the writer can promote W. */
+static void idle_tick(struct fixture *h, bool enabled, uint64_t at)
+{
+    transport_setup(h);
+    h->d.topology = h->d.drained = true;
+    binding_now = h->d.now = at;
+    struct pgwt_daemon *d = calloc(1, sizeof(*d));
+    C(d, "idle daemon allocation");
+    d->exact_perf = true; d->exact_perf_idle_round = enabled;
+    d->mode = PGWT_MODE_FULL;
+    d->percpu_transport = h->d.transport; d->merge_capture = h->d.capture;
+    d->event_writer = &h->writer; d->coverage_started = true;
+    d->coverage = h->tracker;
+    pgwt_coverage_tick(d);
+    h->tracker = d->coverage;
+    free(d);
+}
+static void idle_boundaries(struct fixture *h)
+{
+    unsigned round = h->d.ctl.round;
+    C(h->d.ctl.el_request != 0, "idle round requests E/L");
+    h->d.now += 10;
+    C(tb_boundary(&h->d, 0, PGWT_WIRE_DEST_E, round, h->d.now) == 0, "idle E boundary");
+    C(pgwt_transport_poll(h->d.transport, false) == 0, "poll E only");
+    C(h->d.ctl.el_request != 0, "E alone cannot request acknowledgements");
+    C(tb_boundary(&h->d, 1, PGWT_WIRE_DEST_L, round, h->d.now) == 0, "idle L boundary");
+    C(pgwt_transport_poll(h->d.transport, false) == 0, "idle completion fence");
+    C(h->d.ctl.round == round + 1 && !h->d.ctl.el_request, "idle fence requests higher round");
+    h->d.now += 10;
+    C(tb_boundary(&h->d, 0, PGWT_WIRE_DEST_CPU, round + 1, h->d.now) == 0, "first idle ack");
+}
+static void idle_last_ack(struct fixture *h)
+{
+    h->d.now += 10;
+    C(tb_boundary(&h->d, 1, PGWT_WIRE_DEST_CPU, h->d.ctl.round, h->d.now) == 0, "last idle ack");
+    C(pgwt_transport_poll(h->d.transport, false) == 0, "idle complete");
+}
+static void idle_off(void)
+{
+    struct fixture *h = coverage_setup(NULL, 0);
+    for (unsigned i=1; i<=6; ++i) {
+        idle_tick(h, false, h->base + i * UINT64_C(1000000000));
+        C(pgwt_transport_poll(h->d.transport, false) == 0, "default idle poll");
+        C(h->tracker.w_ns == h->base && h->d.controls == 0,
+          "default idle ticks neither wake helpers nor promote W");
+    }
+    cleanup(h);
+}
+static void idle_on(void)
+{
+    struct fixture *h = coverage_setup(NULL, 0);
+    for (unsigned i=1; i<=6; ++i) {
+        uint64_t before = h->tracker.w_ns;
+        idle_tick(h, true, h->base + i * UINT64_C(1000000000));
+        C(pgwt_transport_poll(h->d.transport, false) == 0, "opt-in idle poll");
+        if (i % 2) {
+            C(h->tracker.w_ns == before, "request alone cannot promote W");
+            idle_boundaries(h); idle_last_ack(h);
+        } else {
+            C(h->tracker.w_ns > before, "completed idle certificate promotes pending W");
+        }
+    }
+    C(pgwt_transport_stats(h->d.transport).rounds_requested == 3,
+      "frontier since previous tick suppresses extra idle round");
+    C(pgwt_transport_stats(h->d.transport).acks_at_completion == 6,
+      "each idle round consumes every CPU acknowledgement");
+    struct scan s=scan(h);
+    C(s.data == 0 && count(&s, PGWT_COVK_WATERMARK) == 6,
+      "idle watermark publication needs no DATA");
+    cleanup(h);
+}
+static void idle_ack(void)
+{
+    struct fixture *h = coverage_setup(NULL, 0);
+    idle_tick(h, true, h->base + UINT64_C(1000000000));
+    C(pgwt_transport_poll(h->d.transport, false) == 0, "request withheld-ack round");
+    idle_boundaries(h);
+    for (unsigned i=2; i<=5; ++i) {
+        idle_tick(h, true, h->base + i * UINT64_C(1000000000));
+        C(pgwt_transport_poll(h->d.transport, false) == 0, "poll withheld ack");
+        C(h->tracker.w_ns == h->base, "withheld acknowledgement prevents W promotion");
+        C(pgwt_transport_stats(h->d.transport).rounds_completed == 0,
+          "withheld acknowledgement prevents boundary release");
+        C(pgwt_transport_stats(h->d.transport).rounds_requested == 1,
+          "ticks coalesce with an outstanding round");
+    }
+    idle_last_ack(h);
+    idle_tick(h, true, h->base + UINT64_C(6000000000));
+    C(h->tracker.w_ns > h->base, "last acknowledgement permits pending W promotion");
+    cleanup(h);
+}
+static void idle_counters(void)
+{
+    struct fixture *h = coverage_setup(NULL, 0);
+    idle_tick(h, true, h->base + UINT64_C(1000000000));
+    C(pgwt_transport_poll(h->d.transport, false) == 0, "request counter-check round");
+    idle_boundaries(h);
+    h->d.snapshot.value[0] = 1;
+    idle_last_ack(h);
+    C(pgwt_capture_report(h->d.capture).status != PGWT_MERGE_OK,
+      "idle completion checks counters after acknowledgements");
+    idle_tick(h, true, h->base + UINT64_C(2000000000));
+    C(h->tracker.w_ns == h->base, "failed idle counter check prevents W promotion");
+    cleanup(h);
+}
+static void idle_loaded(void)
+{
+    struct fixture *h = coverage_setup(NULL, 0);
+    transport_setup(h); h->d.topology = h->d.drained = true;
+    for (unsigned i=1; i<=6; ++i) {
+        h->d.now = h->base + i * UINT64_C(1000000000);
+        unsigned char bytes[48] = {0};
+        tb_le(bytes, h->d.now - 100, 8); tb_le(bytes+8, 30, 4);
+        tb_le(bytes+24, 10, 8); tb_le(bytes+40, PGWT_CPU_NS_UNKNOWN, 8);
+        C(tb_emit(&h->d, 0, PGWT_WIRE_DEST_CPU, PGWT_WIRE_TRACE, 123, bytes, 48) == 0,
+          "loaded DATA receipt");
+        C(pgwt_transport_poll(h->d.transport, false) == 0, "loaded demand round");
+        idle_boundaries(h); idle_last_ack(h);
+        uint64_t rounds = pgwt_transport_stats(h->d.transport).rounds_requested;
+        idle_tick(h, true, h->d.now + 30);
+        C(pgwt_transport_poll(h->d.transport, false) == 0, "loaded coverage tick");
+        C(pgwt_transport_stats(h->d.transport).rounds_requested == rounds,
+          "loaded ticks add zero rounds");
+    }
+    C(pgwt_capture_stats(h->d.capture).released_data == 6, "loaded DATA published");
+    cleanup(h);
+}
 int main(int argc,char **argv)
 {
     if(argc>1 && !strcmp(argv[1],"reader_export")) {
@@ -596,9 +730,11 @@ int main(int argc,char **argv)
         return 0;
     }
     const char *names[]={"progress","publish_order","failure","reasons","rearm","late","preexisting",
-        "later_open","later_closed","trace_after_exit","later_empty","later_full","sync_failure","binding"};
+        "later_open","later_closed","trace_after_exit","later_empty","later_full","sync_failure","binding",
+        "idle_off","idle_on","idle_ack","idle_counters","idle_loaded"};
     void (*run[])(void)={progress,publish_order,failure,reasons,rearm,late,preexisting,
-        later_open,later_closed,trace_after_exit,later_empty,later_full,sync_failure,binding};
+        later_open,later_closed,trace_after_exit,later_empty,later_full,sync_failure,binding,
+        idle_off,idle_on,idle_ack,idle_counters,idle_loaded};
     unsigned ran=0;
     for(size_t i=0;i<sizeof(run)/sizeof(run[0]);++i) {
         if(argc>1 && strcmp(argv[1],names[i])) continue;

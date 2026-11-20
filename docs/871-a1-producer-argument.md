@@ -1137,6 +1137,20 @@ when the frontier is stationary. Suspension, an invalid epoch or a failed
 publish writes no WATERMARK. A failed GAP_OPEN also disables further
 watermarks for the entire boot.
 
+`--exact-perf-idle-round` is off by default and requires `--exact-perf`.
+On each one-second coverage tick it requests one boundary round only if no
+FRONTIER arrived since the previous tick, coalescing with an outstanding
+round; loaded ticks that saw frontier progress add no rounds. W advances
+only after E/L boundaries, higher-round acknowledgements from every CPU,
+the counter check and successful publication. A completed idle round also
+counts as frontier progress, so the following tick can skip its request.
+Without this option, quiet
+periods can leave W stationary and recent windows `not_yet_covered` until
+new records create demand. Heartbeats keep reporting the last certified W;
+neither elapsed time nor empty buffers certify the quiet tail. The option
+does not close the startup PAUSE gap described below. Its idle helper CPU
+cost is measured on the boxes, with no cost assertion in the live arm.
+
 Every VOID first writes and fsyncs a GAP_OPEN at the last certified frontier
 plus one, or at boot_start when there has been no frontier:
 

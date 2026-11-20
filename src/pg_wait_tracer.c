@@ -31,6 +31,7 @@ static void usage(const char *prog)
         "                       above that captures VOID (issue #932). A short-lived\n"
         "                       backend whose INIT is lost VOIDs capture (issue #933). At duration/stop,\n"
         "                       unfinished evidence is counted and VOID; cooperative finish budget 100 ms.\n"
+        "      --exact-perf-idle-round  Request idle coverage rounds (requires --exact-perf; default off)\n"
         "      --attach-timeline  Log backend attachment timing (diagnostic; default off)\n"
         "      --test-fork-wakeup=force|adaptive  Test only: exact FORK wakeup (default force)\n"
         "\n"
@@ -258,11 +259,13 @@ static enum pgwt_mode parse_mode(const char *s)
 #define OPT_EXACT_PERF 282
 #define OPT_ATTACH_TIMELINE 283
 #define OPT_TEST_FORK_WAKEUP 284
+#define OPT_EXACT_PERF_IDLE_ROUND 285
 
 static struct option long_opts[] = {
     {"test-fork-wakeup", required_argument, NULL, OPT_TEST_FORK_WAKEUP},
     {"attach-timeline", no_argument, NULL, OPT_ATTACH_TIMELINE},
     {"exact-perf", no_argument, NULL, OPT_EXACT_PERF},
+    {"exact-perf-idle-round", no_argument, NULL, OPT_EXACT_PERF_IDLE_ROUND},
     {"pid",        required_argument, NULL, 'p'},
     {"pgdata",     required_argument, NULL, 'D'},
     {"interval",   required_argument, NULL, 'i'},
@@ -392,6 +395,7 @@ int main(int argc, char **argv)
         case OPT_SKIP_USDT:   d->skip_usdt = 1; break;
         case OPT_MODE:        d->mode = parse_mode(optarg); break;
         case OPT_EXACT_PERF:  d->exact_perf = true; break;
+        case OPT_EXACT_PERF_IDLE_ROUND: d->exact_perf_idle_round = true; break;
         case OPT_ATTACH_TIMELINE: d->attach_timeline_enabled = true; break;
         case OPT_TEST_FORK_WAKEUP:
             if (!strcmp(optarg, "adaptive")) d->test_fork_wakeup_adaptive = true;
@@ -526,6 +530,11 @@ int main(int argc, char **argv)
 
     /* Refuse before discovery, privilege checks or any BPF side effects.
      * B fills prepare(), so no later unit needs to edit this CLI again. */
+    if (d->exact_perf_idle_round && !d->exact_perf) {
+        fprintf(stderr, "FATAL: --exact-perf-idle-round requires --exact-perf\n");
+        free(d);
+        return 1;
+    }
     if (d->exact_perf && pgwt_percpu_transport_prepare(d) != 0) {
         free(d);
         return 1;

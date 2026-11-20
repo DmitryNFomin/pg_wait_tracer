@@ -5,6 +5,9 @@ No eBPF work. All copied sources, binaries and traces live outside the repo.
 A mutant counts only after a successful build and its intended assertion.
 """
 import argparse
+import ast
+import contextlib
+import io
 import json
 import os
 import re
@@ -13,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 CC = shlex.split(os.environ.get("CC", "cc"))
@@ -76,6 +80,18 @@ MUTANTS = [
     ("count_only_empty", "src/merge_capture.c",
      "        if (c->coverage_begun) {", "        if (c->coverage_begun && false) {",
      "later_empty", "unlisted backend opens initially absent gap"),
+    ("idle_promote_without_acks", "src/open_snapshot.c",
+     "    in->positions_known = in->capture_healthy;",
+     "    in->certified_through_ns = now_ns();\n    in->positions_known = in->capture_healthy;",
+     "idle_ack", "withheld acknowledgement prevents W promotion"),
+    ("idle_release_without_acks", "src/percpu_transport.c",
+     "    for (size_t i = 0; i < t->ncpu; ++i) if (!t->acks[i]) return 0;",
+     "    /* missing CPU acknowledgements ignored */",
+     "idle_ack", "withheld acknowledgement prevents boundary release"),
+    ("idle_round_under_load", "src/percpu_transport.c",
+     "enabled && frontiers == t->coverage_tick_frontiers &&",
+     "enabled &&",
+     "idle_loaded", "loaded ticks add zero rounds"),
 ]
 
 
@@ -138,6 +154,72 @@ def reader_roundtrip(tree, binary):
         shutil.rmtree(directory)
 
 
+def live_helpers(tree):
+    """Execute the live CPU parser and both cost arms with a virtual clock.
+
+    Real stat files include a comm containing spaces and ')'. Helpers use
+    3% of one core here, deliberately above the suggested cost budget; the
+    measurement must report that value and exclude a busy reader thread.
+    """
+    source = ast.parse((ROOT / "tests/test_exact_perf_coverage_live.py").read_text())
+    functions = [node for node in source.body if isinstance(node, ast.FunctionDef)
+                 and node.name in ("task_cpu_ticks", "idle_cost_gate")]
+    assert len(functions) == 2
+    root = tree / "live-helper-controls"
+    root.mkdir()
+    tasks = root / "task"
+    tasks.mkdir()
+    clock = SimpleNamespace(now=0.0, started=0.0)
+    samples = []
+
+    def task_path(value):
+        assert value == "/proc/101/task", value
+        elapsed = int(clock.now - clock.started)
+        samples.append(elapsed)
+        for tid, rate in ((101, 10000), (201, 1), (202, 2)):
+            directory = tasks / str(tid)
+            directory.mkdir(exist_ok=True)
+            fields = ["S"] + ["0"] * 10 + [str(10 + elapsed * rate), "20"] + ["0"] * 10
+            (directory / "stat").write_text(f"{tid} (comm with ) spaces) " + " ".join(fields))
+        return tasks
+
+    class Process:
+        pid = 101
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    def start(binary, pm, trace, *, idle_round):
+        assert pm == 1 and idle_round == trace.name.endswith("on")
+        trace.mkdir()
+        clock.started = clock.now
+        log = trace / "daemon.stderr"
+        log.write_text("\n".join(f"exact-perf: schedstat role=helper tid={tid} cpu=0" for tid in (201, 202)))
+        return Process(), io.StringIO(), log
+
+    def sleep(seconds):
+        assert seconds == 1
+        clock.now += seconds
+
+    namespace = dict(Path=task_path, os=SimpleNamespace(sysconf=lambda key: 100 if key == "SC_CLK_TCK" else None),
+                     time=SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep), re=re, SEC=1_000_000_000,
+                     TRACER="virtual", start_daemon=start,
+                     stop=lambda process: setattr(process, "returncode", 0),
+                     w_now=lambda trace: 1000 + (int((clock.now-clock.started)*1_000_000_000)
+                                                 if trace.name.endswith("on") else 0),
+                     qb_prefix=lambda path: ({}, 0, []))
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "<live cost controls>", "exec"), namespace)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        namespace["idle_cost_gate"](1, root)
+    lines = [line for line in output.getvalue().splitlines() if line.startswith("IDLE-COST:")]
+    assert lines == ["IDLE-COST: option=off helper_cpu_pct_of_one_core=3.000000 w_advance_s=0.000000",
+                     "IDLE-COST: option=on helper_cpu_pct_of_one_core=3.000000 w_advance_s=60.000000"], lines
+    assert samples == [0, 60, 0, 60], samples
+    print("idle live helpers: PASS (stat fields, helper-only CPU, both 60 s arms, cost reported without threshold)", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mutants", action="store_true")
@@ -153,6 +235,7 @@ def main():
         result = run([str(binary)], tree)
         print(result.stdout, end="", flush=True)
         reader_roundtrip(tree, binary)
+        live_helpers(tree)
         if args.mutants:
             for name, path, old, new, case, assertion in MUTANTS:
                 file = tree / path

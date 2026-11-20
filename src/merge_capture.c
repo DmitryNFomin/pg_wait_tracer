@@ -1061,6 +1061,8 @@ void pgwt_capture_coverage_print(FILE *out, const struct pgwt_merge_capture *c, 
         " boundary_control=%" PRIu64 " rejected_fault=%" PRIu64 " ok=%d\n",
         wire, released, dropped, s.uncovered, s.pending, controls, rejected, wire == accounted);
 }
+uint64_t pgwt_capture_frontier_count(const struct pgwt_merge_capture *c)
+{ return c ? c->frontiers : 0; }
 struct pgwt_capture_stats pgwt_capture_stats(const struct pgwt_merge_capture *c)
 {
     struct pgwt_capture_stats s = {0};

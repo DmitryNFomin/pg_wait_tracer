@@ -20,6 +20,8 @@ int main(int argc, char **argv)
             if(!events)return 5;
             for(int block=0;block<reader.num_blocks;++block) {
                 struct pgwt_block_info info;
+                if(pgwt_reader_block_info(&reader,block,&info)!=0)return 4;
+                if(info.block_type==PGWT_BLOCK_COVERAGE)continue;
                 int n=pgwt_reader_decode_block_info(&reader,block,events,PGWT_BLOCK_EVENTS,&info);
                 if(n<0)return 4;
                 for(int i=0;i<n;++i) if(events[i].timestamp_ns<w)
@@ -40,6 +42,9 @@ int main(int argc, char **argv)
         if(pgwt_reader_open(&reader,argv[file])!=0) return 3;
         boot.closure_clean=(reader.header.flags & PGWT_FLAG_CLOSED_CLEAN)!=0;
         for(int block=0;block<reader.num_blocks;++block) {
+            struct pgwt_block_info info;
+            if(pgwt_reader_block_info(&reader,block,&info)!=0)return 4;
+            if(info.block_type!=PGWT_BLOCK_COVERAGE)continue;
             struct pgwt_coverage_record rec;uint64_t obs;
             int rc=pgwt_reader_coverage_record(&reader,block,&rec,&obs);
             if(rc==1)continue;
