@@ -4,6 +4,8 @@
 
 `abandoned=n` is the capture-cumulative `discovery_abandoned_records` diagnostic. It counts records consumed under Decision 45, not records merely staged, rejected on arrival, or discarded by ordinary fault handling. It survives REARM.
 
+`uncovered +n` counts cookie-less records consumed as uncovered, separately from `abandoned=n`.
+
 `[U]` and `[T]` mean `prior_interval_certified=false/true`. They describe output semantics; this amendment adds no discovery storage carrier. `F<n>` and `VOID<d>[C,reason]` retain §5’s notation.
 
 Unless specified otherwise, final census completeness is known. Rows faulting before any lifetime discharge retain `G(open), P=1`. No listed row requires nonzero process exit. A11 additionally invalidates the epoch containing the disproved F15; no other listed row requires epoch invalidation.
@@ -72,6 +74,14 @@ Unless specified otherwise, final census completeness is known. Rows faulting be
 | A18 | `VOID20[C0,allocation_fail]`; no later DATA or frontier. `G(open), P=1, abandoned=0`. AB does not cancel the fault or rearm the epoch. D9 was discarded by ordinary fault handling, not consumed under Decision 45. |
 | A19 | `F15`; no TEXT, TRANS or MARKER publication. `G(open), P=1, abandoned=3`. The valid metadata dependency is reconciled before consumption; TEXT is not assigned a timestamp. |
 | A20 | `EXIT_D18 → F18 → VOID20[C0,unknown_evidence]`; `G(18), P=0, abandoned=0`. Terminal discharge closes the gap without an increment. The first AB arrives after closure and is rejected; it is not an idempotent retransmission. |
+| T1 | No output at S(19); after TERMU `F18`, then after S(21) `A20[T] → F20`; EXIT never published, uncovered +1, `G(open), P=1`, census complete still known, no VOID. |
+| T2 | No output at all, then `VOID50[C0,unknown_evidence]`, `G(open), P=1`. |
+| T3 | T1's output then `VOID20[C0,unknown_evidence]`, `G(open), P=1`. |
+| T4 | `F18`, no hold, uncovered +1, `G(open), P=1`. |
+| V1 | `EXIT_D18 → VOID20[Ce,counter_change] → F19`; `G(open), P=1`, no closure in either order. |
+| V2 | `EXIT_D18 → VOID20[Ce,counter_change] → F19`; `G(open), P=1`, no closure in either order. |
+| V3 | `EXIT_D17 → VOID20[Cw,writer_push_fail] → F19` (A18 not published; F19 after REARM, under Cw); `G(open), P=1` after REARM and TERM. |
+| V4 | `EXIT_D18 → VOID20[Cw,writer_push_fail] → F19` (F18 not published; F19 after REARM, under Cw); `G(open), P=1`. |
 
 **Required mutants**
 
@@ -161,6 +171,12 @@ All gap-end assertions must inspect the emitted GAP_CLOSE endpoint and zero rese
 | Let an earlier-attempt or pre-enable record establish `b_i` | Q09 |
 | Let delayed earlier-attempt DATA overwrite the confirmed baseline | Q09 |
 | Reset/reuse an attachment generation across retries | Q09 |
+| Release the held EXIT on a boundary or after N rounds | T2 |
+| Let unresolved go through the late-unlisted branch | T1 |
+| Accept matched-after-unresolved | T3 |
+| Discharge from the suffix of a VOIDed attempt | V1 |
+| Make discharge depend on TERM/EXIT order | V2 |
+| Discharge before the release attempt ends | V3, V4 |
 
 Pointer-ABA, stale-marker refresh, all-emission-site cookie consistency, writer synchronization and actual EL8 verifier acceptance remain producer qualification obligations. Their qualification fixtures must exercise the corresponding physical operation; merge oracle agreement alone cannot mark them qualified.
 

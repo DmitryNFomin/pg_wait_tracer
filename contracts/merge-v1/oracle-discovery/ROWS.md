@@ -24,6 +24,7 @@ Notation additions:
 - `AB_D` abbreviates `ABANDON_DISCOVERY(pid_D,g_D,20,C0)`; `AB_H` substitutes H.
 - In the new A rows, D’s discovery identity is installed and unambiguously bound to its census entry. Its attachment attempts have permanently ended without a valid final attachment unless the row supplies ADMIT or overrides these facts.
 - `TERM_Dt` and `EXIT_Dt@L` substitute D and timestamp `t` in the existing terminal notation.
+- `TERMU_Dt` is the final terminal disposition `unresolved` for the cookie-less EXIT of D's PID at t (Decision 40); it consumes no source position.
 - `M_Dt@P0` is a MARKER belonging to D at semantic timestamp `t`.
 - `TEXT_Dx@L` is untimed metadata x belonging exclusively to D’s numerical stream. A `{requires x}` annotation specifies a dependency on that metadata.
 - AB is a control and consumes no transport source position.
@@ -94,4 +95,11 @@ Notation additions:
 | A18 | `D9(Y→X)@P0, FAULT(allocation_fail,20,C0), AB_D, S(16)`. |
 | A19 | `TEXT_Dx@L, D9(Y→X)@P0{requires x}, M_D10@P0{requires x}, AB_D, S(16)`. Metadata x is valid; no other lifetime depends on it. |
 | A20 | D was never enabled and has no mutable interval state. `TERM_D18, EXIT_D18@L, S(19), AB_D`. |
-
+| T1 | `EXIT_pid30@18@L{no cookie}, S(19), TERMU_D18, A20@P0, S(21)`. D's identity is never installed. |
+| T2 | `EXIT_pid30@18@L{no cookie}, S(19), A20@P0, S(21), S(40)`, then capture finish at detection 50. D's identity is never installed. |
+| T3 | T1's inputs, then `TERM_D18`. |
+| T4 | `TERMU_D18, EXIT_pid30@18@L{no cookie}, S(19)`. D's identity is never installed. |
+| V1 | `AB_D, EXIT_D18@L, S(19)`, the checkpoint after EXIT_D18's publication observes Ce at 20; `REARM(21,Ce,attachment_proofs), TERM_D18, S(20)`, observations after REARM at 22. |
+| V2 | V1 with `TERM_D18` also delivered before `EXIT_D18@L`. |
+| V3 | `AB_D, TERM_D17, EXIT_D17@L, A18@P0, S(19)`, writer rejects A18 at 20 observing Cw; then `REARM(21,Cw,attachment_proofs), TERM_D17, S(20)`, observations after REARM at 22. |
+| V4 | `AB_D, TERM_D18, EXIT_D18@L, S(19)`, writer rejects F18 at 20 observing Cw; then `REARM(21,Cw,attachment_proofs), TERM_D18, S(20)`, observations after REARM at 22. |
