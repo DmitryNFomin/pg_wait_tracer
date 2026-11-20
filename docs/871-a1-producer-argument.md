@@ -1120,3 +1120,69 @@ largest age); in the other ten runs the largest is 47.0 ms. Rounds are requested
 the 100 rounds/s ceiling.
 
 Evidence: `tests/results/session-20261114/b-integration/` (git-ignored).
+
+### Coverage records under exact_perf (T-cov)
+
+For the backends born under capture, the exclusive watermark W certifies that
+all released records with timestamp `t < W` reached the trace file. It is
+bounded by `coverage_cursor + 1` (FRONTIER is inclusive), sampled **before** a
+successful `pgwt_writer_publish`. The state-map open-interval floors are read
+first, then timestamped with P; that pending `(P, floor_db, floor_idle)` is
+promoted to W=P only after a successful publish with `cursor + 1 >= P`.
+A later floor snapshot never replaces the floors paired with that P.
+The invariant is `boot_start <= floor_idle <= floor_db <= W`.
+BOUNDARY supplies the producer fence; the shared ring's one-tick position lag
+is not used. A separate one-second timer repeats the last certified triple
+when the frontier is stationary. Suspension, an invalid epoch or a failed
+publish writes no WATERMARK. A failed GAP_OPEN also disables further
+watermarks for the entire boot.
+
+Every VOID first writes and fsyncs a GAP_OPEN at the last certified frontier
+plus one, or at boot_start when there has been no frontier:
+
+| VOID class | GAP_OPEN reason |
+|---|---|
+| counter_change, perf_lost | DROP |
+| counter_unknown | COUNTERS_UNKNOWN |
+| Capacity exhaustion in any pool, tie, sequence gap, unknown evidence, dependency loss, writer rejection and every other VOID | PAUSE |
+| Late DATA disproving a frontier | REVOKED, starting at `min(DATA.t, cursor + 1)` |
+
+Each later, earlier late DATA can revoke more history and writes another
+fsynced REVOKED gap, including DATA received before a fresh attachment proof.
+The shared `pgwt_coverage_verdict` reader reports windows over these gaps as
+incomplete with `capture_loss`; gaps never become measured zeroes.
+
+Every **production VOID is permanent for the boot today**. The existing
+`test_attach_premise` gate still refuses production REARM. Only under that
+explicit test premise can a transient capacity gap close: GAP_CLOSE is at
+`rearm_at`, written when the first FRONTIER >= rearm_at arrives, never by
+REARM itself. Other gaps stay open for the rest of the boot.
+
+Backends alive before capture have no fork cookie and their records are
+counted and dropped. If any are alive at boot_start, a PAUSE gap covers
+`[boot_start, last_preexisting_exit)`. Its close waits for the received EXIT
+of the last such backend; a missing exit leaves the gap open. This includes
+long-lived startup auxiliary children: an idle client's exit alone does not
+close the gap while another startup child remains alive. Starting with none
+opens no such gap. Time before a late-attached backend's first released
+record remains untraced under merge-v1 25c; this unit writes no carrier for
+it and does not count it as an A2 omission. A2 reason 5, kind 7 and UNTRACED
+remain a later unit.
+
+**Open item: crash before revocation fsync.** Earlier WATERMARKs may already
+be on disk when a VOID is detected. A crash before the new GAP_OPEN is durable
+can therefore leave earlier history falsely certified. This unit does not
+close that window. Each VOID prints `COVERAGE-GAP:` with its coverage reason,
+merge reason number, start, detection time, fsync-return time, duration in
+nanoseconds and durability result. The lead must measure it on the boxes and
+take that residual window to the owner.
+
+Host evidence comes from `test_exact_perf_coverage.py --mutants`: real capture,
+writer, decoder, fsync calls and the shared verdict, plus compiled daemon
+bindings with injected kernel reads. `test_exact_perf_coverage_live.py` is
+registered in the live tier for SIGKILL under pgbench (exact record counts
+against flushed QB02 FRONTIER batches), forced capacity saturation and the
+pre-existing connection. These box arms are written, not run by this unit.
+The connection arm deliberately requires completeness after exit; a persistent
+startup child keeps that assertion red under the rule above, rather than
+silently narrowing the uncovered population.

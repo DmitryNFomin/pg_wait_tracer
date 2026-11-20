@@ -10,6 +10,20 @@
 struct pgwt_daemon;
 struct pgwt_merge_capture;
 
+/* Coverage persistence notification. VOID is emitted for EACH fault, including
+ * a second late DATA invalidating an older prefix. Capacity end is emitted
+ * only after a FRONTIER reaches the fresh proof, never by REARM itself. */
+enum pgwt_capture_gap_kind {
+    PGWT_CAPTURE_GAP_VOID, PGWT_CAPTURE_GAP_CAPACITY_END,
+    PGWT_CAPTURE_GAP_PREEXISTING, PGWT_CAPTURE_GAP_PREEXISTING_END
+};
+struct pgwt_capture_gap {
+    enum pgwt_capture_gap_kind kind;
+    uint64_t at, detected;
+    pgwt_merge_reason reason;
+    bool revoked, recoverable;
+};
+
 /* Identity/proof history is retained until capture teardown. No retirement or
  * reuse: the next distinct lifetime after this limit pauses exact capture
  * with VOID(allocation_fail). Query bindings have the same hard capacity. */
@@ -96,12 +110,23 @@ struct pgwt_capture_config {
     int (*observe)(void *, pgwt_merge_observation *);
     uint64_t (*now)(void *);
     void (*writer_failed)(void *);
+    void (*coverage_gap)(void *, const struct pgwt_capture_gap *);
     /* TEST ONLY (daemon: PGWT_TEST_EXACT_ATTACH_PREMISE=1). Assume the
      * attachment proof of every fork-seeded lifetime at FORK consumption.
      * Without unit A2 no proof exists and every such generation VOIDs. */
     bool test_attach_premise;
 };
 struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *);
+/* Begin boot coverage after the startup backend scan. The copied pids are
+ * alive backends without a fork cookie; only their received EXIT retires one.
+ * A missing EXIT therefore leaves the gap open. */
+int pgwt_capture_coverage_begin(struct pgwt_merge_capture *, uint64_t boot_start,
+                                 const uint32_t *pids, size_t count,
+                                 void (*persist)(void *, const struct pgwt_capture_gap *));
+/* Exclusive certified-through bound, read BEFORE publishing the trace. */
+bool pgwt_capture_certified_through(const struct pgwt_merge_capture *, uint64_t *);
+/* Full current counter checkpoint for the exact_perf coverage tick. */
+int pgwt_merge_capture_coverage_checkpoint(struct pgwt_daemon *);
 /* Returns 1 for a record outside the covered population (TRACE/lifecycle
  * with no lifetime cookie): its legacy side effect ran, but it must not be
  * passed to pgwt_capture_envelope. 0 otherwise; negative errno on failure.

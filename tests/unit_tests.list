@@ -1150,3 +1150,6 @@ test_coverage_drain.py
 
 # Compile/link-only capability guard: no BPF on the host.
 test_libbpf_positions.py
+
+# T-cov: exact_perf publishes its own certified coverage, durable gaps and heartbeat.
+test_exact_perf_coverage.py

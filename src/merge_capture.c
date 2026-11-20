@@ -64,6 +64,11 @@ struct pgwt_merge_capture {
     pgwt_merge_attachment *fresh_proofs;
     uint64_t last_service_at;
     struct pgwt_transport_budget budget;
+    uint64_t coverage_boot_start, feeding_t, preexisting_last_exit;
+    bool coverage_begun, feeding_data;
+    uint32_t preexisting[MAX_BACKENDS];
+    size_t preexisting_count;
+    struct pgwt_capture_gap last_void;
     /* Measurements only. Ages in PGWT_CAPTURE_AGE_BUCKET_NS buckets; the
      * last bucket collects everything at or beyond the range. */
     uint64_t released_data, released_text, frontiers, voids;
@@ -172,10 +177,41 @@ static void refresh(struct pgwt_merge_capture *c, pgwt_merge_observation *o)
     }
 }
 static void retain_snapshot(struct pgwt_merge_capture *);
+static pgwt_merge_status capture_core_feed(struct pgwt_merge_capture *c,
+                                             const pgwt_merge_input *in)
+{
+    c->feeding_data = in && in->kind == PGWT_MERGE_DATA;
+    c->feeding_t = c->feeding_data ? in->record.t : 0;
+    pgwt_merge_status status = pgwt_merge_feed(c->core, in);
+    c->feeding_data = false;
+    return status;
+}
+static void coverage_gap(struct pgwt_merge_capture *c, struct pgwt_capture_gap gap)
+{
+    if (c->coverage_begun && c->config.coverage_gap)
+        c->config.coverage_gap(c->config.ctx, &gap);
+}
+static uint64_t certified_end(const struct pgwt_merge_capture *c)
+{
+    return c->frontiers ? c->coverage_cursor + 1 : c->coverage_boot_start;
+}
 static bool capture_sink(void *ctx, const pgwt_merge_output *out,
                           pgwt_merge_observation *post)
 {
     struct pgwt_merge_capture *c = ctx;
+    if (out->kind == PGWT_MERGE_OUT_VOID) {
+        bool revoked = c->feeding_data && c->frontiers &&
+            c->feeding_t <= c->coverage_cursor &&
+            (out->reason == PGWT_MERGE_CLOCK_REGRESSION ||
+             out->reason == PGWT_MERGE_SEAL_VIOLATION);
+        uint64_t at = certified_end(c);
+        if (revoked && c->feeding_t < at) at = c->feeding_t;
+        c->last_void = (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_VOID,
+            .at = at, .detected = out->d, .reason = out->reason, .revoked = revoked,
+            .recoverable = pgwt_transient_capacity(out->reason, out->allocation.pool)};
+        /* Persist the revocation before another consumer or any future W. */
+        coverage_gap(c, c->last_void);
+    }
     size_t token = 0;
     pgwt_merge_output restored;
     unsigned char payload[272];
@@ -242,6 +278,8 @@ static bool capture_sink(void *ctx, const pgwt_merge_output *out,
     if (ok && out->kind == PGWT_MERGE_OUT_FRONTIER) {
         ++c->frontiers;
         if (c->pause_open && c->rearms && out->F >= c->rearm_at) {
+            coverage_gap(c, (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_CAPACITY_END,
+                .at = c->rearm_at, .detected = out->d});
             /* The new FRONTIER certifies only from the fresh proof onward.
              * Confirm that lower bound now; never bridge the lost interval. */
             c->pause_end = c->rearm_at;
@@ -303,7 +341,7 @@ static int flush_outputs(struct pgwt_merge_capture *c)
     c->observation = o;
     retain_snapshot(c);
     pgwt_merge_input in = {.kind = PGWT_MERGE_WRITER_REJECTED, .observation = o};
-    pgwt_merge_status status = pgwt_merge_feed(c->core, &in);
+    pgwt_merge_status status = capture_core_feed(c, &in);
     return status == PGWT_MERGE_EXIT_REQUIRED || pgwt_merge_get_report(c->core).void_failed ? -EIO : 0;
 }
 
@@ -401,6 +439,34 @@ struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config 
 {
     return capture_create(cfg, NULL, NULL);
 }
+bool pgwt_capture_certified_through(const struct pgwt_merge_capture *c, uint64_t *end)
+{
+    if (!c || !end) return false;
+    pgwt_merge_report r = pgwt_capture_report(c);
+    *end = certified_end(c);
+    return r.status == PGWT_MERGE_OK && !r.epoch_invalid;
+}
+int pgwt_capture_coverage_begin(struct pgwt_merge_capture *c, uint64_t boot_start,
+                                 const uint32_t *pids, size_t count,
+                                 void (*persist)(void *, const struct pgwt_capture_gap *))
+{
+    if (!c || c->coverage_begun || count > MAX_BACKENDS || (count && !pids)) return -EINVAL;
+    if (persist) c->config.coverage_gap = persist;
+    c->coverage_boot_start = boot_start;
+    c->coverage_begun = true;
+    c->preexisting_count = count;
+    if (count) {
+        memcpy(c->preexisting, pids, count * sizeof(*pids));
+        coverage_gap(c, (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_PREEXISTING,
+            .at = boot_start, .detected = boot_start});
+    }
+    if (pgwt_capture_report(c).status != PGWT_MERGE_OK) {
+        struct pgwt_capture_gap gap = c->last_void;
+        gap.at = boot_start;
+        coverage_gap(c, gap);
+    }
+    return 0;
+}
 static ma_table table(struct pgwt_merge_capture *c)
 {
     return (ma_table){.lifetimes = c->lifetimes, .lifetime_count = c->lifetime_count,
@@ -419,7 +485,7 @@ struct pgwt_merge_capture *pgwt_capture_replay_create(const struct pgwt_capture_
 }
 pgwt_merge_status pgwt_capture_replay_control(struct pgwt_merge_capture *c, const pgwt_merge_input *in)
 {
-    return pgwt_merge_feed(c->core, in);
+    return capture_core_feed(c, in);
 }
 ma_table pgwt_capture_replay_table(struct pgwt_merge_capture *c) { return table(c); }
 #endif
@@ -457,7 +523,7 @@ int pgwt_capture_fault(struct pgwt_merge_capture *c, pgwt_merge_reason reason,
     retain_snapshot(c);
     pgwt_merge_input in = {.kind = PGWT_MERGE_FAULT, .reason = reason, .observation = c->observation};
     if (reason == PGWT_MERGE_ALLOCATION_FAIL) in.allocation = c->diagnostics.allocation;
-    pgwt_merge_status status = pgwt_merge_feed(c->core, &in);
+    pgwt_merge_status status = capture_core_feed(c, &in);
     return status == PGWT_MERGE_EXIT_REQUIRED || pgwt_merge_get_report(c->core).void_failed ? -EIO : 0;
 }
 /* This is the same explicit premise acquisition used at startup and on
@@ -475,6 +541,8 @@ static int acquire_test_attachment(struct pgwt_merge_capture *c, ma_lifetime *l,
     if (pgwt_capture_attach(c, &r, now, &snap) < 0) return -EIO;
     return l->proof == MA_PROVED ? 1 : 0;
 }
+static int mapped(struct pgwt_merge_capture *, const ma_envelope *, size_t,
+                    uint64_t, const ma_snapshot **, bool *);
 int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope *e, uint64_t now, size_t *token)
 {
     if (token) *token = 0;
@@ -494,20 +562,25 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
     bool preproof = (c->rearm_at && e->kind != MA_TEXT &&
         get_le(e->bytes + (e->kind == MA_TRACE ? 0 : 16), 8) < c->rearm_at);
     bool dropped = !uncovered && (pgwt_capture_report(c).status != PGWT_MERGE_OK || preproof);
+    bool validated_at_receipt = false;
     /* TEXT has no semantic timestamp. Queued pre-proof TEXT is conservatively
      * not trusted until a post-REARM completed round (the transport fences it). */
     if (uncovered) ++c->uncovered_records;
     else if (dropped) {
         ++c->dropped_records;
-        /* Disposition cannot hide DATA disproving an earlier epoch. Only the
-         * core decides clock/seal faults and invalidates published frontiers.
-         * Route such a record through its ordinary feed, even before fresh
-         * boundaries. Other pre-proof records remain counted discards. */
-        if (c->rearm_at && pgwt_capture_report(c).status == PGWT_MERGE_OK &&
-            e->kind != MA_TEXT && e->source < c->source_count &&
-            get_le(e->bytes + (e->kind == MA_TRACE ? 0 : 16), 8) < c->arrival_promises[e->source]) {
-            ma_snapshot snap = pgwt_capture_last_snapshot(c);
-            if (pgwt_capture_envelope(c, e, now, &snap) < 0) return -EIO;
+    }
+    if (uncovered && e->kind == MA_LIFECYCLE &&
+        get_le(e->bytes, 2) == PGWT_LIFECYCLE_EXIT) {
+        uint32_t pid = (uint32_t)get_le(e->bytes + 4, 4);
+        for (size_t i = 0; i < c->preexisting_count; ++i) {
+            if (c->preexisting[i] != pid) continue;
+            c->preexisting[i] = c->preexisting[--c->preexisting_count];
+            uint64_t exit_at = get_le(e->bytes + 16, 8);
+            if (exit_at > c->preexisting_last_exit) c->preexisting_last_exit = exit_at;
+            if (!c->preexisting_count)
+                coverage_gap(c, (struct pgwt_capture_gap){.kind = PGWT_CAPTURE_GAP_PREEXISTING_END,
+                    .at = c->preexisting_last_exit, .detected = now});
+            break;
         }
     }
     if (!uncovered && !dropped) {
@@ -565,6 +638,31 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
             pgwt_pool_set(&c->diagnostics.pools[PGWT_POOL_CAPTURE_BINDING], c->binding_count);
         }
     }
+    if (dropped) {
+        bool checked_late = false;
+        /* Disposition cannot hide DATA disproving an earlier epoch. Only the
+         * core decides clock/seal faults and invalidates published frontiers.
+         * Route such a record through its ordinary feed, even before fresh
+         * boundaries. Other pre-proof records remain counted discards. */
+        if (c->rearm_at && pgwt_capture_report(c).status == PGWT_MERGE_OK &&
+            e->kind != MA_TEXT && e->source < c->source_count &&
+            get_le(e->bytes + (e->kind == MA_TRACE ? 0 : 16), 8) < c->arrival_promises[e->source]) {
+            ma_snapshot snap = pgwt_capture_last_snapshot(c);
+            if (pgwt_capture_envelope(c, e, now, &snap) < 0) return -EIO;
+            checked_late = true;
+        }
+        if (c->coverage_begun && !checked_late && pgwt_capture_report(c).status == PGWT_MERGE_SUSPENDED &&
+            e->kind != MA_TEXT && e->source < c->source_count &&
+            get_le(e->bytes + (e->kind == MA_TRACE ? 0 : 16), 8) < c->arrival_promises[e->source]) {
+            /* A subsequent, earlier late record can revoke more history.
+             * The transport does not queue suspended records. Validate this
+             * one directly, without allocating a retained/arrival slot. */
+            const ma_snapshot *snap = pgwt_capture_snapshot(c);
+            bool hold;
+            if (mapped(c, e, 0, now, &snap, &hold) < 0) return -EIO;
+            validated_at_receipt = true;
+        }
+    }
     if ((e->kind == MA_LIFECYCLE || e->kind == MA_TEXT) && c->config.lifecycle) {
         int rc = c->config.lifecycle(c->config.ctx, e->bytes, e->size);
         if (rc < 0) {
@@ -575,7 +673,7 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
         }
     }
     /* Preserve the legacy disposition on unrelated permanent suspension. */
-    return uncovered ? 1 : dropped && (c->capacity_paused || preproof) ? 2 : 0;
+    return uncovered ? 1 : dropped && (c->capacity_paused || preproof || validated_at_receipt) ? 2 : 0;
 }
 int pgwt_capture_received(struct pgwt_merge_capture *c, const ma_envelope *e, uint64_t now)
 {
@@ -657,7 +755,7 @@ static int mapped(struct pgwt_merge_capture *c, const ma_envelope *e,
                 r.input[i].record.payload = payload;
             }
         }
-        if (pgwt_merge_feed(c->core, &r.input[i]) == PGWT_MERGE_EXIT_REQUIRED ||
+        if (capture_core_feed(c, &r.input[i]) == PGWT_MERGE_EXIT_REQUIRED ||
             pgwt_merge_get_report(c->core).void_failed) return -EIO;
         if (r.input[i].kind == PGWT_MERGE_BOUNDARY) {
             size_t source = r.input[i].source;
@@ -882,7 +980,7 @@ int pgwt_capture_rearm(struct pgwt_merge_capture *c, uint64_t now, const ma_snap
     pgwt_merge_input in = {.kind = PGWT_MERGE_REARM, .observation = c->observation,
         .attachments = c->fresh_proofs, .attachment_count = c->lifetime_count,
         .attachment_proofs_fresh = true}; /* only after fresh acquisition above */
-    pgwt_merge_status status = pgwt_merge_feed(c->core, &in);
+    pgwt_merge_status status = capture_core_feed(c, &in);
     retain_snapshot(c);
     if (status == PGWT_MERGE_EXIT_REQUIRED || pgwt_capture_report(c).void_failed) return -EIO;
     if (status != PGWT_MERGE_OK) return 0;
@@ -1140,6 +1238,17 @@ static bool daemon_sink(void *ctx, const pgwt_merge_output *out, pgwt_merge_obse
         if (!ok) fprintf(stderr, "exact-perf: VOID could not be persisted; capture stopped\n");
     }
     return ok;
+}
+int pgwt_merge_capture_coverage_checkpoint(struct pgwt_daemon *d)
+{
+    if (!d || !d->merge_capture) return -EINVAL;
+    /* finish_capture already delivered its terminal observation. */
+    if (d->merge_capture->finished) return 0;
+    ma_snapshot s = {0};
+    uint64_t now = 0;
+    if (pgwt_percpu_transport_snapshot(d, &s, &now) < 0) s.valid = false;
+    ma_envelope check = {.version = 1, .kind = MA_CHECK};
+    return pgwt_capture_envelope(d->merge_capture, &check, now, &s);
 }
 static int daemon_attach(void *ctx, const struct pgwt_attach_report *r)
 { return pgwt_merge_capture_attach(ctx, r); }

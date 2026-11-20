@@ -276,6 +276,7 @@ void pgwt_collect_open_intervals(struct pgwt_daemon *d,
 #include "event_writer.h"
 #include "coverage_record.h"
 #include "idle_rule.h"
+#include "merge_capture.h"
 
 void pgwt_cov_floors_begin(struct pgwt_cov_floors *f, uint64_t snap_ns)
 {
@@ -331,7 +332,7 @@ void pgwt_cov_collect_tick(struct pgwt_cov_tick_in *in,
     in->cv = cv;
     in->publish_from_ns = ops->clock(ctx);
     ops->positions(ctx, in);
-    in->publish_ok = ops->publish(ctx);
+    in->publish_ok = (!in->exact_perf || in->capture_healthy) && ops->publish(ctx);
     in->observation_ns = ops->clock(ctx);
 }
 
@@ -353,6 +354,7 @@ static int cov_gap(struct pgwt_cov_tracker *t, struct pgwt_event_writer *w,
                    uint64_t obs, bool open, uint64_t at, uint8_t reason)
 {
     if (open) {
+        if (t->gap_id == UINT64_MAX) { ++t->write_failures; return -1; }
         t->gap_id++;
         t->gaps++;
     }
@@ -360,6 +362,68 @@ static int cov_gap(struct pgwt_cov_tracker *t, struct pgwt_event_writer *w,
     if (rc != 0)
         t->write_failures++;
     return rc;
+}
+
+void pgwt_cov_tracker_capture_gap(struct pgwt_cov_tracker *t,
+                                   struct pgwt_event_writer *w,
+                                   const struct pgwt_capture_gap *gap)
+{
+    if (!t->watermarks || !w) return;
+    bool open = gap->kind == PGWT_CAPTURE_GAP_VOID ||
+                gap->kind == PGWT_CAPTURE_GAP_PREEXISTING;
+    uint8_t reason = PGWT_COVR_PAUSE;
+    if (gap->kind == PGWT_CAPTURE_GAP_VOID) {
+        if (gap->revoked) reason = PGWT_COVR_REVOKED;
+        else if (gap->reason == PGWT_MERGE_COUNTER_CHANGE || gap->reason == PGWT_MERGE_PERF_LOST)
+            reason = PGWT_COVR_DROP;
+        else if (gap->reason == PGWT_MERGE_COUNTER_UNKNOWN)
+            reason = PGWT_COVR_COUNTERS_UNKNOWN;
+    }
+    int rc = 0;
+    uint64_t fsync_return = 0;
+    if (open) {
+        rc = cov_gap(t, w, gap->detected, true, gap->at, reason);
+        struct timespec ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+            fsync_return = (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+        if (gap->kind == PGWT_CAPTURE_GAP_PREEXISTING)
+            t->preexisting_gap_id = t->gap_id;
+        else if (gap->recoverable) {
+            if (t->capacity_gap_count == t->capacity_gap_capacity) {
+                size_t cap = t->capacity_gap_capacity ? t->capacity_gap_capacity * 2 : 4;
+                uint64_t *ids = cap < t->capacity_gap_capacity || cap > SIZE_MAX / sizeof(*ids)
+                    ? NULL : realloc(t->capacity_gaps, cap * sizeof(*ids));
+                if (!ids) { t->gap_failed = true; ++t->write_failures; }
+                else { t->capacity_gaps = ids; t->capacity_gap_capacity = cap; }
+            }
+            if (!t->gap_failed) t->capacity_gaps[t->capacity_gap_count++] = t->gap_id;
+        }
+    } else if (gap->kind == PGWT_CAPTURE_GAP_PREEXISTING_END) {
+        if (!t->preexisting_gap_id) return;
+        rc = pgwt_writer_coverage_gap(w, gap->detected, false,
+                                      t->preexisting_gap_id, gap->at, 0);
+        t->preexisting_gap_id = 0;
+    } else {
+        for (size_t i = 0; i < t->capacity_gap_count; ++i)
+            if (pgwt_writer_coverage_gap(w, gap->detected, false,
+                                         t->capacity_gaps[i], gap->at, 0) != 0) rc = -1;
+        free(t->capacity_gaps);
+        t->capacity_gaps = NULL;
+        t->capacity_gap_count = t->capacity_gap_capacity = 0;
+    }
+    if (!open && rc != 0) ++t->write_failures;
+    if (rc != 0) t->gap_failed = true;
+    if (gap->kind == PGWT_CAPTURE_GAP_VOID) {
+        const char *name = reason == PGWT_COVR_REVOKED ? "REVOKED" :
+            reason == PGWT_COVR_DROP ? "DROP" :
+            reason == PGWT_COVR_COUNTERS_UNKNOWN ? "COUNTERS_UNKNOWN" : "PAUSE";
+        fprintf(stderr, "COVERAGE-GAP: reason=%s void_reason=%u start_ns=%llu "
+            "detected_ns=%llu fsync_return_ns=%llu duration_ns=%llu durable=%u\n",
+            name, (unsigned)gap->reason,
+            (unsigned long long)gap->at, (unsigned long long)gap->detected,
+            (unsigned long long)fsync_return,
+            (unsigned long long)(fsync_return >= gap->detected ? fsync_return - gap->detected : 0), rc == 0);
+    }
 }
 
 /* The counter-vector half of a tick. Returns true when this tick may be a
@@ -462,16 +526,21 @@ int pgwt_cov_tracker_tick(struct pgwt_cov_tracker *t,
 {
     if (!t->watermarks || !w)
         return 0;
+    /* Capture faults are recorded synchronously by capture_sink. Never run
+     * U1's counter-gap recovery here: production suspension is permanent. */
+    if (in->exact_perf && (t->gap_failed || !in->capture_healthy || !in->publish_ok))
+        return 0;
     int rc = 0;
     t->ticks++;
     struct pgwt_cov_tracker before = *t;
-    bool good = cov_counters(t, w, in, &rc) &&
+    bool good = (in->exact_perf || cov_counters(t, w, in, &rc)) &&
                 in->positions_known && in->publish_ok;
     t->fence_pos = t->has_pending ? t->p_fence : in->producer_pos;
     t->consumer_pos = in->consumer_pos;
     if (good) {
         t->good_ticks++;
-        if (t->has_pending && in->consumer_pos >= t->p_fence)
+        if (t->has_pending && (in->exact_perf ?
+            in->certified_through_ns >= t->p_ns : in->consumer_pos >= t->p_fence))
             cov_take_pending(t);
         else
             t->heartbeats++;
@@ -511,6 +580,9 @@ int pgwt_cov_tracker_seal(struct pgwt_cov_tracker *t,
         return 0;
     if (t->watermarks && pgwt_cov_tracker_tick(t, w, in) != 0)
         return -1;
+    free(t->capacity_gaps);
+    t->capacity_gaps = NULL;
+    t->capacity_gap_count = t->capacity_gap_capacity = 0;
     if (pgwt_writer_coverage_seal(w, in->observation_ns, t->w_ns) != 0) {
         t->write_failures++;
         rc = -1;
@@ -572,6 +644,12 @@ static uint64_t cov_postmaster_start_wall_ns(pid_t pid)
          + (uint64_t)start_ticks * (1000000000ULL / (uint64_t)hz);
 }
 
+static void cov_capture_gap(void *ctx, const struct pgwt_capture_gap *gap)
+{
+    struct pgwt_daemon *d = ctx;
+    pgwt_cov_tracker_capture_gap(&d->coverage, d->event_writer, gap);
+}
+
 void pgwt_coverage_start(struct pgwt_daemon *d,
                           const struct pgwt_counter_vector *base)
 {
@@ -583,10 +661,9 @@ void pgwt_coverage_start(struct pgwt_daemon *d,
         mode |= PGWT_COVERAGE_MODE_LIGHTWEIGHT;
     if (d->exact_perf)
         mode |= PGWT_COVERAGE_MODE_EXACT_PERF;
-    /* Watermarks on the master path only. Lightweight has no records to
-     * vouch for (not_captured, fail closed); the exact per-CPU transport
-     * gets its own W from the merge frontier in the transport PR. */
-    bool watermarks = !d->lightweight_mode && !d->exact_perf;
+    /* exact_perf uses the certified-through fence below; lightweight has
+     * no trace records to vouch for. */
+    bool watermarks = !d->lightweight_mode;
     if (w->fp) {
         /* A file opened before capture start already carries a BOOT whose
          * boot_start predates it. Vouch for nothing in this boot rather than
@@ -600,6 +677,22 @@ void pgwt_coverage_start(struct pgwt_daemon *d,
     }
     pgwt_cov_tracker_init(&d->coverage, d->start_ts, watermarks, base);
     d->coverage_started = true;
+    if (d->exact_perf && watermarks) {
+        uint32_t pids[MAX_BACKENDS];
+        size_t count = 0;
+        int fd = d->skel ? bpf_map__fd(d->skel->maps.state_map) : -1;
+        for (int i = 0; i < d->backends.count; ++i) {
+            const struct pgwt_backend *be = &d->backends.entries[i];
+            if (!be->is_alive || be->pid <= 0) continue;
+            uint32_t pid = (uint32_t)be->pid;
+            struct pgwt_pid_state state;
+            /* Unknown identity cannot be certified as born under capture. */
+            if (fd < 0 || bpf_map_lookup_elem(fd, &pid, &state) != 0 || !state.cookie)
+                pids[count++] = pid;
+        }
+        if (pgwt_capture_coverage_begin(d->merge_capture, d->start_ts, pids, count, cov_capture_gap) != 0)
+            d->coverage.watermarks = false;
+    }
 }
 
 static uint64_t cov_thread_cpu_ns(void)
@@ -672,6 +765,23 @@ static bool cov_publish(void *ctx)
     return pgwt_writer_publish(d->event_writer) == 0;
 }
 
+static void cov_perf_positions(void *ctx, struct pgwt_cov_tick_in *in)
+{
+    struct pgwt_daemon *d = ctx;
+    in->exact_perf = true;
+    in->capture_healthy = pgwt_capture_certified_through(d->merge_capture,
+                                                         &in->certified_through_ns);
+    in->capture_healthy = in->capture_healthy && !d->coverage.gap_failed;
+    in->positions_known = in->capture_healthy;
+}
+static struct pgwt_counter_vector cov_perf_counters(void *ctx)
+{
+    struct pgwt_daemon *d = ctx;
+    /* A fresh observation must reach the core before deciding health/W. */
+    if (pgwt_merge_capture_coverage_checkpoint(d) < 0)
+        d->coverage.gap_failed = true;
+    return (struct pgwt_counter_vector){0}; /* capture owns the vector */
+}
 static void cov_gather(struct pgwt_daemon *d, struct pgwt_cov_tick_in *in,
                        struct pgwt_counter_vector *cv)
 {
@@ -704,9 +814,9 @@ static void cov_gather(struct pgwt_daemon *d, struct pgwt_cov_tick_in *in,
         in->floor_idle_ns = f.floor_idle_ns;
     }
     const struct pgwt_cov_tick_ops ops = {
-        .counters = cov_read_counters,
+        .counters = d->exact_perf ? cov_perf_counters : cov_read_counters,
         .clock = cov_clock,
-        .positions = cov_positions,
+        .positions = d->exact_perf ? cov_perf_positions : cov_positions,
         .publish = cov_publish,
     };
     pgwt_cov_collect_tick(in, cv, d, &ops);
@@ -754,6 +864,10 @@ void pgwt_coverage_shutdown(struct pgwt_daemon *d)
      * still get exactly [last written W, P], and the oldest pending point,
      * its floors and fence remain the only possible promotion. */
     struct pgwt_counter_vector cv;
+    if (d->exact_perf) {
+        cov_gather(d, &in, &cv);
+        goto seal;
+    }
     const struct pgwt_cov_tick_ops ops = {
         .counters = cov_read_counters,
         .clock = cov_clock,
@@ -761,6 +875,7 @@ void pgwt_coverage_shutdown(struct pgwt_daemon *d)
         .publish = cov_publish,
     };
     pgwt_cov_collect_tick(&in, &cv, d, &ops);
+seal:
     if (pgwt_cov_tracker_seal(&d->coverage, d->event_writer, &in) != 0)
         fprintf(stderr, "WARN: coverage: the SEAL record was not written "
                 "durably — this run will read as stopped uncleanly\n");

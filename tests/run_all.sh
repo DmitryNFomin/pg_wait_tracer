@@ -627,6 +627,7 @@ LIVE_TESTS=(
     # an unsealed boot with its last W <= 2 s before the kill, a restart opens
     # with BOOT, SIGTERM writes SEAL; prints floor lag and cost for the lead.
     "test_coverage_live|python3|test_coverage_live.py"
+    "test_exact_perf_coverage_live|python3|test_exact_perf_coverage_live.py"
     "test_lifecycle|bash|test_lifecycle.sh"
     "test_sampler_batch_live|python3|test_sampler_batch_live.py"
     "test_init_hint_recovery|python3|test_init_hint_recovery.py"

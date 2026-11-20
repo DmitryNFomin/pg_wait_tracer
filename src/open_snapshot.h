@@ -485,6 +485,8 @@ struct pgwt_cov_tick_in {
     uint64_t producer_pos, consumer_pos; /* libbpf reservation byte positions */
     bool     publish_ok;
     const struct pgwt_counter_vector *cv;   /* NULL = unreadable */
+    bool exact_perf, capture_healthy;
+    uint64_t certified_through_ns; /* cursor+1 BEFORE successful publish */
 };
 
 /* Floors, counters, P, producer fence, consumer position, publish, observation.
@@ -501,7 +503,7 @@ void pgwt_cov_collect_tick(struct pgwt_cov_tick_in *in,
                            const struct pgwt_cov_tick_ops *ops);
 
 struct pgwt_cov_tracker {
-    bool     watermarks;         /* false (lightweight, exact_perf): SEAL only */
+    bool     watermarks;         /* false (lightweight): SEAL only */
     bool     consume_failed;     /* unexpected callback/consume error: fail closed */
     uint64_t boot_start_ns;
     /* last WRITTEN watermark triple (boot_start until the first one) */
@@ -513,6 +515,10 @@ struct pgwt_cov_tracker {
     struct pgwt_counter_vector base;
     bool     gap_open;
     uint64_t gap_id;             /* id of the open gap, or the last one */
+    bool     gap_failed;         /* failed revocation: no more W this boot */
+    uint64_t preexisting_gap_id;
+    uint64_t *capacity_gaps;
+    size_t capacity_gap_count, capacity_gap_capacity;
     /* measurements (box test, status) */
     uint64_t ticks, good_ticks, heartbeats, gaps, write_failures;
     uint64_t promotions, fence_pos, consumer_pos;
@@ -529,6 +535,10 @@ void pgwt_cov_tracker_init(struct pgwt_cov_tracker *t, uint64_t boot_start_ns,
 int  pgwt_cov_tracker_tick(struct pgwt_cov_tracker *t,
                            struct pgwt_event_writer *w,
                            const struct pgwt_cov_tick_in *in);
+struct pgwt_capture_gap;
+void pgwt_cov_tracker_capture_gap(struct pgwt_cov_tracker *,
+                                   struct pgwt_event_writer *,
+                                   const struct pgwt_capture_gap *);
 /* Clean shutdown, after the final drain, the open-interval flush and a
  * publish, immediately before pgwt_writer_close: one last tick (a good one
  * writes its pending watermark), then SEAL(last written W). Never called on
