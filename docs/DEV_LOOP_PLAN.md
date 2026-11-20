@@ -761,7 +761,7 @@ commit PNGs` dance disappears.
 
 ---
 
-## Step 4 — Ephemeral VMs + real OS matrix  `[PARTIALLY DONE — item 4 (agents' inner loop) landed 2026-09-19, issue #141; item 2 (snapshot builder, el8 only so far) landed, issue #739; items 1/3/5 (el8/el9 provisioning reuse in nightly.yml's own steps, the nightly.yml rewrite, el9 snapshots) still OPEN]`
+## Step 4 — Ephemeral VMs + real OS matrix  `[PARTIALLY DONE — item 4 (agents' inner loop) landed 2026-09-19, issue #141; item 2 (snapshot builder) landed, issue #739, with EL9 provisioning and snapshot-build support added in #972; items 1/3/5 (provisioning reuse in nightly.yml, the nightly.yml rewrite, OS matrix labels) and EL9 snapshot promotion still OPEN]`
 
 **Goal:** EL8 (kernel 4.18) and EL9 (5.14) are tested on their real kernels
 nightly and on demand, on throwaway VMs; agents can verify kernel/libbpf/
@@ -774,8 +774,9 @@ runner tokens.
 **Work:**
 1. `tests/provision-runner.sh <el8|el9|ubuntu> [--runner-token T] [--labels …]`
    — idempotent, runs on the VM as root. `[PARTIALLY DONE, issue #739: the
-   el8 arm is implemented and gated; el9 is still a stub; --ephemeral
-   runner-registration mode for the nightly matrix below is not built]`
+   el8 and el9 arms are implemented (EL9 uses CRB and PGDG EL-9 repos,
+   issue #972); --ephemeral runner-registration mode for the nightly matrix
+   below is not built]`
    Installs build deps (EL8 path:
    static libbpf/bpftool bundling is handled by the Makefile already), PGDG
    repo, PG 13/16/17/18 with one cluster each on ports 5413–5418
@@ -837,11 +838,13 @@ runner tokens.
    is designed to be). Owner decision 2026-09-19: **ephemeral for
    iteration, persistent box for the final pre-PR run** — EPHEMERAL=1 is
    not a substitute for the "Definition of done" `make box-check` in
-   CLAUDE.md. Not yet done: `OS=el8`/`el9` (no snapshot exists for either
-   — needs item 2's `tests/build-snapshots.sh` first) and "one VM per
-   agent when the gate box is busy" for the persistent-box path (today
-   that's just `EPHEMERAL=1` itself, a full substitute, not a queue-relief
-   mechanism for `$PGWT_BOX`).
+   CLAUDE.md. `OS=el8` and `OS=el9` are accepted by the provisioner and
+   snapshot builder. Ephemeral runs require a promoted
+   `pgwt=gate-snapshot,os=<OS>` image, or `PGWT_SNAPSHOT_IMAGE=<id>` to
+   validate a candidate; EL9 snapshot promotion remains a separate lead
+   action. "One VM per agent when the gate box is busy" for the
+   persistent-box path is not yet built (today that is `EPHEMERAL=1`
+   itself).
 5. On-demand label: a `needs-el8` / `needs-el9` PR label triggers the same
    matrix for that PR (`pull_request: types: [labeled]`).
 

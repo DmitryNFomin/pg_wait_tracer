@@ -6,7 +6,7 @@
 #
 #   tests/build-snapshots.sh ubuntu
 #   tests/build-snapshots.sh el8
-#   tests/build-snapshots.sh el9      # refuses: provision-runner.sh el9 is still a stub
+#   tests/build-snapshots.sh el9
 #
 # Why this script exists, not another hand-run sequence of curl calls: a real
 # el8 gate-snapshot built by hand (2026-11-02) came out CRASH-INCONSISTENT —
@@ -72,10 +72,7 @@ fi
 case "$OS" in
     ubuntu) BASE_IMAGE="ubuntu-24.04" ;;
     el8)    BASE_IMAGE="rocky-8" ;;
-    el9)
-        echo "el9: tests/provision-runner.sh el9 is still a stub (docs/DEV_LOOP_PLAN.md step 4) -- nothing to build yet" >&2
-        exit 1
-        ;;
+    el9)    BASE_IMAGE="rocky-9" ;;
     *) echo "OS must be ubuntu|el8|el9" >&2; exit 2 ;;
 esac
 
@@ -129,7 +126,13 @@ cleanup_build_vm() {
 trap cleanup_build_vm EXIT
 
 log "creating $build_name ($BASE_IMAGE, cx33)"
-create_out=$(tests/hetzner-vm.sh create --type cx33 --image "$BASE_IMAGE" --name "$build_name" \
+# EL9's general-purpose Rocky recipe installs PG18 itself. Snapshot builds
+# use the minimal recipe so provision-runner owns all four clusters.
+build_args=(--type cx33 --image "$BASE_IMAGE")
+if [[ "$OS" == el9 ]]; then
+    build_args+=(--cloud-init tests/cloud-init-el9-minimal.yaml)
+fi
+create_out=$(tests/hetzner-vm.sh create "${build_args[@]}" --name "$build_name" \
     --labels "pgwt=ephemeral,created=$epoch,owner=build-snapshots,purpose=${OS}-snapshot-build")
 create_rc=$?
 [[ $create_rc -eq 0 ]] || { echo "FATAL: create failed (rc=$create_rc)" >&2; exit 1; }

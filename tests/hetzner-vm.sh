@@ -26,8 +26,8 @@
 # --snapshot-os OS: scope the "latest" lookup to the additional `os=OS`
 # label. Ubuntu also accepts legacy snapshots without that label. Without
 # this flag the lookup stays unscoped; literal image ids/names skip lookup.
-# For snapshot cloud-init defaults, el8 selects the Rocky 8 minimal recipe;
-# all other values keep the Ubuntu minimal recipe.
+# For snapshot cloud-init defaults, el8/el9 select their Rocky minimal
+# recipes; other values keep the Ubuntu minimal recipe.
 #
 # --labels k=v,k2=v2: attached to the created server (e.g.
 # `pgwt=ephemeral,created=<epoch>,owner=<hostname>` — scripts/box-check.sh's
@@ -170,11 +170,11 @@ cmd_create() {
             # Resolved snapshots are ids/descriptions, so image-name
             # sniffing cannot choose their OS. Keep Ubuntu as the default
             # for callers that predate --snapshot-os.
-            if [[ "$snapshot_os" == "el8" ]]; then
-                cloud_init="$SCRIPT_DIR/cloud-init-el8-minimal.yaml"
-            else
-                cloud_init="$SCRIPT_DIR/cloud-init-ubuntu-minimal.yaml"
-            fi
+            case "$snapshot_os" in
+                el8) cloud_init="$SCRIPT_DIR/cloud-init-el8-minimal.yaml" ;;
+                el9) cloud_init="$SCRIPT_DIR/cloud-init-el9-minimal.yaml" ;;
+                *)   cloud_init="$SCRIPT_DIR/cloud-init-ubuntu-minimal.yaml" ;;
+            esac
         else
             # Each recipe's user-data is OS-specific (package manager,
             # cloud-init modules) — --image ubuntu-24.04 without an explicit
