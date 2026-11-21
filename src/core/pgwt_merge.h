@@ -66,7 +66,7 @@ typedef enum {
     PGWT_MERGE_TERMINAL_DISCOVERY, PGWT_MERGE_ABANDON_DISCOVERY,
     /* A consumed uncovered envelope still owns its position, but contributes
      * neither DATA nor a boundary. Used for a final unresolved raw EXIT. */
-    PGWT_MERGE_UNCOVERED
+    PGWT_MERGE_UNCOVERED, PGWT_MERGE_DISCOVERY_OBSERVATION
 } pgwt_merge_input_kind;
 typedef struct {
     pgwt_merge_input_kind kind;
@@ -117,6 +117,10 @@ typedef struct {
     /* Validated Decision 45 consumption, never a publication. Non-fallible
      * bookkeeping callback: releases the adapter arrival token exactly once. */
     void (*discovery_discard)(void *, const pgwt_merge_record *, bool text);
+    /* Route-c supporting evidence must publish before the release frontier.
+     * False is writer rejection; post carries the completed checkpoint. */
+    bool (*discovery_support)(void *, uint64_t pid, uint64_t cookie,
+                              const pgwt_discovery_no_word *, pgwt_merge_observation *);
 } pgwt_merge_config;
 typedef struct pgwt_merge pgwt_merge;
 typedef struct {

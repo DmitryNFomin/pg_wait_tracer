@@ -1,6 +1,8 @@
 /* Structured transcription of the frozen discovery EXPECTED.md.
  * close is semantic C; persisted is the emitted G(c) endpoint.
- * Neither is used to fabricate reader availability. */
+ * Neither is used to fabricate reader availability. Census bits for older
+ * rows with Ce/Cf/unknown follow the amended Decision 31 counter class; the
+ * frozen verbatim answers do not specify census for those older rows. */
 static const struct discovery_expected {
     const char *id, *output;
     int64_t close, persisted, lower;
@@ -24,7 +26,7 @@ static const struct discovery_expected {
     {"D04b", "F15[C0]", -1, -1, -1, 1, 'N', true, 0},
     {"D04c", "VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 'N', true, 0},
     {"D04d", "", -1, -1, -1, 1, 'N', true, 0},
-    {"D04e", "VOID20[Cf,counter_change]", -1, -1, -1, 1, 'N', true, 0},
+    {"D04e", "VOID20[Cf,counter_change]", -1, -1, -1, 1, 'N', false, 0},
     {"D04f", "VOID20[C0,allocation_fail]", -1, -1, -1, 1, 'N', true, 0},
     {"D04g", "VOID20[Cs,counter_change]", -1, -1, -1, 1, 'N', true, 0},
     {"D07a", "F20[C0]", 20, 20, 12, 0, 'Q', true, 0},
@@ -33,7 +35,7 @@ static const struct discovery_expected {
     {"D08b", "F17[C0] F18[C0]", -1, -1, 12, 1, 'Q', true, 0},
     {"D09", "D12[U] D15[T] terminal_D18[T] EXIT_D18 FORK_R20 R22[U] F22[C0]", 12, 13, 12, 0, 'F', true, 0},
     {"D10", "D12[U] D15[T] F15[C0] F30[C0]", -1, -1, 12, 1, 'F', false, 0},
-    {"D13a", "VOID20[Ce,counter_change]", -1, -1, -1, 1, 'N', true, 0},
+    {"D13a", "VOID20[Ce,counter_change]", -1, -1, -1, 1, 'N', false, 0},
     {"D13b", "", -1, -1, -1, 1, 'N', true, 0},
     {"D13c", "VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 'N', true, 0},
     {"D13d", "VOID20[Cw,writer_push_fail]", -1, -1, -1, 1, 'N', true, 0},
@@ -58,13 +60,13 @@ static const struct discovery_expected {
     {"A05", "VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 'N', true, 0},
     {"A06", "VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 'N', true, 0},
     {"A07", "H15[T] F15[C0]", -1, -1, -1, 1, 'N', true, 1},
-    {"A08", "VOID20[Ce,counter_change]", -1, -1, -1, 1, 'N', true, 0},
+    {"A08", "VOID20[Ce,counter_change]", -1, -1, -1, 1, 'N', false, 0},
     {"A09", "F12[C0] F15[C0] F17[C0] EXIT_D18 F18[C0]", 18, 19, -1, 0, 'N', true, 3},
     {"A10", "F12[C0] F15[C0] VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 'N', true, 2},
     {"A11", "F12[C0] F15[C0] VOID20[C0,seal_violation]", -1, -1, -1, 1, 'N', true, 2},
     {"A12", "F12[C0] F15[C0] VOID20[C0,allocation_fail] F17[C0]", -1, -1, -1, 1, 'N', true, 3},
     {"A13", "", -1, -1, -1, 1, 'N', true, 0},
-    {"A14", "VOID20[unknown,counter_unknown]", -1, -1, -1, 1, 'N', true, 0},
+    {"A14", "VOID20[unknown,counter_unknown]", -1, -1, -1, 1, 'N', false, 0},
     {"A15", "F12[C0] F15[C0] F17[C0] VOID20[Cw,writer_push_fail]", -1, -1, -1, 1, 'N', true, 3},
     {"A16", "VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 'N', true, 0},
     {"A17", "F12[C0] F15[C0] F17[C0] EXIT_D18 F18[C0] FORK_R20 R22[U] F22[C0]", 18, 19, -1, 0, 'N', true, 3},
@@ -75,8 +77,54 @@ static const struct discovery_expected {
     {"T2", "VOID50[C0,unknown_evidence]", -1, -1, -1, 1, 'N', true, 0},
     {"T3", "F18[C0] A20[T] F20[C0] VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 'N', true, 0},
     {"T4", "F18[C0]", -1, -1, -1, 1, 'N', true, 0},
-    {"V1", "EXIT_D18 VOID20[Ce,counter_change] F19[Ce]", -1, -1, -1, 1, 'N', true, 0},
-    {"V2", "EXIT_D18 VOID20[Ce,counter_change] F19[Ce]", -1, -1, -1, 1, 'N', true, 0},
+    {"V1", "EXIT_D18 VOID20[Ce,counter_change] F19[Ce]", -1, -1, -1, 1, 'N', false, 0},
+    {"V2", "EXIT_D18 VOID20[Ce,counter_change] F19[Ce]", -1, -1, -1, 1, 'N', false, 0},
     {"V3", "EXIT_D17 VOID20[Cw,writer_push_fail] F19[Cw]", -1, -1, -1, 1, 'N', true, 0},
     {"V4", "EXIT_D18 VOID20[Cw,writer_push_fail] F19[Cw]", -1, -1, -1, 1, 'N', true, 0},
+};
+
+static const struct discovery_amended_expected {
+    const char *id, *output;
+    int64_t close, persisted, lower;
+    size_t lifetimes, numeric;
+    bool census;
+} discovery_amended_expected[] = {
+    {"N1", "F5[C0] F7[C0]", 6, 6, 6, 0, 0, true},
+    {"N2", "F7[C0]", -1, -1, -1, 1, 0, true},
+    {"N3", "F7[C0]", -1, -1, -1, 1, 0, true},
+    {"N4", "F9[C0]", -1, -1, -1, 1, 0, true},
+    {"N5", "F5[C0] F7[C0] VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 0, false},
+    {"N6", "F5[C0] F7[C0] EXIT_D12 F12[C0]", 6, 6, 6, 0, 0, true},
+    {"N7", "F12[C0]", 11, 11, 11, 0, 0, true},
+    {"N8", "EXIT_D9 F9[C0]", 9, 9, -1, 0, 0, true},
+    {"N9", "VOID20[Cf,counter_change]", -1, -1, -1, 1, 0, false},
+    {"N10", "F5[C0] F7[C0]", 6, 6, 6, 0, 0, true},
+    {"N11", "F7[C0]", -1, -1, -1, 1, 0, true},
+    {"N12", "VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 0, true},
+    {"N13", "H10[U] F10[C0]", 10, 11, 6, 0, 0, true},
+    {"N14", "VOID20[Cw,writer_push_fail]", -1, -1, -1, 1, 0, true},
+    {"N15", "VOID20[Cr,counter_change]", -1, -1, -1, 1, 0, true},
+    {"N16", "F15[C0]", -1, -1, -1, 1, 0, true},
+    {"J1", "F3[C0] EXIT_U4 F7[C0]", 5, 5, -1, 0, 0, true},
+    {"J2", "F7[C0]", 5, 5, -1, 0, 0, true},
+    {"J3", "F7[C0]", -1, -1, -1, 0, 1, false},
+    {"J4", "F7[C0]", -1, -1, -1, 0, 1, false},
+    {"J5", "VOID20[Cf,counter_change]", -1, -1, -1, 0, 1, false},
+    {"J6", "", -1, -1, -1, 0, 1, false},
+    {"J7", "VOID20[Ck,counter_change]", -1, -1, -1, 0, 1, false},
+    {"J8", "F7[C0]", 5, 5, -1, 0, 0, true},
+    {"J9", "F7[C0]", 5, 5, -1, 0, 0, true},
+    {"J10", "F7[C0]", 5, 5, -1, 0, 0, true},
+    {"J11", "VOID20[C0,unknown_evidence]", -1, -1, -1, 0, 1, false},
+    {"J12", "FORK_R3 R6[U] F7[C0]", 5, 5, -1, 0, 0, true},
+    {"J13", "U7[U] F7[C0]", 7, 8, 7, 0, 0, true},
+    {"J14", "F7[C0]", 5, 5, -1, 0, 0, true},
+    {"J15", "EXIT_U4 FORK_R6 R8[U] F8[C0]", 5, 5, -1, 0, 0, true},
+    {"J16", "VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 0, true},
+    {"J17", "VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 0, true},
+    {"J18", "VOID20[Cw,writer_push_fail]", -1, -1, -1, 1, 0, true},
+    {"J19", "EXIT_U4 VOID20[Cf,counter_change]", -1, -1, -1, 1, 0, false},
+    {"J20", "F7[C0]", -1, -1, -1, 1, 0, false},
+    {"J21", "F7[C0]", -1, -1, -1, 0, 1, false},
+    {"J22", "FORK_R1 R6[U] F7[C0]", 5, 5, -1, 0, 0, true},
 };

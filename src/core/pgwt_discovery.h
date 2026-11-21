@@ -58,15 +58,60 @@ typedef struct {
      * coherence/identity/continuity despite contradictory facts is a fault. */
     bool claims_completed_coherence;
 } pgwt_discovery_witness;
+/* These are retained observations, never source boundaries. Route c uses
+ * the pointer watch rather than a numerical attachment. Role qualification is
+ * lifetime-bound producer evidence, not a whitelist inferred from NULL. */
+typedef enum { PGWT_DISC_NUMERICAL, PGWT_DISC_NO_WAIT_WORD } pgwt_discovery_route;
+typedef struct {
+    uint64_t enable, read_at, fence, pointer, fires, handle0, handle1;
+    uint32_t role;
+    bool permanent_role_qualified, visible_before_enable, continuous;
+    bool read_ok, completed, counters_unchanged, ownership, binding;
+    bool claims_completed;
+} pgwt_discovery_no_word;
+/* Shared J/R/G reconciliation facts. Clocks and namespaces must already be
+ * qualified; zero/raw-unknown start times are explicitly marked unknown. */
+typedef struct {
+    uint64_t F0, start, fence, failed_open, gone_at, handle;
+    uint64_t tid, tgid, parent, postmaster;
+    uint64_t exit_time;
+    /* Raw map observations are not membership or terminal-binding evidence. */
+    uint64_t discovery_map_cookie;
+    bool discovery_map_tombstone;
+    uint64_t fork_cookie; /* validated current-lifetime observed-fork provenance,
+                          * never the PID's current map or mutable-state cookie */
+    bool start_known, clocks_qualified, namespaces, history_complete;
+    bool producers_complete, counters_unchanged, journal_complete;
+    bool journal_eligible, gone_esrch, binding, claims_match;
+} pgwt_discovery_resolution;
+typedef enum {
+    PGWT_DISC_EXIT_NONMEMBER, PGWT_DISC_EXIT_FORK,
+    PGWT_DISC_EXIT_PREEXISTING, PGWT_DISC_EXIT_MISSING_FORK,
+    PGWT_DISC_EXIT_UNKNOWN
+} pgwt_discovery_exit_class;
 typedef enum {
     PGWT_DISC_ADMIT, PGWT_DISC_CONFIRM, PGWT_DISC_TERMINAL, PGWT_DISC_ABANDON,
-    PGWT_DISC_TERMINAL_UNRESOLVED
+    PGWT_DISC_TERMINAL_UNRESOLVED,
+    PGWT_DISC_CONFIRM_NO_WAIT_WORD, PGWT_DISC_TRY_NO_WAIT_WORD,
+    PGWT_DISC_POINTER, PGWT_DISC_WAIT_ATTEMPT, PGWT_DISC_WAIT_LIMIT,
+    PGWT_DISC_JOURNAL, PGWT_DISC_REBIND, PGWT_DISC_GONE,
+    PGWT_DISC_EXIT_OBSERVATION
 } pgwt_discovery_control_kind;
 typedef struct {
     pgwt_discovery_control_kind kind;
     uint64_t pid, cookie, attachment_generation, e;
     pgwt_discovery_facts proof;
     pgwt_discovery_witness witness;
+    pgwt_discovery_route route;
+    pgwt_discovery_no_word no_word;
+    pgwt_discovery_resolution resolution;
+    uint64_t pointer_value, pointer_time, authentication_deadline;
+    bool pointer_read_ok, pointer_continuous;
+    /* Optional exact transport binding; journal resolutions require it.
+     * Legacy controls name an EXIT by immutable (pid,semantic timestamp). */
+    uint64_t exit_source, exit_position;
+    bool names_exit;
+
     /* TERMINAL: retained matching kernel/lifecycle proof (not ESRCH).
      * false is unproved evidence, NOT a final disposition. An explicit
      * TERMINAL_UNRESOLVED names the cookie-less EXIT by pid/terminal_time
@@ -84,6 +129,9 @@ typedef struct {
 } pgwt_discovery_origin;
 typedef struct {
     bool admitted, confirmed, has_lower_bound, terminal_released, abandoned;
+    bool no_wait_word, pointer_watched, pointer_nonnull, waiting_limit_exceeded;
+    uint64_t wait_word_attempts, pointer_observations, authentication_deadline;
+    pgwt_discovery_no_word no_word_witness;
     bool has_uncertified;
     uint64_t uncertified_through; /* greatest validated consumed numerical stamp */
     uint64_t attachment_generation, lower_bound, terminal_time;

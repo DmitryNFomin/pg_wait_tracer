@@ -87,6 +87,9 @@ typedef struct {
     ma_lifetime next_lifetime;
 } ma_result;
 
+/* Classify retained exit facts before accepting discovery terminal evidence.
+ * This reducer neither reads a kernel map nor invents a lifecycle record. */
+pgwt_discovery_exit_class ma_discovery_exit(const pgwt_discovery_resolution *);
 ma *ma_create(const ma_config *, pgwt_merge_reason *error);
 /* Production declarations must come from the transport protocol, including
  * its completed failure fence. synthetic_premises MUST be false. This API

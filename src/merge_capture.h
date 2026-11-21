@@ -123,6 +123,8 @@ struct pgwt_capture_config {
     /* Checked, synchronous startup coverage publication. Success includes
      * flushing the supporting records and durable coverage evidence. */
     bool (*publish_startup_gap)(void *, const struct pgwt_capture_gap *);
+    bool (*publish_no_wait_word)(void *, uint64_t pid, uint64_t cookie,
+                                 const pgwt_discovery_no_word *, pgwt_merge_observation *);
 };
 struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *);
 /* Begin boot coverage before advertising it. With discovery_enabled, PID-only
@@ -134,12 +136,16 @@ int pgwt_capture_coverage_begin(struct pgwt_merge_capture *, uint64_t boot_start
                                  const uint32_t *pids, size_t count,
                                  void (*persist)(void *, const struct pgwt_capture_gap *));
 typedef struct {
-    size_t unresolved;
+    size_t unresolved, unresolved_lifetimes, unresolved_numeric;
     bool census_complete, closed;
     uint64_t census_fence, closure;
 } pgwt_capture_discovery_report;
 /* Producer supplies retained lifetime binding, never a current-PID lookup.
  * cookie is reserved even when identity insertion/attachment failed. */
+int pgwt_capture_discovery_numeric(struct pgwt_merge_capture *, uint64_t pid,
+                                    uint64_t listed_at, uint64_t failed_open);
+int pgwt_capture_discovery_start_identity(struct pgwt_merge_capture *, uint64_t pid,
+                                           uint64_t cookie, uint64_t start);
 int pgwt_capture_discovery_inventory(struct pgwt_merge_capture *, uint64_t pid, uint64_t cookie);
 /* Retained producer evidence that identity installation succeeded with a
  * continuous emission/lifetime binding. Reserving an inventory cookie alone
@@ -150,6 +156,16 @@ int pgwt_capture_discovery_census(struct pgwt_merge_capture *, uint64_t fence,
                                   bool completeness_proved, uint64_t d, const ma_snapshot *);
 int pgwt_capture_discovery_control(struct pgwt_merge_capture *, const pgwt_discovery_attempt *,
                                    uint64_t d, const ma_snapshot *);
+typedef struct {
+    uint32_t role;
+    bool present, numerical_available, measured_population_member;
+} pgwt_capture_discovery_measurement;
+/* A qualified route-c lifetime is present with its retained role. Its wait,
+ * completion, CPU and off-CPU quantities are unavailable; it supplies neither
+ * measured-population membership nor A2 birth/omission contributions. */
+bool pgwt_capture_discovery_measurement_state(const struct pgwt_merge_capture *,
+                                               uint64_t pid, uint64_t cookie,
+                                               pgwt_capture_discovery_measurement *);
 pgwt_capture_discovery_report pgwt_capture_discovery_status(const struct pgwt_merge_capture *);
 /* Population only: an observed-birth count is not a finalized A2_BUCKET.
  * The A2 owner still proves finality, terminal omission proof and limits. */

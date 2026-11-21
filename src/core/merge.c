@@ -508,11 +508,21 @@ static bool discovery_record_consistent(const struct generation_state *a,
 {
     if (a->discovery.abandoned && a->terminal_proved && r->t > a->terminal_at)
         return false;
+    if (r->rank == PGWT_MERGE_TRANS && a->discovery.no_wait_word) return false;
     if (r->rank != PGWT_MERGE_TRANS || !a->discovery.admitted) return true;
     bool quiet = a->quiet_pending || a->discovery.confirmed;
     if (!quiet && !a->discovery.has_lower_bound) return true;
     uint64_t base = quiet ? a->discovery.baseline.t : a->discovery.lower_bound;
     return final_discovery_record(a, r) || r->t <= base;
+}
+
+static bool no_word_valid(const pgwt_discovery_no_word *w)
+{
+    return w->enable && w->read_at > w->enable && w->fence >= w->read_at &&
+        w->read_ok && !w->pointer && !w->fires && w->handle0 &&
+        w->handle0 == w->handle1 && w->role && w->permanent_role_qualified &&
+        w->visible_before_enable && w->continuous && w->completed &&
+        w->counters_unchanged && w->ownership && w->binding;
 }
 
 static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input *in)
@@ -530,6 +540,41 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
         (a && (a->creation || a->fork_seed_admitted ||
                (a->proof.identity_proved && !a->discovery.admitted && !a->terminal_proved))))
         return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+    if (in->kind == PGWT_MERGE_DISCOVERY_OBSERVATION) {
+        if (!a) a = remember_generation(m, &key);
+        if (!a) return allocation_fault(m, PGWT_POOL_CORE_IDENTITY, obs);
+        pgwt_discovery_state *state = &a->discovery;
+        switch (d->kind) {
+        case PGWT_DISC_TRY_NO_WAIT_WORD:
+            if (state->admitted) return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+            state->pointer_watched = d->no_word.continuous;
+            state->authentication_deadline = d->authentication_deadline;
+            return m->report.status;
+        case PGWT_DISC_POINTER:
+            ++state->pointer_observations;
+            if (state->no_wait_word && (!d->pointer_continuous ||
+                (d->pointer_read_ok && d->pointer_value))) {
+                state->has_lower_bound = state->confirmed = false;
+                a->quiet_ready = false;
+                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+            }
+            if (d->pointer_read_ok && d->pointer_value) state->pointer_nonnull = true;
+            return m->report.status;
+        case PGWT_DISC_WAIT_ATTEMPT:
+            if (state->admitted || (state->pointer_watched && !state->pointer_nonnull))
+                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+            ++state->wait_word_attempts;
+            return m->report.status;
+        case PGWT_DISC_WAIT_LIMIT:
+            if (state->authentication_deadline && obs.d >= state->authentication_deadline)
+                state->waiting_limit_exceeded = true;
+            return m->report.status;
+        case PGWT_DISC_CONFIRM_NO_WAIT_WORD:
+            break;
+        default:
+            return fault(m, PGWT_MERGE_MALFORMED_ENVELOPE, obs);
+        }
+    }
     if (in->kind == PGWT_MERGE_ABANDON_DISCOVERY) {
         /* Capture supplies these facts from retained census/binding history,
          * never from a current numeric-PID lookup. Duplicates outlive closure. */
@@ -545,7 +590,8 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
     if (!a) a = remember_generation(m, &key);
     if (!a) return allocation_fault(m, PGWT_POOL_CORE_IDENTITY, obs);
     if (in->kind == PGWT_MERGE_ADMIT_DISCOVERY &&
-        (!d->attachment_generation || !pgwt_discovery_has(d->proof, PGWT_DISC_ADMISSION_FACTS)))
+        (!d->attachment_generation || !pgwt_discovery_has(d->proof, PGWT_DISC_ADMISSION_FACTS) ||
+         (d->route == PGWT_DISC_NO_WAIT_WORD && !no_word_valid(&d->no_word))))
         return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
     if (in->kind == PGWT_MERGE_CONFIRM_DISCOVERY &&
         !quiet_witness_valid(&d->witness) && d->witness.claims_completed_coherence)
@@ -591,14 +637,36 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
             (a->quiet_pending && (a->discovery.attachment_generation != d->attachment_generation ||
                                   a->discovery.baseline.e != d->e)))
             return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+        a->discovery.no_wait_word = d->route == PGWT_DISC_NO_WAIT_WORD;
+        if (a->discovery.no_wait_word) a->discovery.no_word_witness = d->no_word;
         a->discovery.admitted = true;
         a->discovery.attachment_generation = d->attachment_generation;
         a->discovery.baseline.e = d->e;
         a->proof.identity_proved = true;
         return m->report.status;
     }
-    const pgwt_discovery_witness *w = &d->witness;
-    bool valid = quiet_witness_valid(w);
+    pgwt_discovery_witness no_word_baseline = {0};
+    bool no_word = d->kind == PGWT_DISC_CONFIRM_NO_WAIT_WORD;
+    if (no_word) {
+        if (!no_word_valid(&d->no_word)) {
+            if (d->no_word.claims_completed)
+                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+            return m->report.status;
+        }
+        if (!a->discovery.admitted || !a->discovery.no_wait_word ||
+            a->discovery.no_word_witness.role != d->no_word.role ||
+            a->discovery.no_word_witness.enable != d->no_word.enable ||
+            a->discovery.no_word_witness.read_at != d->no_word.read_at ||
+            a->discovery.no_word_witness.fence != d->no_word.fence ||
+            a->discovery.no_word_witness.handle0 != d->no_word.handle0 ||
+            a->discovery.no_word_witness.handle1 != d->no_word.handle1)
+            return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+        no_word_baseline.t = no_word_baseline.e = d->no_word.enable;
+    } else if (a->discovery.no_wait_word) {
+        return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
+    }
+    const pgwt_discovery_witness *w = no_word ? &no_word_baseline : &d->witness;
+    bool valid = no_word || quiet_witness_valid(w);
     if (!valid) {
         if (w->claims_completed_coherence)
             return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
@@ -848,6 +916,18 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         MERGE_WORK(STATE, 1);
         m->prospective[i].discovery = m->attachments[m->touched[i]].discovery;
     }
+    for (size_t entry = m->quiet_head; entry; entry = m->attachments[entry - 1].quiet_next) {
+        struct generation_state *a = &m->attachments[entry - 1];
+        if (a->quiet_ready && a->discovery.no_wait_word && !a->discovery.has_lower_bound) {
+            if (!m->config.discovery_support ||
+                !m->config.discovery_support(m->config.sink_context, a->proof.pid, a->proof.g,
+                    &a->discovery.no_word_witness, &obs))
+                return fault(m, PGWT_MERGE_WRITER_PUSH_FAIL, obs);
+            if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
+            if (!same_counters(obs.counters, m->baseline))
+                return fault(m, counter_fault(obs.counters, m->observed), obs);
+        }
+    }
     for (size_t i = m->first; i != end; i = m->queue_nodes[i].next) {
         MERGE_WORK(QVISIT, 1);
         struct staged *v = &m->queue[i];
@@ -968,7 +1048,8 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
     while (*link) {
         struct generation_state *a = &m->attachments[*link - 1];
         if (a->quiet_ready && !a->discovery.has_lower_bound) {
-            a->discovery.has_lower_bound = a->discovery.confirmed = true;
+            a->discovery.has_lower_bound = true;
+            a->discovery.confirmed = !a->discovery.no_wait_word;
             a->discovery.lower_bound = a->discovery.baseline.t;
         }
         if (a->discovery.has_lower_bound) {
@@ -1118,6 +1199,7 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
     case PGWT_MERGE_CHECK:
         if (!same_counters(obs.counters, m->observed)) return check(m, obs);
         break;
+    case PGWT_MERGE_DISCOVERY_OBSERVATION:
     case PGWT_MERGE_ADMIT_DISCOVERY:
     case PGWT_MERGE_CONFIRM_DISCOVERY:
     case PGWT_MERGE_TERMINAL_DISCOVERY:

@@ -242,3 +242,64 @@ consumes an unresolved EXIT while suspended. Complete output is
 VOID20[Cw,writer_push_fail]; the raw counter remains zero and the adjusted
 observation contains exactly one local failure. Startup coverage stays open.
 - double_local_writer_on_unresolved: G_local_writer_once — unresolved disposition counts local writer failure once.
+
+Round-five amendment, N1-N16 / J1-J22 (108 frozen rows total):
+- All new rows compare complete DATA/FRONTIER/VOID output with counter vectors,
+  both pending components and their sum, census status, lower/terminal bounds,
+  final epoch state and the emitted gap sequence. Every endpoint is encoded,
+  decoded with zero reserved fields and evaluated through the existing reader.
+- N1/N10 validate the actual supplied enable/read/fence/pointer-watch history;
+  no quiet witness or numerical/CPU seed is supplied. Role-bound presentation
+  exposes present=true, numerical_available=false and population membership
+  false. A2 birth and omission gates reject their discovery population.
+- N2-N4/N11/N15 reject the failed candidate without an admission or attempt.
+  A required failed read cannot become a successful NULL candidate. N7 starts
+  its one wait-word attempt only after PTR9; N8 exits with zero attempts.
+  N16 records the exceeded qualified deadline without discharging anything.
+- N5 revokes the lower bound and reopens at boot_start; the decoded coverage
+  makes previously complete windows incomplete. N6 retains b=6 after EXIT12.
+  N13 retains H's endpoint increment. N14 rejects supporting evidence before
+  FRONTIER and commits neither the route-c bound nor the startup close.
+- J1/J13 establish inventory identities from journal/pinned binding; J2/J14
+  resolve only the numeric obligation. J3-J7/J11/J21 retain it pending. The
+  numeric fixture lists first, records the failed open later, and repeats the
+  observation to prove that neither a lifetime nor an extra obligation appears.
+- The exit-classification fixture supplies actual leader, parent, known/raw
+  start and observed-fork facts to the adapter reducer (J7-J11/J22). It exposes
+  any resulting DATA and producer counter observation to the capture adapter.
+  This is consumer validation, not execution/qualification of the BPF filter.
+- J15 includes replacement map/attachment history already present when the old
+  EXIT is delivered; its retained transport identity still binds U. J16 refuses
+  the retained-start contradiction. J17 faults before issuing any disposition,
+  retaining its journal-established identity and numeric resolution.
+- J18/J19 commit no discharge after writer rejection or a counter fault in the
+  release suffix. J20 reopens from boot_start even after an accepted G proof.
+- G_census_counter_class checks every named lifecycle component (0,1,2,10)
+  and the independent wait-read, writer and event-ring counters (3,14,11): only
+  the lifecycle class makes the census unknown; all preserve ordinary VOID.
+- G_unresolved_reuse consumes two EXITs of one PID separately. The resolved
+  lifetime and later closure cases prevent an unresolved replacement EXIT from
+  corrupting pending diagnostics or another lifetime's eventual closure.
+- The remaining round-four guards have dedicated removal mutants: missing
+  inventory, control after finish, mapped's early-return hold initialization,
+  UNCOVERED position consumption, and the endpoint helper's capture call site.
+  The UINT64_MAX call-site case injects a defensive retained state: ordinary
+  strict completeness cannot naturally advance beyond UINT64_MAX.
+
+New controls are consumed from core/pgwt_discovery.h. J/R/G and EXIT observations
+are capture-owned reconciliation inputs; they create no transport positions.
+Route-c support is synchronously published by publish_no_wait_word before the
+frontier; the integration owner must persist its role and coverage evidence.
+Physical pointer watches, reads, kernel exit/journal operations, failure-counter
+production and qualification on actual kernels remain the separate producer
+unit's obligations. Abstract consumer agreement does not qualify those paths.
+
+G_journal_unknown_start refuses a claimed J match to an existing inventory
+entry without retained start identity. G_numeric_resolution_in_Q refuses the
+new capture-owned resolution controls under unqualified mode Q. Repeated
+numeric observations update the failed-open observation without allocating an
+identity; G requires its later ESRCH, not a pre-open observation.
+
+G_resolution_after_late_revocation repeats G after J20's late-unlisted target
+observation. Its retained numeric resolution cannot restore the disproved
+census declaration; a fresh census is required. The gap stays open at boot.

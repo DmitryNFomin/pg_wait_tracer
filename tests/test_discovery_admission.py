@@ -17,7 +17,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 FLAGS = ['-std=c11', '-Wall', '-Wextra', '-Werror', '-DPGWT_TRANSPORT_HOST_TEST', '-Isrc']
 SOURCES = ['tests/discovery_admission_host.c', 'src/percpu_transport.c',
-           'src/core/merge_adapter.c', 'src/core/merge.c', 'src/coverage.c', 'src/core/wait_metrics.c']
+           'src/core/merge_adapter.c', 'src/coverage.c', 'src/core/wait_metrics.c']
 # Mutations change executed product logic (or the named numerical consumer
 # adapter in this host harness), checked for successful build,
 # a reached named oracle row, and the intended assertion. Physical producer
@@ -85,9 +85,8 @@ MUTANTS = [
     ('zero_cpu_invalid', 'src/core/merge.c',
      'w->cpu_base_valid &&', 'w->cpu_base_valid && w->cpu_base != 0 &&',
      'Q07', 'exact merge outputs'),
-    ('reject_all_quiet', 'src/core/merge.c',
-     'bool valid = quiet_witness_valid(w);', 'bool valid = quiet_witness_valid(w) && false;',
-     'Q01', 'exact merge outputs'),
+    ('reject_all_quiet', 'src/core/merge.c', 'bool valid = no_word || quiet_witness_valid(w);',
+ 'bool valid = no_word || (quiet_witness_valid(w) && false);', 'Q01', 'exact merge outputs'),
     ('skip_address_match', 'src/core/merge.c',
      'w->armed_address == w->resolved_address &&', 'true &&',
      'Q08', 'address mismatch rejects quiet candidate'),
@@ -348,18 +347,16 @@ MUTANTS = [
      '                uncovered = false;\n                break;',
      '                break;',
      'T2', 'cookie-less EXIT and frontier wait only for disposition'),
-    ('l_terminal_time_match', 'src/merge_capture.c',
-     'if (v->pid != pid || !v->terminal_proved || v->terminal_at != at) continue;',
-     'if ((void)at, v->pid != pid || !v->terminal_proved) continue;',
-     'G_cookie_less_time_match', 'cookie-less EXIT must match terminal time before binding'),
+    ('l_terminal_time_match', 'src/merge_capture.c', ': v->terminal_at == at);', ': ((void)at, true));',
+ 'G_cookie_less_time_match', 'cookie-less EXIT must match terminal time before binding'),
     ('m_exit_time_mismatch', 'src/core/merge.c',
      '                if (a->exit_record.t != a->terminal_at)\n                    return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);\n',
      '',
      'G_exit_time_conflict', 'guard complete expected output'),
     ('o_capture_terminal_conflict', 'src/merge_capture.c',
-     '                if ((v->terminal_proved || v->terminal_unresolved) && v->terminal_at != a->terminal_time)\n                    return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);\n',
-     '',
-     'G_terminal_control_conflict', 'guard complete expected output'),
+ '                    if (v->terminal_proved && v->terminal_at != a->terminal_time)\n'
+ '                        return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);\n',
+ '', 'G_terminal_control_conflict', 'guard complete expected output'),
     ('r_overflow_close', 'src/merge_capture.c',
      '    if (increment && close == UINT64_MAX) return false;\n',
      '',
@@ -376,18 +373,15 @@ MUTANTS = [
      '            ++c->uncovered_records;',
      '            ++c->uncovered_records; c->census_complete = false; c->inventory[c->inventory_count++] = (struct discovery_inventory){.pid = pid};',
      'T1', 'unresolved disposition preserves inventory'),
-    ('matched_after_unresolved', 'src/merge_capture.c',
-     '((v->terminal_proved && unresolved) || (v->terminal_unresolved && !unresolved))',
-     '(v->terminal_proved && unresolved)',
-     'T3', 'complete output sequence with counter labels'),
-    ('unresolved_after_matched', 'src/merge_capture.c',
-     '((v->terminal_proved && unresolved) || (v->terminal_unresolved && !unresolved))',
-     '(v->terminal_unresolved && !unresolved)',
-     'G_matched_then_unresolved', 'guard complete expected output'),
+    ('matched_after_unresolved', 'src/merge_capture.c', 'if (v->unresolved != unresolved)',
+ 'if (!v->unresolved && unresolved)', 'T3', 'complete output sequence with counter labels'),
+    ('unresolved_after_matched', 'src/merge_capture.c', 'if (v->unresolved != unresolved)',
+ 'if (v->unresolved && !unresolved)', 'G_matched_then_unresolved',
+ 'guard complete expected output'),
     ('reapply_unresolved_duplicate', 'src/merge_capture.c',
-     '                found = true;',
-     '                found = true; if (unresolved && v->terminal_unresolved) ++c->uncovered_records;',
-     'G_unresolved_duplicate', 'duplicate unresolved disposition never recounts EXIT'),
+ 'if (v->cookie == a->cookie) duplicate = true;',
+ 'if (v->cookie == a->cookie) { duplicate = true; if (unresolved) ++c->uncovered_records; }',
+ 'G_unresolved_duplicate', 'duplicate unresolved disposition never recounts EXIT'),
     ('discharge_VOIDed_EXIT_suffix', 'src/core/merge.c',
      'planned->exit_release_committed = true;',
      'planned->exit_release_committed = true; published->exit_release_committed = true;',
@@ -413,9 +407,9 @@ MUTANTS = [
      'published->discovery.has_lower_bound = true; planned->discovery.has_lower_bound = true;',
      'bound_rejected_frontier', 'VOIDed release commits no fresh lower bound'),
     ('forget_prearrival_disposition', 'src/merge_capture.c',
-     'v->terminal_unresolved = unresolved;',
-     'v->terminal_unresolved = unresolved && c->retained_count != 0;',
-     'T4', 'unresolved EXIT counted exactly once as uncovered'),
+ '.unresolved=unresolved, .names_exit=a->names_exit,',
+ '.unresolved=unresolved && c->retained_count != 0, .names_exit=a->names_exit,', 'T4',
+ 'unresolved EXIT counted exactly once as uncovered'),
     ('finish_without_disposition', 'src/merge_capture.c',
      '    if (missing_disposition || pgwt_capture_waiting(c))',
      '    if (false)',
@@ -463,6 +457,265 @@ MUTANTS = [
 ]
 
 
+# Amendment and round-five guard mutations.
+MUTANTS += [('missing_disposition_inventory_guard', 'src/merge_capture.c',
+  '        if (!found) return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);\n',
+  '        (void)found;\n', 'G_disposition_uninventoried', 'round five guard complete output'),
+ ('finished_discovery_guard', 'src/merge_capture.c',
+  'if (!c || !c->config.discovery_enabled || !a || c->finished) return -EINVAL;',
+  'if (!c || !c->config.discovery_enabled || !a) return -EINVAL;', 'G_discovery_after_finish',
+  'finished capture retains no new disposition'),
+ ('disposition_per_inventory', 'src/merge_capture.c', '            if (!same_exit) continue;',
+  '            if (((void)same_exit, v->pid != a->pid)) continue;', 'G_unresolved_reuse',
+  'reused PID EXITs each consume their own disposition'),
+ ('mapped_hold_initialization', 'src/merge_capture.c', '    *hold = false;\n    ma_table t = table(c);',
+  '    ma_table t = table(c);', 'G_mapped_hold_reset', 'mapped clears stale caller hold'),
+ ('uncovered_position_guard', 'src/core/merge.c',
+  '    case PGWT_MERGE_UNCOVERED:\n'
+  '        if (position(m, in->source, in->p, obs) == PGWT_MERGE_EXIT_REQUIRED)\n'
+  '            return m->report.status;',
+  '    case PGWT_MERGE_UNCOVERED:', 'G_uncovered_position', 'round five guard complete output'),
+ ('endpoint_overflow_call_guard', 'src/merge_capture.c',
+  '    if (!discovery_endpoint(close, increment, &endpoint)) return 0;',
+  '    if (!discovery_endpoint(close, increment, &endpoint)) endpoint=0;', 'G_endpoint_call_overflow',
+  'round five guard inventory state'),
+ ('no_word_requires_quiet', 'src/core/merge.c', 'bool valid = no_word || quiet_witness_valid(w);',
+  'bool valid = quiet_witness_valid(w);', 'N1', 'no-word supporting publication before commitment'),
+ ('NULL_implies_permanent_role', 'src/core/merge.c', 'w->role && w->permanent_role_qualified &&',
+  'w->role &&', 'N2', 'unqualified NULL remains pending with its pointer watch'),
+ ('unqualified_role_11', 'src/core/merge.c', 'w->role && w->permanent_role_qualified &&',
+  'w->role && (w->permanent_role_qualified || w->role==11) &&', 'N11',
+  'unqualified NULL remains pending with its pointer watch'),
+ ('NULL_read_before_enable', 'src/core/merge.c', 'w->read_at > w->enable &&', 'true &&', 'N3',
+  'qualified no-word route retained'),
+ ('ignore_initial_pointer_fires', 'src/core/merge.c', '!w->pointer && !w->fires &&', '!w->pointer &&',
+  'N4', 'qualified no-word route retained'),
+ ('no_word_equal_completeness', 'src/core/merge.c', 'W > a->discovery.baseline.t;',
+  'W >= a->discovery.baseline.t;', 'N1', 'no-word confirmation waits beyond enable'),
+ ('no_word_ignore_disabled_watch', 'src/core/merge.c',
+  'w->visible_before_enable && w->continuous && w->completed &&',
+  'w->visible_before_enable && w->completed &&', 'N12', 'qualified no-word route retained'),
+ ('no_word_pointer_not_a_fault', 'src/core/merge.c', 'state->no_wait_word && (!d->pointer_continuous ||',
+  'false && state->no_wait_word && (!d->pointer_continuous ||', 'N5',
+  'complete amended output sequence'),
+ ('no_word_revoke_at_detection', 'src/merge_capture.c',
+  '.at=c->coverage_boot_start, .detected=d, .revoked=true}', '.at=d, .detected=d, .revoked=true}', 'N5',
+  'revocation starts at boot and retains detection time'),
+ ('no_word_initialization_handoff', 'src/merge_capture.c',
+  '            c->startup_closed = c->census_complete = c->census_declared = false;',
+  '            c->startup_closed = true; c->census_complete = c->census_declared = false;', 'N5',
+  'amended closure commitment'),
+ ('NULL_fire_counts_read_loss', 'src/core/merge.c', '            ++state->pointer_observations;',
+  '            ++state->pointer_observations; if (!d->pointer_value) { ++obs.counters.value[3]; return '
+  'fault(m, PGWT_MERGE_COUNTER_CHANGE, obs); }',
+  'N6', 'complete amended output sequence'),
+ ('no_word_exit_replaces_bound', 'src/core/merge.c',
+  'planned->discovery.terminal_time = published->terminal_at;',
+  'planned->discovery.terminal_time = published->terminal_at; if (planned->discovery.no_wait_word) '
+  'planned->discovery.lower_bound=published->terminal_at;',
+  'N6', 'amended lower bound time'),
+ ('invent_no_word_terminal_TRANS', 'tests/discovery_admission_host.c',
+  'pointer(h,12,0);terminal_at(h,12,false);', 'pointer(h,12,0);data(h,12,0,1);terminal_at(h,12,false);',
+  'N6', 'complete amended output sequence'),
+ ('NULL_consumes_attempt', 'src/core/merge.c',
+  '            state->pointer_watched = d->no_word.continuous;',
+  '            state->pointer_watched = d->no_word.continuous; ++state->wait_word_attempts;', 'N2',
+  'NULL consumes no wait-word attempts'),
+ ('initialization_supplies_bound', 'src/core/merge.c',
+  'if (d->pointer_read_ok && d->pointer_value) state->pointer_nonnull = true;',
+  'if (d->pointer_read_ok && d->pointer_value) { state->pointer_nonnull = true; '
+  'state->has_lower_bound=true; state->lower_bound=d->pointer_time; }',
+  'N7', 'initialization is not a lower bound'),
+ ('authentication_timeout_closes_gap', 'src/core/merge.c',
+  '                state->waiting_limit_exceeded = true;',
+  '                state->waiting_limit_exceeded = true;\n'
+  '            state->has_lower_bound=true;state->lower_bound=state->authentication_deadline;',
+  'N16', 'separate pending and census'),
+ ('no_word_forgives_journal_loss', 'src/merge_capture.c',
+  '    if (c->lifecycle_lost) c->census_complete = false;',
+  '    if (false && c->lifecycle_lost) c->census_complete = false;', 'N9',
+  'separate pending and census'),
+ ('pointer_read_failure_is_NULL', 'src/core/merge.c', 'w->read_ok && !w->pointer &&',
+  'true && !w->pointer &&', 'N15', 'failed required pointer read is not a NULL candidate'),
+ ('no_word_in_A2_population', 'src/merge_capture.c',
+  'if (pgwt_a2_observed_birth(&birth, c->coverage_boot_start) &&\n'
+  '            from <= birth.fork_ns && birth.fork_ns < to) ++n;',
+  'if ((birth.discovery && from <= c->coverage_boot_start && c->coverage_boot_start < to) || '
+  '(pgwt_a2_observed_birth(&birth, c->coverage_boot_start) && from <= birth.fork_ns && birth.fork_ns < '
+  'to)) ++n;',
+  'N1', 'no-word population contribution unavailable'),
+ ('no_word_missing_quantities_zero', 'src/core/merge.c',
+  '        no_word_baseline.t = no_word_baseline.e = d->no_word.enable;',
+  '        no_word_baseline.t = no_word_baseline.e = d->no_word.enable; '
+  'no_word_baseline.cpu_base_valid=true;',
+  'N1', 'no-word route creates no numerical or CPU seed'),
+ ('no_word_always_increment_endpoint', 'src/merge_capture.c', '    bool increment = false;',
+  '    bool increment = false; for(size_t i=0;i<c->inventory_count;++i){ pgwt_discovery_state '
+  'state={0}; if(pgwt_merge_discovery_state(c->core,c->inventory[i].pid,c->inventory[i].cookie,&state) '
+  '&& state.no_wait_word) increment=true; }',
+  'N1', 'amended persisted endpoint'),
+ ('no_word_suppresses_other_increment', 'src/merge_capture.c',
+  'if (s.has_uncertified && s.uncertified_through == close) increment = true;',
+  'if (s.has_uncertified && s.uncertified_through == close) increment = true;\n'
+  '        for(size_t j=0;j<c->inventory_count;++j){ pgwt_discovery_state state={0}; '
+  'if(pgwt_merge_discovery_state(c->core,c->inventory[j].pid,c->inventory[j].cookie,&state) && '
+  'state.no_wait_word) increment=false; }',
+  'N13', 'amended persisted endpoint'),
+ ('no_word_commit_after_support_rejection', 'src/core/merge.c',
+  '!m->config.discovery_support(m->config.sink_context, a->proof.pid, a->proof.g,\n'
+  '                    &a->discovery.no_word_witness, &obs))\n'
+  '                return fault(m, PGWT_MERGE_WRITER_PUSH_FAIL, obs);',
+  '!m->config.discovery_support(m->config.sink_context, a->proof.pid, a->proof.g,\n'
+  '                    &a->discovery.no_word_witness, &obs)) { a->discovery.has_lower_bound=true; '
+  'a->discovery.lower_bound=a->discovery.baseline.t; return fault(m, PGWT_MERGE_WRITER_PUSH_FAIL, obs); '
+  '}',
+  'N14', 'separate pending and census'),
+ ('numeric_invents_inventory_lifetime', 'src/merge_capture.c',
+  '    c->numeric[c->numeric_count++] = (struct discovery_numeric){pid, listed_at, failed_open, false};',
+  '    c->numeric[c->numeric_count++] = (struct discovery_numeric){pid, listed_at, failed_open, false}; '
+  'c->inventory[c->inventory_count++]=(struct discovery_inventory){.pid=pid};',
+  'J3', 'repeated numeric observations allocate no lifetime or cookie'),
+ ('journal_discharge_before_EXIT_eligibility', 'src/core/merge.c', 'a->terminal_at = d->terminal_time;',
+  'a->terminal_at = d->terminal_time; a->discovery.terminal_released=true; '
+  'a->discovery.terminal_time=d->terminal_time;',
+  'J1', 'journal waits strict EXIT release'),
+ ('gone_on_liveness_or_EPERM', 'src/merge_capture.c', 'after_open && r->gone_esrch &&', 'after_open &&',
+  'J4', 'separate pending and census'),
+ ('gone_before_failed_open', 'src/merge_capture.c', 'r->gone_at > c->numeric[i].failed_open',
+  'r->gone_at >= c->numeric[i].listed_at', 'J21', 'separate pending and census'),
+ ('gone_ignores_lifecycle_loss', 'src/merge_capture.c',
+  '    if (!reliable || r->F0 > c->coverage_boot_start || r->fence < c->census_fence)',
+  '    if (((void)reliable, false) || r->F0 > c->coverage_boot_start || r->fence < c->census_fence)',
+  'J5', 'separate pending and census'),
+ ('journal_without_completed_producer', 'src/merge_capture.c',
+  'r->namespaces && r->history_complete && r->producers_complete &&',
+  'r->namespaces && r->history_complete &&', 'J6', 'separate pending and census'),
+ ('exit_start_equal_F0_is_preexisting', 'src/core/merge_adapter.c',
+  'if (r->start >= r->F0) return PGWT_DISC_EXIT_MISSING_FORK;',
+  'if (r->start > r->F0) return PGWT_DISC_EXIT_MISSING_FORK;', 'J7',
+  'three-fact exit filter emits no EXIT'),
+ ('missing_fork_not_counted', 'tests/discovery_admission_host.c',
+  'if(ma_discovery_exit(&a.resolution)==PGWT_DISC_EXIT_MISSING_FORK) h->snapshot.value[0]=1;',
+  'if(false && ma_discovery_exit(&a.resolution)==PGWT_DISC_EXIT_MISSING_FORK) h->snapshot.value[0]=1;',
+  'J7', 'complete amended output sequence'),
+ ('exit_nonleader_passes', 'src/core/merge_adapter.c',
+  'if (r->tid != r->tgid || r->parent != r->postmaster)', 'if (r->parent != r->postmaster)', 'J8',
+  'three-fact exit filter emits no EXIT'),
+ ('exit_tombstone_passes', 'src/core/merge_adapter.c',
+  '    if (r->tid != r->tgid || r->parent != r->postmaster)',
+  '    if (r->discovery_map_tombstone) return PGWT_DISC_EXIT_PREEXISTING;\n'
+  '    if (r->tid != r->tgid || r->parent != r->postmaster)',
+  'J9', 'three-fact exit filter emits no EXIT'),
+ ('exit_stale_discovery_identity_passes', 'src/core/merge_adapter.c',
+  '    if (r->tid != r->tgid || r->parent != r->postmaster)',
+  '    if (r->discovery_map_cookie) return PGWT_DISC_EXIT_PREEXISTING;\n'
+  '    if (r->tid != r->tgid || r->parent != r->postmaster)',
+  'J10', 'three-fact exit filter emits no EXIT'),
+ ('exit_unknown_start_precedes_F0', 'src/core/merge_adapter.c',
+  '    if (!r->start_known || !r->start || !r->clocks_qualified)\n'
+  '        return PGWT_DISC_EXIT_UNKNOWN;\n',
+  '', 'J11', 'three-fact exit filter emits no EXIT'),
+ ('rebind_fork_in_discovery_inventory', 'src/merge_capture.c',
+  '        } else if (classification == PGWT_DISC_EXIT_FORK || classification == '
+  'PGWT_DISC_EXIT_NONMEMBER) {',
+  '        } else if (classification == PGWT_DISC_EXIT_FORK || classification == '
+  'PGWT_DISC_EXIT_NONMEMBER) {\n'
+  '            if(classification == PGWT_DISC_EXIT_FORK) '
+  '(void)pgwt_capture_discovery_inventory(c,a->pid,PGWT_DISCOVERY_COOKIE_MIN);',
+  'J12', 'separate pending and census'),
+ ('rebound_preexisting_dropped', 'src/merge_capture.c',
+  'if (classification == PGWT_DISC_EXIT_PREEXISTING) {',
+  'if (classification == PGWT_DISC_EXIT_PREEXISTING) { resolved_numeric(c,a->pid); return '
+  'pgwt_capture_envelope(c,&check,d,s);',
+  'J13', 'separate pending and census'),
+ ('rebound_nonmember_pending', 'src/merge_capture.c',
+  'classification == PGWT_DISC_EXIT_FORK || classification == PGWT_DISC_EXIT_NONMEMBER',
+  'classification == PGWT_DISC_EXIT_FORK', 'J14', 'separate pending and census'),
+ ('journal_exit_current_PID_cookie', 'src/merge_capture.c', '        semantic.cookie = cookie;',
+  '        semantic.cookie = c->lifetime_count ? c->lifetimes[c->lifetime_count-1].g : cookie;', 'J15',
+  'complete amended output sequence'),
+ ('journal_ignores_start_identity', 'src/merge_capture.c',
+  '        if (v->start_known && v->start != start) return -EINVAL;\n', '', 'J16',
+  'complete amended output sequence'),
+ ('journal_ignores_EXIT_timestamp', 'src/merge_capture.c',
+  '        if (r->exit_time != a->terminal_time)\n'
+  '            return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);\n',
+  '', 'J17', 'timestamp contradiction faults before matched disposition'),
+ ('journal_discharge_rejected_EXIT', 'src/core/merge.c',
+  '} else if (!m->config.sink(m->config.sink_context, &out, &obs))\n'
+  '            return fault(m, PGWT_MERGE_WRITER_PUSH_FAIL, obs);',
+  '} else if (!m->config.sink(m->config.sink_context, &out, &obs)) { if(published && '
+  'v->record.rank==PGWT_MERGE_EXIT) { published->discovery.terminal_released=true; '
+  'published->discovery.terminal_time=v->record.t; } return fault(m, PGWT_MERGE_WRITER_PUSH_FAIL, obs); '
+  '}',
+  'J18', 'separate pending and census'),
+ ('journal_discharge_VOIDed_suffix', 'src/core/merge.c', 'planned->exit_release_committed = true;',
+  'planned->exit_release_committed = true; if(published->terminal_proved) '
+  '{published->discovery.terminal_released=true;published->discovery.terminal_time=published->terminal_at;}',
+  'J19', 'separate pending and census'),
+ ('gone_suppresses_late_revocation', 'src/merge_capture.c',
+  '            if (i == c->inventory_count) {\n                /* Observation alone',
+  '            if (i == c->inventory_count && !c->numeric_count) {\n'
+  '                /* Observation alone',
+  'J20', 'separate pending and census'),
+ ('start_age_overrides_fork_provenance', 'src/core/merge_adapter.c',
+  '    if (r->fork_cookie && r->fork_cookie < PGWT_DISCOVERY_COOKIE_MIN)',
+  '    if (r->start >= r->F0 && r->fork_cookie && r->fork_cookie < PGWT_DISCOVERY_COOKIE_MIN)', 'J22',
+  'observed fork provenance wins before age comparison'),
+ ('unresolved_corrupts_resolved_pending', 'src/merge_capture.c',
+  'if (!v->cookie || !pgwt_merge_discovery_state(c->core, v->pid, v->cookie, &state) ||',
+  'bool unresolved_exit=false; for(size_t j=0;j<c->disposition_count;++j) '
+  'if(c->dispositions[j].pid==v->pid && c->dispositions[j].unresolved) unresolved_exit=true;\n'
+  '        if (unresolved_exit || !v->cookie || !pgwt_merge_discovery_state(c->core, v->pid, v->cookie, '
+  '&state) ||',
+  'G_unresolved_resolved_lifetime', 'round five guard inventory state'),
+ ('unresolved_blocks_other_closure', 'src/merge_capture.c',
+  'if (!v->cookie || !pgwt_merge_discovery_state(c->core, v->pid, v->cookie, &s) ||',
+  'bool unresolved_exit=false; for(size_t j=0;j<c->disposition_count;++j) '
+  'if(c->dispositions[j].pid==v->pid && c->dispositions[j].unresolved) unresolved_exit=true;\n'
+  '        if (unresolved_exit || !v->cookie || !pgwt_merge_discovery_state(c->core, v->pid, v->cookie, '
+  '&s) ||',
+  'G_unresolved_does_not_block_closure', 'round five guard inventory state'),
+ ('no_word_individual_quantities_zero', 'src/merge_capture.c',
+  '.present=true, .numerical_available=false, .measured_population_member=false}',
+  '.present=true, .numerical_available=true, .measured_population_member=false}', 'N1',
+  'individual quantities unavailable and measured population excluded'),
+ ('census_ignores_init_loss', 'src/merge_capture.c', 'static const size_t lifecycle[] = {0, 1, 2, 10};',
+  'static const size_t lifecycle[] = {0, 2, 10};', 'G_census_counter_class',
+  'only named lifecycle losses invalidate census'),
+ ('census_ignores_exit_loss', 'src/merge_capture.c', 'static const size_t lifecycle[] = {0, 1, 2, 10};',
+  'static const size_t lifecycle[] = {0, 1, 10};', 'G_census_counter_class',
+  'only named lifecycle losses invalidate census'),
+ ('census_invalidated_by_nonlifecycle_loss', 'src/merge_capture.c',
+  'static const size_t lifecycle[] = {0, 1, 2, 10};',
+  'static const size_t lifecycle[] = {0, 1, 2, 10, 3, 14, 11};', 'G_census_counter_class',
+  'only named lifecycle losses invalidate census'),
+ ('journal_accepts_unknown_retained_start', 'src/merge_capture.c',
+  'v->cookie == a->cookie && !v->start_known)', 'v->cookie == a->cookie && false)',
+  'G_journal_unknown_start', 'round five guard complete output'),
+ ('no_word_invents_A2_omission', 'src/merge_capture.c',
+  'return pgwt_a2_omission_population(&l, c->coverage_boot_start, u);',
+  'if (l.discovery) return PGWT_A2_POPULATION_OK; return pgwt_a2_omission_population(&l, '
+  'c->coverage_boot_start, u);',
+  'N1', 'no-word lifetime contributes no A2 omission'),
+ ('numeric_forgets_failed_open_update', 'src/merge_capture.c',
+  'if (failed_open > c->numeric[i].failed_open) c->numeric[i].failed_open = failed_open;',
+  '(void)failed_open;', 'J2', 'separate pending and census'),
+ ('numeric_resolution_qualifies_Q', 'src/merge_capture.c',
+  '    if (c->mode != PGWT_MERGE_N)\n'
+  '        return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);\n',
+  '', 'G_numeric_resolution_in_Q', 'round five guard complete output')]
+
+
+
+
+MUTANTS += [
+    ('numeric_resolution_repairs_revoked_census', 'src/merge_capture.c',
+     '                c->census_complete = c->census_declared = false;',
+     '                c->census_complete = false;',
+     'G_resolution_after_late_revocation', 'round five guard inventory state'),
+]
+
 def run(command, tree, check=True):
     result = subprocess.run(command, cwd=tree, text=True, capture_output=True)
     if check and result.returncode:
@@ -479,7 +732,7 @@ def build(tree):
 
 def check_oracle_inventory():
     def markdown(path):
-        return dict(re.findall(r'^\| ([DQATV][^ |]+) \| (.*?) \|$', path.read_text(), re.M))
+        return dict(re.findall(r'^\| ([DQATVNJ][^ |]+) \| (.*?) \|$', path.read_text(), re.M))
     rows = markdown(ROOT / 'contracts/merge-v1/oracle-discovery/ROWS.md')
     answers = markdown(ROOT / 'contracts/merge-v1/oracle-discovery/EXPECTED.md')
     table = []
@@ -487,18 +740,30 @@ def check_oracle_inventory():
         if line.startswith('    {'):
             table.append(json.loads('[' + line.strip()[1:-2] + ']'))
     ids = [row[0] for row in table]
-    assert len(ids) == len(set(ids)) == 70
+    assert len(ids) == len(set(ids)) == 108
     assert set(ids) == set(rows) == set(answers), 'oracle row IDs drifted'
     assert all(inputs == rows[key] and answer == answers[key] for key, inputs, answer in table)
     expected_text = (ROOT / 'tests/discovery_oracle_expected.h').read_text()
-    structured_rows = re.findall(r'^    \{"([DQATV][^"]+)", "([^"]*)",', expected_text, re.M)
+    structured_rows = re.findall(r'^    \{"([DQATVNJ][^"]+)", "([^"]*)",', expected_text, re.M)
     structured = dict(structured_rows)
     assert len(structured_rows) == len(structured) == len(rows), 'duplicate or missing structured row'
     assert set(structured) == set(rows), 'structured expected row IDs drifted'
     states = dict((key, (int(persisted), int(pending), int(abandoned)))
         for key, persisted, pending, abandoned in re.findall(
-            r'^    \{"([DQATV][^"]+)", "[^"]*", -?\d+, (-?\d+), -?\d+, (\d+), \'[FQN]\', (?:true|false), (\d+)\},$',
+            r'^    \{"([DQATVNJ][^"]+)", "[^"]*", -?\d+, (-?\d+), -?\d+, (\d+), \'[FQN]\', (?:true|false), (\d+)\},$',
             expected_text, re.M))
+    amended_states = dict((key, (int(persisted), int(lifetimes)+int(numeric), 0))
+        for key, persisted, lifetimes, numeric in re.findall(
+            r'^    \{"([NJ][^"]+)", "[^"]*", -?\d+, (-?\d+), -?\d+, (\d+), (\d+), (?:true|false)\},$',
+            expected_text, re.M))
+    census_flags = dict(re.findall(
+        r'^    \{"([NJ][^"]+)", "[^"]*", -?\d+, -?\d+, -?\d+, \d+, \d+, (true|false)\},$',
+        expected_text, re.M))
+    pending_parts = dict((key, (int(lifetime), int(numeric)))
+        for key, lifetime, numeric in re.findall(
+            r'^    \{"([NJ][^"]+)", "[^"]*", -?\d+, -?\d+, -?\d+, (\d+), (\d+), (?:true|false)\},$',
+            expected_text, re.M))
+    states.update(amended_states)
     assert set(states) == set(rows), 'structured state row IDs drifted'
     for key, answer in answers.items():
         codes = re.findall(r'`([^`]+)`', answer)
@@ -518,11 +783,15 @@ def check_oracle_inventory():
         assert structured[key] == sequence, (key, structured[key], sequence)
         gap_ends = re.findall(r'G\((open|\d+)\)', answer)
         persisted = int(gap_ends[-1]) if gap_ends and gap_ends[-1] != 'open' else -1
-        pending = re.findall(r'P=(\d+)', answer)
+        pending = re.findall(r'P=(\d+)(?:\+(\d+))?', answer)
         abandoned = re.findall(r'abandoned=(\d+)', answer)
-        assert states[key] == (persisted, int(pending[-1]) if pending else 1,
+        if key in amended_states:
+            assert pending_parts[key] == tuple(int(part) for part in pending[-1]), key
+            census = re.findall(r'census=(known|unknown)', answer)
+            assert census_flags[key] == ('true' if census[-1] == 'known' else 'false'), key
+        assert states[key] == (persisted, sum(int(part or 0) for part in pending[-1]) if pending else 1,
                                int(abandoned[-1]) if abandoned else 0), (key, states[key])
-    print('discovery frozen table: 70/70 IDs and verbatim inputs/answers match', flush=True)
+    print('discovery frozen table: 108/108 IDs and verbatim inputs/answers match', flush=True)
 
 
 def main():

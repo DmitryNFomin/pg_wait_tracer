@@ -226,6 +226,18 @@ static ma_result attachment_event(const ma *a, const ma_envelope *e,
     return r;
 }
 
+pgwt_discovery_exit_class ma_discovery_exit(const pgwt_discovery_resolution *r)
+{
+    if (r->fork_cookie && r->fork_cookie < PGWT_DISCOVERY_COOKIE_MIN)
+        return PGWT_DISC_EXIT_FORK;
+    if (r->tid != r->tgid || r->parent != r->postmaster)
+        return PGWT_DISC_EXIT_NONMEMBER;
+    if (!r->start_known || !r->start || !r->clocks_qualified)
+        return PGWT_DISC_EXIT_UNKNOWN;
+    if (r->start >= r->F0) return PGWT_DISC_EXIT_MISSING_FORK;
+    return PGWT_DISC_EXIT_PREEXISTING;
+}
+
 ma_result ma_map(const ma *a, const ma_envelope *e, const ma_table *t,
                  uint64_t d, const ma_snapshot *snapshot)
 {
@@ -243,12 +255,13 @@ ma_result ma_map(const ma *a, const ma_envelope *e, const ma_table *t,
         (unsigned)e->kind > MA_DISCOVERY_CONTROL || (unsigned)e->origin > MA_ADMIN)
         return faulted(r, PGWT_MERGE_MALFORMED_ENVELOPE);
     if (e->kind == MA_DISCOVERY_CONTROL) {
-        if (e->size || (unsigned)e->discovery.kind > PGWT_DISC_ABANDON)
+        if (e->size || (unsigned)e->discovery.kind > PGWT_DISC_WAIT_LIMIT)
             return faulted(r, PGWT_MERGE_MALFORMED_ENVELOPE);
         r.input[0].kind = e->discovery.kind == PGWT_DISC_ADMIT ? PGWT_MERGE_ADMIT_DISCOVERY :
             e->discovery.kind == PGWT_DISC_CONFIRM ? PGWT_MERGE_CONFIRM_DISCOVERY :
             e->discovery.kind == PGWT_DISC_TERMINAL ? PGWT_MERGE_TERMINAL_DISCOVERY :
-            PGWT_MERGE_ABANDON_DISCOVERY;
+            e->discovery.kind == PGWT_DISC_ABANDON ? PGWT_MERGE_ABANDON_DISCOVERY :
+            PGWT_MERGE_DISCOVERY_OBSERVATION;
         r.input[0].discovery = e->discovery;
         return r;
     }
