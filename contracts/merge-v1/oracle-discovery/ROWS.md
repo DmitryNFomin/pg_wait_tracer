@@ -55,6 +55,14 @@ Notation additions:
 - `{earlier}` means retained origin α1 against final α2; `{final}` proves final membership. In R1 also execute the membership-unproved variant.
 - Every row observes public commitments, pending split, census, latch, closure, persisted gap history, faults, invalidations and consumption counts after every primitive input.
 - P rows use the amended N-row defaults; no role-support publisher exists.
+- U rows (unresolved disposition of a numeric-only EXIT): Use the J-row numeric-observation defaults, existing source positions, `S(w)`, counter and publication rules. Each row is independent; references to another row expand its complete input sequence. Observe state after every primitive input.
+- `X_t = EXIT_Ut@L{no cookie}`, PID 50. `TERMU_Ut` is the existing unresolved control with cookie zero, naming exactly X_t's capture/source/position/PID/time; it consumes no transport position. Before-DATA variants supply the same retained transport identity.
+- `CUT(c)` is `AOP(completed reconciliation cut c; every retained journal witness consumed; none names X; no registered lifetime on PID 50)`. It supplies no transport boundary or numeric resolution.
+- `PF` is `AOP(established permanent loss of discovery reconciliation; attempts stopped; every retained independently valid journal witness consumed; none names X), FAULT(unknown_evidence,20,C0)`. Ordinary merge sources remain independently qualifiable. `RA=REARM(21,C0,fresh A/B attachment_proofs)`; observations after RA use detection time 22.
+- Unless overridden, controls explicitly submitted assert their required facts. An `AOP(attempt finalisation)` requests coordinator evaluation and does not itself submit a terminal disposition.
+- G rows (control ordering, one resolving proof, conflicting terminal claims, closure from committed evidence): Use existing R-row defaults: installed, independently bound D; complete census `{D}` at fence 5; C0; detection time 20; state observed after every primitive input. Each stated variant is an independent execution.
+- Notation: `A20@P0{requires x}` is an ordinary attached-A TRANS requiring untimed `TEXTx@L`; withholding that TEXT means dependency unavailable, not lost, so the eligible batch and frontier are held.
+- In G rows a lifecycle EXIT of D carries D's discovery cookie unless the row marks it `{no cookie}`; in G8, H is installed and independently bound like D, and its `AD_H8` satisfies Decision 36.
 
 | ID | Input sequence / starting-state override |
 |---|---|
@@ -181,3 +189,29 @@ Notation additions:
 | P1 | N1, with no role-support publisher installed. |
 | P2 | N1, then a demonstrated pointer-observation continuity break at detection 20, C0; `S(14)`. |
 | P3 | N6, persisted and read back; inspect startup endpoint and backend/omission populations. |
+| U1 | `PF, RA, X_24, A26@P0, S(28), TERMU_U24, S(30)`. |
+| U2 | `X_4, A6@P0, S(8), CUT(5), TERMU_U4`. |
+| U3 | U2's inputs, then `J_U4`, naming the same EXIT; its inventory identity, numeric resolution and census evidence are independently valid, and it explicitly requests a matched disposition. |
+| U4 | `CUT(5), TERMU_U4{names_exit=false}`. No EXIT DATA is delivered. |
+| U5 | `CUT(5), TERMU_U4{pid=60; names an EXIT of PID 60}`. PID 60 has neither inventory entry nor numeric observation; PID 50 retains its default number. |
+| U6 | U2's inputs, then `G_50, S(10)`. All G proof requirements hold independently. |
+| U7 | U2's inputs, then `R_50{new pinned holder is a proved non-child; no eligible J witness; completed resolving/census fence 9}, S(10)`. |
+| U8 | `X_4, A6@P0, S(8), AOP(transient reconciliation failure; no completed cut covering 4; deadline expires; attempt finalisation), S(10)`. No capture-finish input follows. |
+| U9 | `FAULT(allocation_fail,20,C0), RA, X_24, A26@P0, S(28), AOP(certification latch set; reconciliation remains PENDING; no permanent loss or covering cut; attempt finalisation), S(30)`. |
+| U10 | `CUT(5), TERMU_U4, X_4, A6@P0, S(8)`. |
+| U11 | U2's inputs, then identical `TERMU_U4, G_50`, another identical `TERMU_U4`, then `S(10)`. |
+| U12 | Override with D10's full inputs and default D census. Its `LATE_U(40)` represents exactly one consumed uncovered record of PID 50, creating the existing cookie-zero inventory entry; no numeric observation exists. Then `X_42, A44@P0, S(45), AOP(completed cut 42; all retained witnesses consumed; none matches X_42), TERMU_U42{names existing cookie-zero inventory entry}, S(46)`. |
+| U13 | `X_4, A6@P0, S(8), AOP(completed cut 5; eligible J_U4 retained but not yet consumed; attempt finalisation), J_U4`. |
+| U14 | `X_4, A6@P0, S(8), CUT(3), AOP(attempt finalisation), S(10)`. |
+| U15 | `PF, X_24, A26@P0, S(28), TERMU_U24, S(30)`. No REARM. |
+| O1 | `B_D6{e=6,α2}, D20@P0{final}, D14@P0{earlier}`. No AD and no boundary is delivered. Observe the latch after each VOID and the ordering-fault diagnostic counts. |
+| G1 | `TRY_NW_D6, CN6, ADc6, S(19)`. |
+| G2 | `ADc6, TRY_NW_D6, CN6, S(19)`. Also execute with `FAULT(allocation_fail,20,C0)` prefixed, so ADc6 is recorded under the latch. |
+| G2b | `AD_D6, B_D6, S(19), TRY_NW_D6`. No qualified non-NULL pointer fire is supplied. |
+| G3 | `AD_D6, B_D6, TERM_D18, EXIT_D18@L, S(19)`. Also execute a revocation variant appending `TRY_NW_D6`, with no qualified non-NULL pointer fire. |
+| G4 | `TERM_D18, EXIT_D18@L, S(19), TERM_D19{names the same EXIT}`. Also execute with the last control replaced by `TERM_D18{names a different EXIT transport identity of D}`. |
+| G4b | `TERM_D18, EXIT_D18@L{no cookie}, S(19), TERMU_D18{names that same EXIT; explicitly claims final unresolved disposition}`. |
+| G5 | `EXIT_D18@L, S(19), AD_D6, TERM_D18`. |
+| G6 | `TRY_NW_D6, AD_D6, S(19)`. No qualified non-NULL pointer fire is supplied. |
+| G7 | `TERM_D18, EXIT_D18@L, S(19), AD_D6, B_D6`. |
+| G8 | Census `{D,H}`. `EXIT_D18@L, S(19), AD_H8, A20@P0{requires x}, H21@P0{final}, S(22), TERM_D18`. TEXT x remains unavailable throughout. |
