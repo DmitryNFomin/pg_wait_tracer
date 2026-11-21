@@ -8,7 +8,13 @@
 
 `[U]` and `[T]` mean `prior_interval_certified=false/true`. They describe output semantics; this amendment adds no discovery storage carrier. `F<n>` and `VOID<d>[C,reason]` retain §5’s notation.
 
-Unless specified otherwise, final census completeness is known. Rows faulting before any lifetime discharge retain `G(open), P=1`. No listed row requires nonzero process exit. A11 additionally invalidates the epoch containing the disproved F15; no other listed row requires epoch invalidation.
+Unless specified otherwise, final census completeness is known. Rows faulting before any lifetime discharge retain `G(open), P=1`. No listed row requires nonzero process exit. A11 additionally invalidates the epoch containing the disproved F15; among the rows before R1 no other row requires epoch invalidation. R12 requires it explicitly.
+
+U rows: Use `P=L+Q` for pending lifetimes plus numbers; write the certification latch separately as `latch`. Uncovered counts are capture-cumulative increments. Unless stated, there is no additional DATA, fault, VOID, discharge, END, abandonment consumption or epoch invalidation.
+
+G rows: Unless stated otherwise: `census=known`, `abandoned=0`, uncovered increment 0, no epoch invalidation or additional output. Every execution starts with the ordinary startup OPEN; END and O! are separate gap publications. `Vu=VOID20[C0,unknown_evidence]`; `L` is the certification latch.
+
+R rows: `b=—, x=—` means neither commitment exists. `L=1` denotes the permanent certification latch. `O!` denotes one persisted revoked OPEN at boot start, including when the gap was already open. Unless stated: `census=known`, `abandoned=0`, uncovered increment 0, no additional publication/fault/invalidation, and no nonzero exit. Every row begins with the ordinary startup OPEN. For q, `Vq` is empty or `VOID20[Cr,counter_change]`; a subsequent contradiction uses the current vector. `Vu=VOID20[current-vector,unknown_evidence]`. These are startup-gap expectations, not claims that a whole reader window is COMPLETE despite an ordinary VOID. Reader comparisons include all supplied ordinary coverage restrictions.
 
 | ID | Expected output and state |
 |---|---|
@@ -82,16 +88,16 @@ Unless specified otherwise, final census completeness is known. Rows faulting be
 | V2 | `EXIT_D18 → VOID20[Ce,counter_change] → F19`; `G(open), P=1`, no closure in either order. |
 | V3 | `EXIT_D17 → VOID20[Cw,writer_push_fail] → F19` (A18 not published; F19 after REARM, under Cw); `G(open), P=1` after REARM and TERM. |
 | V4 | `EXIT_D18 → VOID20[Cw,writer_push_fail] → F19` (F18 not published; F19 after REARM, under Cw); `G(open), P=1`. |
-| N1 | `F5 → F7`; at `S(6)`, no bound, `G(open), P=1+0`; at `S(8)`, `b_D=6, C_close=6, G(6), P=0+0, census=known`. Attempts 0. Show `present, not measured — logger`; individual quantities unavailable; no contribution to `N_k`, `U_k` or numerical numerators. |
+| N1 | `F5 → F7`; at `S(6)`, no bound, `G(open), P=1+0`; at `S(8)`, `b_D=6, C_close=6, G(6), P=0+0, census=known`. Attempts 0. No backend listing or role-support publication; no contribution to `N_k`, `U_k` or numerical numerators. |
 | N2 | `F7`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0, pointer watch retained. |
 | N3 | `F7`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0; the pre-enable read does not establish the required witness. |
 | N4 | `F9`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0, C0 unchanged; the initial zero-fire requirement fails without manufacturing a loss. |
 | N5 | `F5 → F7 → VOID20[C0,unknown_evidence]`; the pointer contradiction reports `FAULT(unknown_evidence,20,C0)`. Revoke `b_D` and coverage from 0, invalidate affected cached answers; final `G(open), P=1+0, census=unknown`. No F13 or handoff gap. |
-| N6 | `F5 → F7 → EXIT_D12 → F12`; `b_D=6, C_close=6, G(6), P=0+0, census=known`; C0 unchanged, no terminal TRANS, no numerical contribution. |
+| N6 | `F5 → F7 → EXIT_D12 → F12`; `b_D=6, x=—, C_close=6, G(6), P=0+0, census=known`; C0 unchanged, no terminal TRANS, no numerical contribution. |
 | N7 | `F12`; `b_D=11, C_close=11, G(11), P=0+0, census=known`; one wait-word attempt, started after the non-NULL observation. PTR9 establishes no bound. |
 | N8 | `EXIT_D9 → F9`; no `b_D`, accepted `x_D=9`, `C_close=9, G(9), P=0+0, census=known`; attempts 0, no terminal TRANS or UNTRACED. |
 | N9 | `VOID20[Cf,counter_change]`; no bound or frontier; `G(open), P=1+0, census=unknown`; attempts 0. |
-| N10 | `F5 → F7`; final `b_D=6, C_close=6, G(6), P=0+0, census=known`; attempts 0. Show `present, not measured — stats collector`; individual quantities unavailable and no numerical-population contribution. |
+| N10 | `F5 → F7`; final `b_D=6, C_close=6, G(6), P=0+0, census=known`; attempts 0. No backend listing or role-support publication; no contribution to `N_k`, `U_k` or numerical numerators. |
 | N11 | `F7`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0. The unqualified role value supplies no permanence proof. |
 | N12 | `VOID20[C0,unknown_evidence]`; no accepted admission, bound or frontier; `G(open), P=1+0, census=known`. |
 | N13 | `H10[U] → F10`; `b_D=6, b_H=10, C_close=10, G(11), P=0+0, census=known`. H10 requires the endpoint increment; D contributes no numerical record. |
@@ -120,6 +126,47 @@ Unless specified otherwise, final census completeness is known. Rows faulting be
 | J20 | `F7`; initially `G(5), P=0+0, census=known`; detection at 40 revokes coverage from 0 and affected cached answers, leaving `G(open), P=1+0, census=unknown`. The late-unlisted observation alone adds no DATA or VOID. |
 | J21 | `F7`; `G(open), P=0+1, census=unknown`; the pre-open ESRCH does not satisfy G. |
 | J22 | `FORK_R1 → R6[U] → F7`; `C_close=5, G(5), P=0+0, census=known`; observed fork provenance wins, with no discovery admission or journal-based discovery discharge. R's Decision 25c numerical lower bound is 6; R6's incoming numerical evidence is unavailable. R contributes `dN_0=1, dU_0=0`, using FORK timestamp 1. |
+| R1 | `D14[U] → F14 → Vu`; `b=—, x=—, G(open), P=1+0, L=1`; no O!. Retained released evidence rejects B6 in both variants. |
+| R2 | Without K: `Vu`; with K: `VOID20[Cr,counter_change] → Vu`. No DATA/frontier; `b=—, x=—, G(open), P=1+0, L=1`. No abandonment consumption or O!, in all identity modes and arrival orders. The contradiction is detected at the second member of the TERM/DATA pair. |
+| R3 | `F7 → Vq → Vu`; remove `b=6`, final `b=—, x=—, G(open), P=(1+h)+0, L=1`, one O!. Before contradiction, h=0 has historical `G(6)`, h=1 remains open. DATA variant retains known census; pointer/break variants make census unknown under existing Decision 43. |
+| R4 | `F13 → Vq → Vu`; remove `b=12`, final `b=—, x=—, G(open), P=(1+h)+0, L=1`, one O!, census known. Historical `G(12)` exists iff h=0. |
+| R5 | `EXIT_D18 → F18 → Vq → Vu`; remove `x=18`, final `b=—, x=—, G(open), P=(1+h)+0, L=1`, one O!, census known. Historical `G(18)` exists iff h=0. Abandonment variant still has abandoned=0: D20 is rejected, not consumed. |
+| R6 | `EXIT_D18 → F20 → Vu`; `b=—, x=—, G(open), P=1+0, L=1, abandoned=1`; no O!. D20's completed discard remains terminal-refutation evidence. |
+| R7 | (a) `EXIT_D18 → F18 → VOID20[Cr,counter_change] → F24[Cr]`; retain `x=18, G(18), P=0+0, L=1`, exactly one historical END and no O!. (b) `D12[U] → F12 → VOID20[Cr,counter_change] → F24[Cr]`; retain `b=12, G(13), P=0+0, L=1`, exactly one END and no O!. |
+| R8 | All: `b=—, x=—, G(open), P=1+0, L=1`, no END or O!. Without RA, only `VOID20[Cr,counter_change]`. With RA, (a) adds `F24[Cr] → D26[U] → F26[Cr]`; (b,c) add `F24[Cr]`. No refused candidate supplies certified numerical evidence. |
+| R9 | All: `b=—, x=—, G(open), P=1+0, L=1`, no END or O!. (a) `EXIT_D18 → F18 → VOID20[Cr,counter_change]`, plus `F24[Cr]` iff RA. (b) `VOID20[Cr,counter_change]`, plus `EXIT_D26 → F26[Cr]` iff RA. Valid TERM adds no fault. |
+| R10 | `VOID20[C0,unknown_evidence] → VOID20[C0,unknown_evidence]`; `b=—, x=—, G(open), P=1+0, census=known, L=1`; no O!. The admitted permanence contradiction and the separately false CN claim each fault. |
+| R11 | `EXIT_D18 → F18`; `b=—, x=—, G(open), P=1+0, census=known, L=0`; no hold, END, fault or uncovered increment. |
+| R12 | `EXIT_D18 → F18 → VOID20[C0,seal_violation]`; invalidate the supporting epoch, remove `x=18`, retain historical END 18 followed by O!; final `b=—, x=—, G(open), P=1+0, census=known, L=1`. No additional unknown-evidence fault: D12 does not postdate EXIT18. |
+| P1 | N1’s amended output and state; absence of the publisher does not hold confirmation or invoke writer failure. |
+| P2 | `F5 → F7 → VOID20[C0,unknown_evidence]`; revoke b_D and coverage from boot, invalidate affected caches; `G(open), P=1+0, census=unknown`. |
+| P3 | `F5 → F7 → EXIT_D12 → F12`; `x=—`; persisted `G(6)` unchanged; no backend listing or contribution to N/U or numerical values. |
+| U1 | `VOID20[C0,unknown_evidence] → A26[T] → F27 → F29`; no DATA/frontier between RA and TERMU; uncovered +1, `P=0+1, census=unknown, G(open), latch=1`; no EXIT publication or discharge. |
+| U2 | No output before TERMU; then `A6[T] → F7`; uncovered +1, `P=0+1, census=unknown, G(open), latch=0`. |
+| U3 | `A6[T] → F7 → VOID20[C0,unknown_evidence]`; conflicting matched disposition faults; uncovered +1, `P=1+0, census=known, G(open), latch=1`; retain J's inventory identity and numeric resolution, no discharge. |
+| U4 | `VOID20[C0,unknown_evidence]`; invalid unnamed disposition faults; uncovered +0, `P=0+1, census=unknown, G(open), latch=1`. |
+| U5 | `VOID20[C0,unknown_evidence]`; invalid PID obligation faults; uncovered +0, `P=0+1, census=unknown, G(open), latch=1`; no PID-60 inventory entry. |
+| U6 | `A6[T] → F7 → F9`; uncovered +1, `P=0+0, census=known, G(open), latch=0`; G resolves only the number; no END or discharge. |
+| U7 | `A6[T] → F7 → F9`; uncovered +1, `P=0+0, census=known, G(open), latch=0`; R resolves only the number as a non-member; no END or discharge. |
+| U8 | No DATA/frontier or fault; EXIT remains undecided and held; uncovered +0, `P=0+1, census=unknown, G(open), latch=0`. |
+| U9 | Only `VOID20[C0,allocation_fail]`; after RA the EXIT remains undecided and holds the new DATA/frontier; uncovered +0, `P=0+1, census=unknown, G(open), latch=1`. |
+| U10 | `A6[T] → F7`; the named EXIT has no undecided-disposition hold; uncovered +1, `P=0+1, census=unknown, G(open), latch=0`. |
+| U11 | `A6[T] → F7 → F9`; neither duplicate adds output, fault or consumption; uncovered +1, `P=0+0, census=known, G(open), latch=0`. |
+| U12 | `D12[U] → D15[T] → F15 → F30 → A44[T] → F44 → F45`; historical `G(13)`, then one revoked OPEN from boot at LATE_U; no output from X_42 through S(45); uncovered +2 total, `P=1+0, census=unknown, G(open), latch=0`; no VOID, extra inventory entry or discharge. |
+| U13 | No output or unresolved disposition before J; then `EXIT_U4 → A6[T] → F7`; uncovered +0, `x_U=4, P=0+0, census=known, G(5), latch=0`. |
+| U14 | No DATA/frontier, disposition or fault; EXIT remains held; uncovered +0, `P=0+1, census=unknown, G(open), latch=0`. |
+| U15 | Only `VOID20[C0,unknown_evidence]`; unresolved disposition is accepted, but EXIT is neither consumed uncovered nor published because ordinary release remains suspended; uncovered +0, `P=0+1, census=unknown, G(open), latch=1`; no discharge. |
+| O1 | `VOID20[C0,clock_regression] → VOID20[C0,unknown_evidence]`; no DATA or frontier; `b=—, x=—, G(open), P=1+0, census=known, L=1`, latched by the first VOID; no O!, no epoch invalidation, abandoned=0; diagnostic counts clock_regression +1, seal_violation +0, unknown_evidence +1. |
+| G1 | `Vu` at CN6; CN6 is not retained; ADc6 is subsequently recorded without another fault; final `b=—, x=—, G(open), P=1+0, L=1`; no DATA, FRONTIER, END or O!. |
+| G2 | `Vu` at TRY; TRY is not recorded, CN6 is recorded without another fault; final `b=—, x=—, G(open), P=1+0, L=1`; no DATA, FRONTIER, END or O!; prefixed variant adds exactly `VOID20[C0,allocation_fail]` before Vu and has the same final state. |
+| G2b | `F18 → Vu`; before TRY, `b_D=6, G(6), P=0+0`; TRY revokes the bound; historical END 6 is followed by one O!; final `b=—, x=—, G(open), P=1+0, L=1`. |
+| G3 | `EXIT_D18 → F18`; `b_D=6, x=—, C_close=6, G(6), P=0+0, L=0`; one END 6; revocation variant then adds Vu and one O!, removes b, and ends `b=—, x=—, G(open), P=1+0, L=1`; retained terminal evidence is not promoted. |
+| G4 | Both variants produce `EXIT_D18 → F18 → Vu`; remove `x_D=18`; historical END 18 is followed by one O!; final `b=—, x=—, G(open), P=1+0, L=1`. |
+| G4b | `EXIT_D18 → F18 → Vu`; reject the conflicting unresolved disposition and revoke `x_D=18`; historical END 18 is followed by one O!; final `b=—, x=—, G(open), P=1+0, L=1`; uncovered increment remains 0. |
+| G5 | `EXIT_D18 → F18`; AD_D6 is recorded without fault and supplies no bound; TERM commits `x_D=18`; final `b=—, C_close=18, G(18), P=0+0, L=0`; one END 18, no O!. |
+| G6 | `Vu` at AD_D6; no accepted admission; final `b=—, x=—, G(open), P=1+0, L=1`; no DATA, FRONTIER, END or O!. |
+| G7 | `EXIT_D18 → F18`; discharge and END 18 commit at S(19); later AD_D6 and B_D6 are recorded without fault and commit no bound; final `b=—, x_D=18, C_close=18, G(18), P=0+0, L=0`; exactly one END, no O!. |
+| G8 | `EXIT_D18 → F18`; S(22) holds A20, H21 and F21; TERM commits only `x_D=18`; final `b_D=—, b_H=—, x_H=—, G(open), P=1+0, L=0`; no END, O! or fault; the persisted reader remains INCOMPLETE, including for `[50,60)`. |
 
 **Required mutants**
 
@@ -257,6 +304,38 @@ All gap-end assertions must inspect the emitted GAP_CLOSE endpoint and zero rese
 | Discharge from an EXIT in a subsequently VOIDed release attempt | J19 |
 | Let G suppress later-unlisted revocation | J20 |
 | Prefer task-start age over observed fork provenance | J22 |
+| Reject every numeric-only unresolved disposition or retain its hold after acceptance | U1, U2, U10 |
+| Publish the unresolved EXIT, invent its cookie/inventory entry, or discharge its number | U1, U2, U10 |
+| Accept an unnamed disposition or one without either matching inventory or numeric obligation | U4, U5 |
+| Accept a later matched disposition for the same unresolved EXIT | U3 |
+| Erase final unresolved history or permit END after G/R resolves the number | U6, U7 |
+| Finalise on transient failure, deadline expiry or certification latch alone | U8, U9 |
+| Finalise from a cut before the EXIT or before consuming a retained matching witness | U14, U13, respectively |
+| Require DATA before accepting its named disposition | U10 |
+| Reapply, recount or reject an identical duplicate, including after numeric resolution | U11 |
+| Reject unresolved disposal after the latch, clear the latch, or implicitly REARM | U1, U15 |
+| Require a numeric observation for an existing cookie-zero inventory entry, or create another entry during its disposal | U12 |
+| Let unresolved disposal bypass ordinary completeness or suspension | U10 before S(8), U15 |
+| Emit unknown_evidence before the arrival fault for one observation raising both | O1 |
+| Short-circuit after either fault of one observation raising both (one VOID) | O1 |
+| Drop the rejected record's evidence (no unknown_evidence) | O1 |
+| Report seal_violation instead of clock_regression for the overlapping arrival fault | O1 |
+| Hold an early valid CN instead of faulting and rejecting it | G1 |
+| Accept late TRY as harmless or idempotent | G2 |
+| Enforce late-TRY ordering only for active admission, ignoring ADMIT recorded under the latch | G2 prefixed variant |
+| Fault late TRY after numerical ADMIT but retain its contradicted committed bound | G2b |
+| Revoke a route-(c) proof solely because its historical TRY arrives late | G2: require no O! |
+| Commit or report discharge alongside a bound in the same attempt | G3 |
+| Commit discharge after an already committed bound | N6, P3 |
+| Promote retained terminal evidence after revoking the bound | G3 revocation variant |
+| Preserve discharge after a conflicting terminal timestamp or EXIT identity | G4 |
+| Preserve discharge after unresolved contradicts its committed matched disposition | G4b |
+| Reject valid discovery ADMIT solely because EXIT already released | G5, G7 |
+| Ignore retained NULL qualification when validating numerical ADMIT | G6 |
+| Replace or supplement committed discharge with a later bound | G7 |
+| Use a held release's prospective bound to close on a later terminal control | G8 |
+| Let a diagnostic cutoff bypass closure's completed-release requirements | G8 |
+| Prevent a valid late terminal discharge merely because another batch is held | G8 |
 
 Pointer-ABA, stale-marker refresh, all-emission-site cookie consistency, writer synchronization and actual EL8 verifier acceptance remain producer qualification obligations. Their qualification fixtures must exercise the corresponding physical operation; merge oracle agreement alone cannot mark them qualified.
 
