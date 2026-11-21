@@ -336,8 +336,7 @@ clean-box: clean
 #                  instead of competing (issue: raising the in-flight-agent
 #                  limit to three). Escape hatch for a human, never agents:
 #                  PGWT_SKIP_CHECK_LOCK=1 (mirrors PGWT_SKIP_PUSH_GUARD).
-#   check-fast     node + go + py_compile only (seconds) -- NOT locked,
-#                  it's the sub-second interactive loop
+#   check-fast     cheap guards + slow suites covering branch changes; not locked
 #   box-check      live tier on an x86 Linux box: OS=ubuntu|el8|el9 PG=<major>
 #                  EPHEMERAL=1: throwaway Hetzner VM from the gate-box
 #                  snapshot, created/run/rsynced/deleted for this one run
