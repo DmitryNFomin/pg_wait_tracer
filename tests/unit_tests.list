@@ -1118,6 +1118,10 @@ coverage_verdict_mutants.py
 # Refs #947: coverage label U1, trace v6 COVERAGE records (codec, writer,
 # master-path tracker, v4-era read paths) and the block-type dispatch guard.
 test_coverage_writer
+# Refs #933: A2 carrier bytes, durability/failure paths and required mutants.
+test_coverage_a2_codec
+test_coverage_a2_writer_io
+coverage_a2_codec_mutants.py
 test_block_type_sites.py
 
 # Stateless evidence-v1 fixture-to-screen pilot and consumer boundary.

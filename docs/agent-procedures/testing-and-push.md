@@ -46,7 +46,17 @@
   logic in pure builders with a `tests/web_unit/*.test.mjs` case.
 - Use `[skip ci]` only for docs-only commits.
 - Before every push, run `make check-fast`; its stamp satisfies the pre-push hook.
-  The full suite runs in CI as `full-check`, which a PR must pass to merge.
+  It runs the cheap guards and the slow suites whose declared globs match paths
+  changed since the merge base with `origin/master`: branch commits, staged and
+  unstaged edits, and untracked files that Git does not ignore. A skipped suite
+  still runs in CI's `full-check`, which runs everything and must pass to merge.
+  Keep `scripts/check.sh` out of blanket slow-suite globs so adding test steps
+  preserves fast local selection; CI's required `full-check` runs every step
+  in full mode and catches wiring mistakes.
+  Missing/unusable merge-base history (including a shallow clone) or failure to
+  enumerate paths runs every slow suite and prints the reason. Set
+  `PGWT_CHECK_FAST_ALL=1 make check-fast` to force every slow suite locally;
+  `make check` always runs the full local tier.
   Never bypass the guard (`PGWT_SKIP_PUSH_GUARD` is for humans). `make check`
   itself queues for a machine-wide lock through `scripts/check-lock.sh`; never
   bypass it (`PGWT_SKIP_CHECK_LOCK=1` is for humans).

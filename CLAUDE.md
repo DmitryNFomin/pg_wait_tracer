@@ -38,7 +38,7 @@ Not tag-blockers: process tooling/dashboards, coverage for unshipped defects, do
 
 | Command | Runs where / evidence | When |
 |---|---|---|
-| `make check-fast` | Mac: builders, Go, Python; stamp satisfies pre-push hook | Before every push; full suite runs in CI's `full-check`, required to merge |
+| `make check-fast` | Mac: cheap guards plus slow suites whose files the branch changed; stamp satisfies pre-push hook | Before every push; full suite runs in CI's `full-check`, required to merge |
 | `make box-check [OS=el8\|el9\|ubuntu] [PG=13\|16\|17\|18]` | x86 Linux: build, C, synthetic, protocol, real PG + live UI | Before every PR; CI runs EL8 box tier for `src/` PRs on the EL8 box; `EPHEMERAL=1` only by VM rules below |
 | `make ui-gallery [BASE=ref]` | Mac: `tests/results/ui_gallery/index.html` + `summary.json` | Every PR touching `web/` |
 
