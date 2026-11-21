@@ -95,9 +95,9 @@ Additional schedules: cookie-less EXIT before identity installation retains
 one census lifetime and waits for its matching retained terminal witness. It
 discharges only after successful EXIT publication; rejection leaves pending 1.
 An EXIT published before terminal-control delivery is retained and reconciled
-when the matching control arrives, including after an independent counter
-fault and explicit REARM. The counter fault is retained; rejected EXITs
-remain undischargeable. A reserved but uninstalled cookie cannot
+when the matching control arrives, after a fully successful release attempt. An EXIT from a VOIDed attempt
+remains undischargeable after REARM in either TERM/EXIT order; lifecycle
+history still prevents resurrection and permits a distinct replacement. A reserved but uninstalled cookie cannot
 authorize AB. Duplicate AB still observes changed counters. Shared metadata
 publishes normally and is never counted as an abandonment discard.
 
@@ -148,3 +148,97 @@ AB's inventory/open-gap facts are resolved by capture, not trusted from its
 caller. Exclusive abandoned TEXT must carry its retained pid/cookie and the
 exclusive_text attribution fact; shared metadata leaves that fact false.
 These are consumer inputs, not a census, identity-installation or BPF mechanism.
+
+Round 4: final terminal disposition and release attempts
+T1-T4: the complete frozen output, uncovered +1 (once), unchanged census and
+inventory, unresolved P=1, source/frontier unblocking and open persisted reader
+gap are checked. T2 finishes at 50 with unknown_evidence; no idle/boundary can
+substitute for disposition. T3 rejects matched-after-unresolved. T4 retains
+pre-arrival disposition. Named duplicate/reverse cases cover idempotence and
+unresolved-after-matched as well.
+TERMU is PGWT_DISC_TERMINAL_UNRESOLVED on pgwt_capture_discovery_control,
+naming the raw EXIT by pid/terminal_time against the reserved inventory cookie.
+It is an administrative control with no position or completeness boundary.
+The uncovered EXIT consumes its original position through PGWT_MERGE_UNCOVERED,
+without DATA or a boundary and without the late-unlisted inventory path.
+TERMINAL with terminal_binding_proved=false still means unproved evidence
+(such as ESRCH), not a final unresolved disposition; it cannot release the EXIT.
+V1-V4: full outputs/counter vectors, open reader gap and P=1 are checked both
+before and after explicit REARM. These cover the EXIT counter checkpoint,
+later rejected DATA, rejected FRONTIER and both TERM/EXIT orders. The named
+G_discharge_frontier_checkpoint also faults after a successfully output F18.
+The A03 adversarial assertion is inverted: a VOIDed EXIT cannot discharge;
+its retained lifecycle history still permits the separate replacement lifetime.
+The unmodified A03/A20 oracle answers retain G(19)/G(18), respectively.
+The two bound_rejected_* cases were written first and both failed on the
+original code: after a successful fresh anchor, a rejected later record or
+FRONTIER left its lower bound committed. The fix advances a prospective bound
+for subsequent output labels but commits only after the entire attempt.
+G_endpoint_overflow directly exercises the factored checked endpoint arithmetic:
+C=UINT64_MAX with increment supplies no endpoint and leaves the output unchanged;
+UINT64_MAX without increment and UINT64_MAX-1 with increment remain valid.
+A real strict frontier cannot exceed UINT64_MAX; this arithmetic case does not
+fabricate an impossible live frontier or claim producer qualification.
+
+Round-4 removal/failure mutants and intended row/case (all require a built
+binary, REACHED and the exact assertion; the runner verifies those conditions):
+- a_abandoned_after_terminal_arrival: G_after_terminal_arrival — guard complete expected output.
+- b_terminal_uncertified_check: G_consumed_past_terminal — guard complete expected output.
+- c_confirm_staged_reconcile: G_confirm_staged_attempt — guard complete expected output.
+- d_post_batch_reconcile: G_batch_staged_attempt — guard complete expected output.
+- e_ambiguous_terminal_match: G_ambiguous_terminal_owner — guard complete expected output.
+- i_abandoned_rank: G_abandoned_fork — guard complete expected output.
+- j_exclusive_text_owner: G_exclusive_text_binding — guard complete expected output.
+- k_cookieless_exit_uncovered: T2 — cookie-less EXIT and frontier wait only for disposition.
+- l_terminal_time_match: G_cookie_less_time_match — cookie-less EXIT must match terminal time before binding.
+- m_exit_time_mismatch: G_exit_time_conflict — guard complete expected output.
+- o_capture_terminal_conflict: G_terminal_control_conflict — guard complete expected output.
+- r_overflow_close: G_endpoint_overflow — overflow supplies no persisted endpoint.
+- i_abandoned_init_rank: G_abandoned_init — guard complete expected output.
+- release_held_EXIT_on_boundary: T2 — cookie-less EXIT and frontier wait only for disposition.
+- unresolved_through_late_unlisted: T1 — unresolved disposition preserves inventory.
+- matched_after_unresolved: T3 — complete output sequence with counter labels.
+- unresolved_after_matched: G_matched_then_unresolved — guard complete expected output.
+- reapply_unresolved_duplicate: G_unresolved_duplicate — duplicate unresolved disposition never recounts EXIT.
+- discharge_VOIDed_EXIT_suffix: V1 — full gap state and census.
+- discharge_depends_on_TERM_order: V2 — full gap state and census.
+- discharge_before_later_rejection: V3 — VOIDed release attempt commits no terminal discharge.
+- discharge_before_FRONTIER_rejection: V4 — VOIDed release attempt commits no terminal discharge.
+- lower_bound_before_later_rejection: bound_rejected_later_record — VOIDed release commits no fresh lower bound.
+- lower_bound_before_FRONTIER_rejection: bound_rejected_frontier — VOIDed release commits no fresh lower bound.
+- forget_prearrival_disposition: T4 — unresolved EXIT counted exactly once as uncovered.
+- finish_without_disposition: T2 — complete output sequence with counter labels.
+- discharge_before_frontier_checkpoint: G_discharge_frontier_checkpoint — VOIDed release attempt commits no terminal discharge.
+
+G_missing_disposition_after_fault: a retained raw EXIT still requires its final
+disposition when another fault has suspended capture. Finish publishes the
+original allocation_fail followed by unknown_evidence at 50, with the reader
+gap open and census unchanged. The pre-fix probe emitted only allocation_fail.
+- forget_missing_disposition_on_suspension: G_missing_disposition_after_fault — guard complete expected output.
+
+Suspended receipts keep their raw EXIT until disposition. A VOID-counted EXIT
+is reclassified from dropped to uncovered on unresolved, preserving the wire
+identity. Retained token ownership is checked before removing any arrival: a
+newer record may have reused the slot after VOID/REARM. Unknown bookkeeping
+ownership is an internal fault, never unsigned counter underflow. The pre-fix
+probe had payload=1, dropped=1, uncovered=1 for that one EXIT.
+- double_count_unresolved_after_fault: G_unresolved_after_fault — unresolved EXIT counted once after fault.
+- forget_unresolved_receipt_drop: G_unresolved_received_suspended — unresolved EXIT counted once after fault.
+- remove_reused_arrival_owner_check: G_unresolved_reused_token — unresolved EXIT preserves reused arrival token.
+- underflow_unresolved_drop_count: G_unresolved_bad_drop_count — guard complete expected output.
+- release_raw_EXIT_during_suspension: G_missing_disposition_during_suspension — guard complete expected output.
+
+G_unresolved_reused_position also reuses the old token on the lifecycle source
+for a distinct FORK at a later position; both source and position must match.
+- remove_reused_arrival_position_check: G_unresolved_reused_position — unresolved EXIT preserves reused arrival token.
+
+Untimed TEXT's ignored rank/timestamp fields cannot stand in for lifecycle EXIT.
+G_untimed_text_no_discharge consumes exclusive metadata with those unused
+fields deliberately nonzero and checks the emitted gap state through the reader.
+- untimed_TEXT_as_terminal_EXIT: G_untimed_text_no_discharge — untimed TEXT never closes startup reader coverage.
+
+G_local_writer_once rejects FRONTIER without an external writer counter, then
+consumes an unresolved EXIT while suspended. Complete output is
+VOID20[Cw,writer_push_fail]; the raw counter remains zero and the adjusted
+observation contains exactly one local failure. Startup coverage stays open.
+- double_local_writer_on_unresolved: G_local_writer_once — unresolved disposition counts local writer failure once.

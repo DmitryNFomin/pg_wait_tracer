@@ -71,4 +71,12 @@ static const struct discovery_expected {
     {"A18", "VOID20[C0,allocation_fail]", -1, -1, -1, 1, 'N', true, 0},
     {"A19", "F15[C0]", -1, -1, -1, 1, 'N', true, 3},
     {"A20", "EXIT_D18 F18[C0] VOID20[C0,unknown_evidence]", 18, 18, -1, 0, 'N', true, 0},
+    {"T1", "F18[C0] A20[T] F20[C0]", -1, -1, -1, 1, 'N', true, 0},
+    {"T2", "VOID50[C0,unknown_evidence]", -1, -1, -1, 1, 'N', true, 0},
+    {"T3", "F18[C0] A20[T] F20[C0] VOID20[C0,unknown_evidence]", -1, -1, -1, 1, 'N', true, 0},
+    {"T4", "F18[C0]", -1, -1, -1, 1, 'N', true, 0},
+    {"V1", "EXIT_D18 VOID20[Ce,counter_change] F19[Ce]", -1, -1, -1, 1, 'N', true, 0},
+    {"V2", "EXIT_D18 VOID20[Ce,counter_change] F19[Ce]", -1, -1, -1, 1, 'N', true, 0},
+    {"V3", "EXIT_D17 VOID20[Cw,writer_push_fail] F19[Cw]", -1, -1, -1, 1, 'N', true, 0},
+    {"V4", "EXIT_D18 VOID20[Cw,writer_push_fail] F19[Cw]", -1, -1, -1, 1, 'N', true, 0},
 };

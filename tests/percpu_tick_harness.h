@@ -33,12 +33,12 @@ static int tick_clock_gettime(clockid_t clock, struct timespec *ts)
 }
 #define clock_gettime tick_clock_gettime
 /* Only the fields used by the verbatim capture poll body below. */
-struct retained {ma_envelope envelope;unsigned char bytes[272];struct retained *next;size_t token;};
+struct retained {ma_envelope envelope;unsigned char bytes[272];struct retained *next;size_t token;bool receipt_dropped;};
 struct pgwt_merge_capture {
     pgwt_merge_observation observation;
     ma_snapshot snapshot;
     pgwt_merge_diagnostics diagnostics;
-    uint64_t last_checkpoint_at,last_service_at;
+    uint64_t last_checkpoint_at,last_service_at,rearm_at;
     bool serviced,finished;
     struct pgwt_transport_budget budget;
     struct pgwt_capture_config config;
@@ -112,8 +112,10 @@ int pgwt_percpu_transport_snapshot(struct pgwt_daemon *d,ma_snapshot *s,uint64_t
 {return pgwt_merge_capture_snapshot(d,s,now);}
 ma_snapshot pgwt_capture_last_snapshot(const struct pgwt_merge_capture *c)
 {(void)c;ma_snapshot s={.valid=true};for(size_t i=0;i<15;++i)s.component_valid[i]=true;return s;}
-static int mapped(struct pgwt_merge_capture *c,const ma_envelope *e,size_t token,uint64_t now,const ma_snapshot **s,bool *hold)
-{(void)c;(void)token;(void)now;(void)s;*hold=false;if(e->kind==MA_CHECK)++core_checks;return 0;}
+static uint64_t get_le(const unsigned char *p,size_t n)
+{uint64_t v=0;for(size_t i=0;i<n;++i)v|=(uint64_t)p[i]<<(8*i);return v;}
+static int mapped(struct pgwt_merge_capture *c,const ma_envelope *e,size_t token,uint64_t now,const ma_snapshot **s,bool *hold,bool receipt_dropped)
+{(void)c;(void)token;(void)now;(void)s;(void)receipt_dropped;*hold=false;if(e->kind==MA_CHECK)++core_checks;return 0;}
 int pgwt_capture_feed(struct pgwt_merge_capture *,const ma_envelope *,size_t,uint64_t,const ma_snapshot **);
 int pgwt_capture_envelope(struct pgwt_merge_capture *c,const ma_envelope *e,uint64_t d,const ma_snapshot *s)
 {return pgwt_capture_feed(c,e,0,d,&s);}

@@ -127,8 +127,9 @@ struct pgwt_capture_config {
 struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *);
 /* Begin boot coverage before advertising it. With discovery_enabled, PID-only
  * entries await lifetime binding and an explicit census. A cookie-less EXIT
- * waits for a matching retained terminal witness, then must publish normally
- * before discharge. Otherwise the existing T-cov scan/EXIT rules apply. */
+ * waits for a final terminal disposition. Matched must complete its release
+ * before discharge; TERMINAL_UNRESOLVED consumes it as uncovered, retaining
+ * the unresolved census entry and open gap. Otherwise T-cov rules apply. */
 int pgwt_capture_coverage_begin(struct pgwt_merge_capture *, uint64_t boot_start,
                                  const uint32_t *pids, size_t count,
                                  void (*persist)(void *, const struct pgwt_capture_gap *));

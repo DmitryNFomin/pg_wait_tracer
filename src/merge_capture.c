@@ -20,6 +20,7 @@ struct retained {
     unsigned char bytes[272];
     struct retained *next;
     size_t token;
+    bool receipt_dropped;
 };
 struct arrival {
     uint64_t source, position, at;
@@ -29,7 +30,7 @@ struct arrival {
 };
 struct discovery_inventory {
     uint64_t pid, cookie;
-    bool terminal_proved, identity_installed;
+    bool terminal_proved, terminal_unresolved, identity_installed;
     uint64_t terminal_at;
 };
 struct pgwt_merge_capture {
@@ -501,10 +502,16 @@ pgwt_capture_discovery_report pgwt_capture_discovery_status(const struct pgwt_me
     for (size_t i = 0; i < c->inventory_count; ++i) {
         pgwt_discovery_state state;
         const struct discovery_inventory *v = &c->inventory[i];
-        if (!v->cookie || !pgwt_merge_discovery_state(c->core, v->pid, v->cookie, &state) ||
+        if (v->terminal_unresolved || !v->cookie || !pgwt_merge_discovery_state(c->core, v->pid, v->cookie, &state) ||
             (!state.has_lower_bound && !state.terminal_released)) ++r.unresolved;
     }
     return r;
+}
+static bool discovery_endpoint(uint64_t close, bool increment, uint64_t *endpoint)
+{
+    if (increment && close == UINT64_MAX) return false;
+    *endpoint = close + (increment ? 1 : 0);
+    return true;
 }
 static int discovery_progress(struct pgwt_merge_capture *c)
 {
@@ -515,7 +522,7 @@ static int discovery_progress(struct pgwt_merge_capture *c)
     for (size_t i = 0; i < c->inventory_count; ++i) {
         pgwt_discovery_state s;
         const struct discovery_inventory *v = &c->inventory[i];
-        if (!v->cookie || !pgwt_merge_discovery_state(c->core, v->pid, v->cookie, &s) ||
+        if (v->terminal_unresolved || !v->cookie || !pgwt_merge_discovery_state(c->core, v->pid, v->cookie, &s) ||
             (!s.has_lower_bound && !s.terminal_released)) return 0;
         uint64_t lower = s.has_lower_bound ? s.lower_bound : s.terminal_time;
         if (lower > close) close = lower;
@@ -531,11 +538,12 @@ static int discovery_progress(struct pgwt_merge_capture *c)
         (void)pgwt_merge_discovery_state(c->core, v->pid, v->cookie, &s);
         if (s.has_uncertified && s.uncertified_through == close) increment = true;
     }
-    if (increment && close == UINT64_MAX) return 0;
+    uint64_t endpoint;
+    if (!discovery_endpoint(close, increment, &endpoint)) return 0;
     /* Only a consumed uncertified numerical record at C excludes its instant.
      * Quiet, census and terminal bounds otherwise persist C unchanged. */
     struct pgwt_capture_gap gap = {.kind = PGWT_CAPTURE_GAP_PREEXISTING_END,
-        .at = close + (increment ? 1 : 0), .detected = c->observation.d};
+        .at = endpoint, .detected = c->observation.d};
     if (!startup_publish(c, gap)) {
         if (c->config.writer_failed) {
             c->config.writer_failed(c->config.ctx);
@@ -685,7 +693,7 @@ int pgwt_capture_discovery_installed(struct pgwt_merge_capture *c, uint64_t pid,
 int pgwt_capture_discovery_control(struct pgwt_merge_capture *c, const pgwt_discovery_attempt *a,
                                    uint64_t d, const ma_snapshot *s)
 {
-    if (!c || !c->config.discovery_enabled || !a) return -EINVAL;
+    if (!c || !c->config.discovery_enabled || !a || c->finished) return -EINVAL;
     pgwt_discovery_attempt control = *a;
     if (a->kind == PGWT_DISC_ABANDON) {
         bool inventoried = false, installed = false, bound = false;
@@ -703,22 +711,34 @@ int pgwt_capture_discovery_control(struct pgwt_merge_capture *c, const pgwt_disc
             .truth = (inventoried ? PGWT_DISC_INVENTORIED : 0) |
                 (c->coverage_begun && !c->startup_closed ? PGWT_DISC_STARTUP_OPEN : 0) |
                 (bound && installed ? PGWT_DISC_IDENTITY_VISIBLE : 0)};
-    } else if (a->cookie >= PGWT_DISCOVERY_COOKIE_MIN) {
+    } else if (a->kind != PGWT_DISC_TERMINAL_UNRESOLVED && a->cookie >= PGWT_DISCOVERY_COOKIE_MIN) {
         int rc = pgwt_capture_discovery_inventory(c, a->pid, a->cookie);
         if (rc < 0) return rc;
     }
-    if (a->kind == PGWT_DISC_TERMINAL && a->terminal_binding_proved) {
+    bool unresolved = a->kind == PGWT_DISC_TERMINAL_UNRESOLVED;
+    if (unresolved || (a->kind == PGWT_DISC_TERMINAL && a->terminal_binding_proved)) {
+        bool found = false;
         for (size_t i = 0; i < c->inventory_count; ++i) {
             struct discovery_inventory *v = &c->inventory[i];
+            /* Different final outcomes for the same raw EXIT contradict even
+             * if the later caller proposes a different reserved cookie. */
+            if (v->pid == a->pid && v->terminal_at == a->terminal_time &&
+                ((v->terminal_proved && unresolved) || (v->terminal_unresolved && !unresolved)))
+                return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);
             if (v->pid == a->pid && v->cookie == a->cookie) {
-                if (v->terminal_proved && v->terminal_at != a->terminal_time)
+                found = true;
+                if ((v->terminal_proved || v->terminal_unresolved) && v->terminal_at != a->terminal_time)
                     return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);
-                v->terminal_proved = true;
+                v->terminal_proved = !unresolved;
+                v->terminal_unresolved = unresolved;
                 v->terminal_at = a->terminal_time;
             }
         }
+        if (!found) return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);
     }
-    ma_envelope e = {.version = 1, .kind = MA_DISCOVERY_CONTROL, .origin = MA_ADMIN,
+    /* Unresolved is capture disposition only; CHECK delivers its observation
+     * and drains the held source without inventing a core lifetime proof. */
+    ma_envelope e = {.version = 1, .kind = unresolved ? MA_CHECK : MA_DISCOVERY_CONTROL, .origin = MA_ADMIN,
         .discovery = control};
     return pgwt_capture_envelope(c, &e, d, s);
 }
@@ -789,7 +809,7 @@ static int acquire_test_attachment(struct pgwt_merge_capture *c, ma_lifetime *l,
     return l->proof == MA_PROVED ? 1 : 0;
 }
 static int mapped(struct pgwt_merge_capture *, const ma_envelope *, size_t,
-                    uint64_t, const ma_snapshot **, bool *);
+                    uint64_t, const ma_snapshot **, bool *, bool);
 int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope *e, uint64_t now, size_t *token)
 {
     if (token) *token = 0;
@@ -952,7 +972,7 @@ int pgwt_capture_received_token(struct pgwt_merge_capture *c, const ma_envelope 
              * one directly, without allocating a retained/arrival slot. */
             const ma_snapshot *snap = pgwt_capture_snapshot(c);
             bool hold;
-            if (mapped(c, e, 0, now, &snap, &hold) < 0) return -EIO;
+            if (mapped(c, e, 0, now, &snap, &hold, true) < 0) return -EIO;
             validated_at_receipt = true;
         }
     }
@@ -993,8 +1013,10 @@ static void retain_snapshot(struct pgwt_merge_capture *c)
 ma_snapshot pgwt_capture_last_snapshot(const struct pgwt_merge_capture *c)
 { return c ? *pgwt_capture_snapshot(c) : (ma_snapshot){0}; }
 static int mapped(struct pgwt_merge_capture *c, const ma_envelope *e,
-                    size_t token, uint64_t d, const ma_snapshot **s, bool *hold)
+                    size_t token, uint64_t d, const ma_snapshot **s, bool *hold,
+                    bool receipt_dropped)
 {
+    *hold = false;
     ma_table t = table(c);
     static const ma_snapshot unknown;
     const ma_snapshot *snap = *s ? *s : &unknown;
@@ -1017,17 +1039,48 @@ static int mapped(struct pgwt_merge_capture *c, const ma_envelope *e,
         !(e->cookie_present && e->cookie)) {
         uint64_t pid = get_le(e->bytes + 4, 4), at = get_le(e->bytes + 16, 8);
         uint64_t cookie = 0;
+        bool unresolved = false;
         for (size_t i = 0; i < c->inventory_count; ++i) {
             const struct discovery_inventory *v = &c->inventory[i];
+            if (v->pid == pid && v->terminal_unresolved && v->terminal_at == at)
+                unresolved = true;
             if (v->pid != pid || !v->terminal_proved || v->terminal_at != at) continue;
             if (cookie && cookie != v->cookie)
                 return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, *s);
             cookie = v->cookie;
         }
+        if (unresolved) {
+            /* This is the original inventoried record, not a late-unlisted
+             * observation. Count once at consumption, release its token and
+             * position, and preserve census completeness/inventory exactly. */
+            observation(c, d, *s);
+            retain_snapshot(c);
+            pgwt_merge_input consumed = {.kind = PGWT_MERGE_UNCOVERED,
+                .source = e->source, .p = e->position, .observation = c->observation};
+            const struct arrival *arrival = token && token <= c->config.capacity ?
+                &c->arrivals[token - 1] : NULL;
+            bool active = arrival && arrival->active &&
+                arrival->source == e->source && arrival->position == e->position;
+            /* VOID may already have accounted this retained envelope as a
+             * drop and recycled its slot. Reclassify that same record once,
+             * and never remove a newer record that reused the arrival slot. */
+            bool counted_drop = receipt_dropped || (token && !active);
+            if (counted_drop) {
+                if (!c->dropped_records)
+                    return pgwt_capture_fault(c, PGWT_MERGE_QUEUE_OWNERSHIP, d, *s);
+                --c->dropped_records;
+            }
+            ++c->uncovered_records;
+            if (active) arrival_remove(c, token, d);
+            *hold = false;
+            pgwt_merge_status status = capture_core_feed(c, &consumed);
+            *s = &c->snapshot;
+            return status == PGWT_MERGE_EXIT_REQUIRED ? -EIO : flush_outputs(c);
+        }
         if (!cookie) {
             ma_envelope check = {.version = 1, .kind = MA_CHECK};
             bool ignored;
-            int rc = mapped(c, &check, 0, d, s, &ignored);
+            int rc = mapped(c, &check, 0, d, s, &ignored, false);
             *hold = true;
             return rc;
         }
@@ -1111,14 +1164,17 @@ static int flush_source(struct pgwt_merge_capture *c, size_t source,
             if (observation_delivered) return 0;
             ma_envelope check = {.version = 1, .kind = MA_CHECK};
             bool hold;
-            return mapped(c, &check, 0, d, s, &hold);
+            return mapped(c, &check, 0, d, s, &hold, false);
         }
         struct retained *n = c->heads[source];
         bool hold;
-        int rc = mapped(c, &n->envelope, n->token, d, s, &hold);
+        int rc = mapped(c, &n->envelope, n->token, d, s, &hold, n->receipt_dropped);
         if (rc < 0) return rc;
         observation_delivered = true;
-        if (hold && pgwt_capture_report(c).status == PGWT_MERGE_OK) {
+        bool terminal_hold = c->config.discovery_enabled && n->envelope.kind == MA_LIFECYCLE &&
+            n->envelope.size == 24 && get_le(n->envelope.bytes, 2) == PGWT_LIFECYCLE_EXIT &&
+            !(n->envelope.cookie_present && n->envelope.cookie);
+        if (hold && (terminal_hold || pgwt_capture_report(c).status == PGWT_MERGE_OK)) {
             c->held[source] = &n->envelope; return 0;
         }
         c->held[source] = NULL;
@@ -1142,7 +1198,7 @@ int pgwt_capture_feed(struct pgwt_merge_capture *c, const ma_envelope *e,
      * a completion fence or periodic checkpoint. */
     if (e->kind != MA_TRACE && e->kind != MA_LIFECYCLE && e->kind != MA_TEXT && e->kind != MA_BOUNDARY) {
         bool hold;
-        int rc = mapped(c, e, 0, d, &current, &hold);
+        int rc = mapped(c, e, 0, d, &current, &hold, false);
         if (rc < 0) return rc;
         for (size_t visited = 0; visited < c->source_count; ++visited) {
             if (c->config.now && pgwt_budget_expired(&c->budget, c->config.now(c->config.ctx))) {
@@ -1165,6 +1221,9 @@ int pgwt_capture_feed(struct pgwt_merge_capture *c, const ma_envelope *e,
     struct retained *n = c->free; c->free = n->next; n->next = NULL;
     n->envelope = *e;
     n->token = token;
+    n->receipt_dropped = !token && e->kind == MA_LIFECYCLE && e->size == 24 &&
+        (pgwt_capture_report(c).status != PGWT_MERGE_OK ||
+         (c->rearm_at && get_le(e->bytes + 16, 8) < c->rearm_at));
     if (e->size) { memcpy(n->bytes, e->bytes, e->size); n->envelope.bytes = n->bytes; }
     if (c->tails[e->source]) c->tails[e->source]->next = n;
     else c->heads[e->source] = n;
@@ -1219,9 +1278,30 @@ static int finish_capture(struct pgwt_merge_capture *c, uint64_t d, const ma_sna
     c->unfinished_records = pgwt_capture_pending_records(c);
     const ma_snapshot *current = s;
     bool hold;
-    int rc = mapped(c, &check, 0, d, &current, &hold);
+    int rc = mapped(c, &check, 0, d, &current, &hold, false);
     if (rc < 0) return rc;
-    if (pgwt_capture_waiting(c)) rc = pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);
+    /* Suspension discards numerical trust, not the producer's obligation to
+     * dispose of a retained raw EXIT. waiting() deliberately ignores a
+     * suspended queue, so check these controls independently at finish. */
+    bool missing_disposition = false;
+    if (c->config.discovery_enabled) for (size_t source = 0; source < c->source_count; ++source)
+        for (const struct retained *n = c->heads[source]; n; n = n->next) {
+            const ma_envelope *e = &n->envelope;
+            if (e->kind != MA_LIFECYCLE || e->size != 24 ||
+                get_le(e->bytes, 2) != PGWT_LIFECYCLE_EXIT ||
+                (e->cookie_present && e->cookie)) continue;
+            bool inventoried = false, disposed = false;
+            uint64_t pid = get_le(e->bytes + 4, 4), at = get_le(e->bytes + 16, 8);
+            for (size_t i = 0; i < c->inventory_count; ++i) {
+                const struct discovery_inventory *v = &c->inventory[i];
+                if (v->pid != pid) continue;
+                inventoried = true;
+                disposed = disposed || ((v->terminal_proved || v->terminal_unresolved) && v->terminal_at == at);
+            }
+            missing_disposition = missing_disposition || (inventoried && !disposed);
+        }
+    if (missing_disposition || pgwt_capture_waiting(c))
+        rc = pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);
     return rc;
 }
 int pgwt_capture_finish(struct pgwt_merge_capture *c, uint64_t d, const ma_snapshot *s)

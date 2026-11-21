@@ -28,7 +28,7 @@ MUTANTS = [
      '(f.known & f.truth & required)', '(f.truth & required)',
      'D04a-binding', 'exact merge outputs'),
     ('first_fresh_certified', 'src/core/merge.c',
-     '(published->discovery.has_lower_bound || quiet)', 'true',
+     '(planned->discovery.has_lower_bound || quiet)', 'true',
      'D01', 'exact merge outputs'),
     ('stale_marker_baseline', 'src/core/merge.c',
      '!published->quiet_ready && (!v->record.discovery.marker ||',
@@ -63,7 +63,7 @@ MUTANTS = [
      'W > a->discovery.baseline.t;', 'W >= a->discovery.baseline.t;',
      'D02a', 'unresolved lifetime count'),
     ('never_C_plus_one', 'src/merge_capture.c',
-     '.at = close + (increment ? 1 : 0),', '.at = close,',
+     '*endpoint = close + (increment ? 1 : 0);', '*endpoint = close + (increment ? 0 : 0);',
      'D01', 'reader availability at semantic C'),
     ('revoke_at_detection', 'src/merge_capture.c',
      '.at = c->coverage_boot_start, .detected = now}', '.at = now, .detected = now}',
@@ -133,8 +133,8 @@ MUTANTS = [
 
     # Persisted endpoints and permanent abandonment, Decisions 41-42/45.
     ('always_C_plus_one', 'src/merge_capture.c',
-     '.at = close + (increment ? 1 : 0),',
-     '.at = close + 1,',
+     '*endpoint = close + (increment ? 1 : 0);',
+     '*endpoint = close + 1;',
      'Q01', 'persisted startup endpoint and publication time'),
     ('ignore_earlier_attempt_endpoint', 'src/core/merge.c',
      '(discovery_transition || discard) && !out.prior_interval_certified',
@@ -312,14 +312,154 @@ MUTANTS = [
      'v->record.t > a->terminal_at)',
      'false)',
      'A03', 'terminal proof reconciles staged records beyond EXIT before discharge'),
-    ('forget_published_EXIT_on_counter_fault', 'src/core/merge.c',
-     'if (published && !v->text && v->record.rank == PGWT_MERGE_EXIT) {',
-     'if (published && !v->text && v->record.rank == PGWT_MERGE_EXIT && same_counters(obs.counters, m->baseline)) {',
-     'A03', 'successful EXIT survives counter fault for later terminal reconciliation'),
     ('omit_abandonment_from_wire_identity', 'src/merge_capture.c',
      'controls + rejected +\n        s.discovery_abandoned_records;',
      'controls + rejected;',
      'A01', 'wire identity accounts for consumed abandonment separately'),
+    ('a_abandoned_after_terminal_arrival', 'src/core/merge.c',
+     '    if (a->discovery.abandoned && a->terminal_proved && r->t > a->terminal_at)\n        return false;\n',
+     '',
+     'G_after_terminal_arrival', 'guard complete expected output'),
+    ('b_terminal_uncertified_check', 'src/core/merge.c',
+     '            if (a->discovery.has_uncertified &&\n                a->discovery.uncertified_through > a->terminal_at)\n                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);\n',
+     '',
+     'G_consumed_past_terminal', 'guard complete expected output'),
+    ('c_confirm_staged_reconcile', 'src/core/merge.c',
+     '              r->t >= w->e) && r->t > w->t)\n            return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);',
+     '              r->t >= w->e) && r->t > w->t)\n            continue;',
+     'G_confirm_staged_attempt', 'guard complete expected output'),
+    ('d_post_batch_reconcile', 'src/core/merge.c',
+     '    if (reconcile_discovery) {',
+     '    if (false && reconcile_discovery) {',
+     'G_batch_staged_attempt', 'guard complete expected output'),
+    ('e_ambiguous_terminal_match', 'src/merge_capture.c',
+     '            if (cookie && cookie != v->cookie)\n                return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, *s);\n',
+     '',
+     'G_ambiguous_terminal_owner', 'guard complete expected output'),
+    ('i_abandoned_rank', 'src/core/merge.c',
+     '            if (r->rank != PGWT_MERGE_TRANS && r->rank != PGWT_MERGE_EXIT)\n                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);',
+     '            ;',
+     'G_abandoned_fork', 'guard complete expected output'),
+    ('j_exclusive_text_owner', 'src/core/merge_adapter.c',
+     'if (!owner || !owner->identity_bound || record.g < PGWT_DISCOVERY_COOKIE_MIN)',
+     'if ((void)owner, record.g < PGWT_DISCOVERY_COOKIE_MIN)',
+     'G_exclusive_text_binding', 'guard complete expected output'),
+    ('k_cookieless_exit_uncovered', 'src/merge_capture.c',
+     '                uncovered = false;\n                break;',
+     '                break;',
+     'T2', 'cookie-less EXIT and frontier wait only for disposition'),
+    ('l_terminal_time_match', 'src/merge_capture.c',
+     'if (v->pid != pid || !v->terminal_proved || v->terminal_at != at) continue;',
+     'if ((void)at, v->pid != pid || !v->terminal_proved) continue;',
+     'G_cookie_less_time_match', 'cookie-less EXIT must match terminal time before binding'),
+    ('m_exit_time_mismatch', 'src/core/merge.c',
+     '                if (a->exit_record.t != a->terminal_at)\n                    return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);\n',
+     '',
+     'G_exit_time_conflict', 'guard complete expected output'),
+    ('o_capture_terminal_conflict', 'src/merge_capture.c',
+     '                if ((v->terminal_proved || v->terminal_unresolved) && v->terminal_at != a->terminal_time)\n                    return pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);\n',
+     '',
+     'G_terminal_control_conflict', 'guard complete expected output'),
+    ('r_overflow_close', 'src/merge_capture.c',
+     '    if (increment && close == UINT64_MAX) return false;\n',
+     '',
+     'G_endpoint_overflow', 'overflow supplies no persisted endpoint'),
+    ('i_abandoned_init_rank', 'src/core/merge.c',
+     '            if (r->rank != PGWT_MERGE_TRANS && r->rank != PGWT_MERGE_EXIT)\n                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);',
+     '            ;',
+     'G_abandoned_init', 'guard complete expected output'),
+    ('release_held_EXIT_on_boundary', 'src/merge_capture.c',
+     '            *hold = true;\n            return rc;',
+     '            *hold = false;\n            return rc;',
+     'T2', 'cookie-less EXIT and frontier wait only for disposition'),
+    ('unresolved_through_late_unlisted', 'src/merge_capture.c',
+     '            ++c->uncovered_records;',
+     '            ++c->uncovered_records; c->census_complete = false; c->inventory[c->inventory_count++] = (struct discovery_inventory){.pid = pid};',
+     'T1', 'unresolved disposition preserves inventory'),
+    ('matched_after_unresolved', 'src/merge_capture.c',
+     '((v->terminal_proved && unresolved) || (v->terminal_unresolved && !unresolved))',
+     '(v->terminal_proved && unresolved)',
+     'T3', 'complete output sequence with counter labels'),
+    ('unresolved_after_matched', 'src/merge_capture.c',
+     '((v->terminal_proved && unresolved) || (v->terminal_unresolved && !unresolved))',
+     '(v->terminal_unresolved && !unresolved)',
+     'G_matched_then_unresolved', 'guard complete expected output'),
+    ('reapply_unresolved_duplicate', 'src/merge_capture.c',
+     '                found = true;',
+     '                found = true; if (unresolved && v->terminal_unresolved) ++c->uncovered_records;',
+     'G_unresolved_duplicate', 'duplicate unresolved disposition never recounts EXIT'),
+    ('discharge_VOIDed_EXIT_suffix', 'src/core/merge.c',
+     'planned->exit_release_committed = true;',
+     'planned->exit_release_committed = true; published->exit_release_committed = true;',
+     'V1', 'full gap state and census'),
+    ('discharge_depends_on_TERM_order', 'src/core/merge.c',
+     'planned->exit_release_committed = true;',
+     'planned->exit_release_committed = true; published->exit_release_committed = true;',
+     'V2', 'full gap state and census'),
+    ('discharge_before_later_rejection', 'src/core/merge.c',
+     'planned->discovery.terminal_released = true;',
+     'published->discovery.terminal_released = true; planned->discovery.terminal_released = true;',
+     'V3', 'VOIDed release attempt commits no terminal discharge'),
+    ('discharge_before_FRONTIER_rejection', 'src/core/merge.c',
+     'planned->discovery.terminal_released = true;',
+     'published->discovery.terminal_released = true; planned->discovery.terminal_released = true;',
+     'V4', 'VOIDed release attempt commits no terminal discharge'),
+    ('lower_bound_before_later_rejection', 'src/core/merge.c',
+     'planned->discovery.has_lower_bound = true;',
+     'published->discovery.has_lower_bound = true; planned->discovery.has_lower_bound = true;',
+     'bound_rejected_later_record', 'VOIDed release commits no fresh lower bound'),
+    ('lower_bound_before_FRONTIER_rejection', 'src/core/merge.c',
+     'planned->discovery.has_lower_bound = true;',
+     'published->discovery.has_lower_bound = true; planned->discovery.has_lower_bound = true;',
+     'bound_rejected_frontier', 'VOIDed release commits no fresh lower bound'),
+    ('forget_prearrival_disposition', 'src/merge_capture.c',
+     'v->terminal_unresolved = unresolved;',
+     'v->terminal_unresolved = unresolved && c->retained_count != 0;',
+     'T4', 'unresolved EXIT counted exactly once as uncovered'),
+    ('finish_without_disposition', 'src/merge_capture.c',
+     '    if (missing_disposition || pgwt_capture_waiting(c))',
+     '    if (false)',
+     'T2', 'complete output sequence with counter labels'),
+    ('discharge_before_frontier_checkpoint', 'src/core/merge.c',
+     '        /* Published frontier counter checkpoint. */',
+     '        for (size_t i = 0; i < m->touched_count; ++i) { m->attachments[m->touched[i]].discovery = m->prospective[i].discovery; m->attachments[m->touched[i]].exit_release_committed = m->prospective[i].exit_release_committed; }\n        /* Published frontier counter checkpoint. */',
+     'G_discharge_frontier_checkpoint', 'VOIDed release attempt commits no terminal discharge'),
+    ('forget_missing_disposition_on_suspension', 'src/merge_capture.c',
+     '    if (missing_disposition || pgwt_capture_waiting(c))',
+     '    if ((void)missing_disposition, pgwt_capture_waiting(c))',
+     'G_missing_disposition_after_fault', 'guard complete expected output'),
+    ('double_count_unresolved_after_fault', 'src/merge_capture.c',
+     '                --c->dropped_records;',
+     '                (void)c->dropped_records;',
+     'G_unresolved_after_fault', 'unresolved EXIT counted once after fault'),
+    ('forget_unresolved_receipt_drop', 'src/merge_capture.c',
+     'n->receipt_dropped = !token &&',
+     'n->receipt_dropped = false && !token &&',
+     'G_unresolved_received_suspended', 'unresolved EXIT counted once after fault'),
+    ('remove_reused_arrival_owner_check', 'src/merge_capture.c',
+     'arrival->source == e->source &&',
+     'true &&',
+     'G_unresolved_reused_token', 'unresolved EXIT preserves reused arrival token'),
+    ('underflow_unresolved_drop_count', 'src/merge_capture.c',
+     '                if (!c->dropped_records)\n                    return pgwt_capture_fault(c, PGWT_MERGE_QUEUE_OWNERSHIP, d, *s);\n',
+     '',
+     'G_unresolved_bad_drop_count', 'guard complete expected output'),
+    ('release_raw_EXIT_during_suspension', 'src/merge_capture.c',
+     'bool terminal_hold = c->config.discovery_enabled &&',
+     'bool terminal_hold = false && c->config.discovery_enabled &&',
+     'G_missing_disposition_during_suspension', 'guard complete expected output'),
+    ('remove_reused_arrival_position_check', 'src/merge_capture.c',
+     ' && arrival->position == e->position;',
+     ';',
+     'G_unresolved_reused_position', 'unresolved EXIT preserves reused arrival token'),
+    ('untimed_TEXT_as_terminal_EXIT', 'src/core/merge.c',
+     'if (published && !v->text && v->record.rank == PGWT_MERGE_EXIT && published->terminal_proved &&',
+     'if (published && v->record.rank == PGWT_MERGE_EXIT && published->terminal_proved &&',
+     'G_untimed_text_no_discharge', 'untimed TEXT never closes startup reader coverage'),
+    ('double_local_writer_on_unresolved', 'src/merge_capture.c',
+     '            observation(c, d, *s);\n            retain_snapshot(c);',
+     '            observation(c, d, snap);\n            retain_snapshot(c);',
+     'G_local_writer_once', 'unresolved disposition counts local writer failure once'),
 ]
 
 
@@ -339,7 +479,7 @@ def build(tree):
 
 def check_oracle_inventory():
     def markdown(path):
-        return dict(re.findall(r'^\| ([DQA][^ |]+) \| (.*?) \|$', path.read_text(), re.M))
+        return dict(re.findall(r'^\| ([DQATV][^ |]+) \| (.*?) \|$', path.read_text(), re.M))
     rows = markdown(ROOT / 'contracts/merge-v1/oracle-discovery/ROWS.md')
     answers = markdown(ROOT / 'contracts/merge-v1/oracle-discovery/EXPECTED.md')
     table = []
@@ -347,17 +487,17 @@ def check_oracle_inventory():
         if line.startswith('    {'):
             table.append(json.loads('[' + line.strip()[1:-2] + ']'))
     ids = [row[0] for row in table]
-    assert len(ids) == len(set(ids)) == 62
+    assert len(ids) == len(set(ids)) == 70
     assert set(ids) == set(rows) == set(answers), 'oracle row IDs drifted'
     assert all(inputs == rows[key] and answer == answers[key] for key, inputs, answer in table)
     expected_text = (ROOT / 'tests/discovery_oracle_expected.h').read_text()
-    structured_rows = re.findall(r'^    \{"([DQA][^"]+)", "([^"]*)",', expected_text, re.M)
+    structured_rows = re.findall(r'^    \{"([DQATV][^"]+)", "([^"]*)",', expected_text, re.M)
     structured = dict(structured_rows)
     assert len(structured_rows) == len(structured) == len(rows), 'duplicate or missing structured row'
     assert set(structured) == set(rows), 'structured expected row IDs drifted'
     states = dict((key, (int(persisted), int(pending), int(abandoned)))
         for key, persisted, pending, abandoned in re.findall(
-            r'^    \{"([DQA][^"]+)", "[^"]*", -?\d+, (-?\d+), -?\d+, (\d+), \'[FQN]\', (?:true|false), (\d+)\},$',
+            r'^    \{"([DQATV][^"]+)", "[^"]*", -?\d+, (-?\d+), -?\d+, (\d+), \'[FQN]\', (?:true|false), (\d+)\},$',
             expected_text, re.M))
     assert set(states) == set(rows), 'structured state row IDs drifted'
     for key, answer in answers.items():
@@ -367,8 +507,14 @@ def check_oracle_inventory():
             sequence = next((code for code in codes if re.fullmatch(r'F\d+', code)), '')
         if key == 'D10':
             sequence = 'D12[U] → D15[T] → F15 → F30'
+        if key == 'T1':
+            sequence = 'F18 A20[T] F20'
+        if key == 'T3':
+            sequence = 'F18 A20[T] F20 VOID20[C0,unknown_evidence]'
         sequence = ' '.join(sequence.replace('→', ' ').split())
         sequence = re.sub(r'\bF(\d+)\b', r'F\1[C0]', sequence)
+        if key.startswith('V'):
+            sequence = sequence.replace('F19[C0]', 'F19[' + ('Ce' if key in ('V1', 'V2') else 'Cw') + ']')
         assert structured[key] == sequence, (key, structured[key], sequence)
         gap_ends = re.findall(r'G\((open|\d+)\)', answer)
         persisted = int(gap_ends[-1]) if gap_ends and gap_ends[-1] != 'open' else -1
@@ -376,12 +522,13 @@ def check_oracle_inventory():
         abandoned = re.findall(r'abandoned=(\d+)', answer)
         assert states[key] == (persisted, int(pending[-1]) if pending else 1,
                                int(abandoned[-1]) if abandoned else 0), (key, states[key])
-    print('discovery frozen table: 62/62 IDs and verbatim inputs/answers match', flush=True)
+    print('discovery frozen table: 70/70 IDs and verbatim inputs/answers match', flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mutants', action='store_true')
+    parser.add_argument('--mutant', action='append', choices=[m[0] for m in MUTANTS], default=[])
     args = parser.parse_args()
     check_oracle_inventory()
     with tempfile.TemporaryDirectory(prefix='pgwt-discovery-') as temporary:
@@ -392,8 +539,9 @@ def main():
                      'test_core_merge_adapter.c', 'test_core_merge_contract.c', 'merge_adapter_goldens.h']:
             shutil.copy2(ROOT / 'tests' / name, tree / 'tests' / name)
         print(run([str(build(tree))], tree).stdout, end='', flush=True)
-        if args.mutants:
-            for name, path, before, after, row, assertion in MUTANTS:
+        if args.mutants or args.mutant:
+            selected = [m for m in MUTANTS if args.mutants or m[0] in args.mutant]
+            for name, path, before, after, row, assertion in selected:
                 patches = [(path, before, after)] if isinstance(before, str) else before
                 originals = {}
                 try:
@@ -414,7 +562,7 @@ def main():
                 finally:
                     for file, source in originals.items():
                         file.write_text(source)
-            print(f'discovery mutants: {len(MUTANTS)}/{len(MUTANTS)} RED; built, reached named row, intended assertion', flush=True)
+            print(f'discovery mutants: {len(selected)}/{len(selected)} RED; built, reached named row, intended assertion', flush=True)
     print('Physical producer assertions not encoded: see tests/discovery_oracle_assertions.txt', flush=True)
 
 

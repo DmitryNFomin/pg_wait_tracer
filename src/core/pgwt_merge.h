@@ -63,7 +63,10 @@ typedef enum {
     PGWT_MERGE_LOSS, PGWT_MERGE_FAULT, PGWT_MERGE_CHECK,
     PGWT_MERGE_REARM, PGWT_MERGE_WRITER_REJECTED,
     PGWT_MERGE_ADMIT_DISCOVERY, PGWT_MERGE_CONFIRM_DISCOVERY,
-    PGWT_MERGE_TERMINAL_DISCOVERY, PGWT_MERGE_ABANDON_DISCOVERY
+    PGWT_MERGE_TERMINAL_DISCOVERY, PGWT_MERGE_ABANDON_DISCOVERY,
+    /* A consumed uncovered envelope still owns its position, but contributes
+     * neither DATA nor a boundary. Used for a final unresolved raw EXIT. */
+    PGWT_MERGE_UNCOVERED
 } pgwt_merge_input_kind;
 typedef struct {
     pgwt_merge_input_kind kind;

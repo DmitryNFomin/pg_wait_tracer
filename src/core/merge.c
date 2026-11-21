@@ -17,7 +17,7 @@ struct source_state {
 };
 struct generation_state {
     pgwt_merge_attachment proof;
-    bool lifecycle_seen, sequence_seen, exited;
+    bool lifecycle_seen, sequence_seen, exited, exit_release_committed;
     bool fork_seed_admitted, first_released;
     pgwt_discovery_state discovery;
     bool quiet_pending, quiet_ready, terminal_proved;
@@ -577,8 +577,10 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
             if (a->exited) {
                 if (a->exit_record.t != a->terminal_at)
                     return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
-                a->discovery.terminal_released = true;
-                a->discovery.terminal_time = a->terminal_at;
+                if (a->exit_release_committed) {
+                    a->discovery.terminal_released = true;
+                    a->discovery.terminal_time = a->terminal_at;
+                }
             }
         }
         return m->report.status;
@@ -839,6 +841,13 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
     if ((!m->report.has_frontier || W - 1 > m->report.frontier) &&
         new_frontier_epoch && m->frontier_count == m->config.frontier_capacity)
         return allocation_fault(m, PGWT_POOL_CORE_FRONTIER, obs);
+    /* Validation used prospective anchors to check the whole batch/suffix.
+     * Publication starts from committed discovery state and advances only
+     * this plan. Commit it after ALL callbacks and counter checkpoints. */
+    for (size_t i = 0; i < m->touched_count; ++i) {
+        MERGE_WORK(STATE, 1);
+        m->prospective[i].discovery = m->attachments[m->touched[i]].discovery;
+    }
     for (size_t i = m->first; i != end; i = m->queue_nodes[i].next) {
         MERGE_WORK(QVISIT, 1);
         struct staged *v = &m->queue[i];
@@ -859,9 +868,9 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
             out.prior_interval_certified = !planned->fork_seed_admitted || published->first_released;
             if (discovery_transition) {
                 bool quiet = published->discovery.confirmed || published->quiet_ready;
-                uint64_t base = quiet ? published->discovery.baseline.t : published->discovery.lower_bound;
+                uint64_t base = quiet ? published->discovery.baseline.t : planned->discovery.lower_bound;
                 out.prior_interval_certified = final_record &&
-                    (published->discovery.has_lower_bound || quiet) && v->record.t >= base;
+                    (planned->discovery.has_lower_bound || quiet) && v->record.t >= base;
             }
             if (discard) out.prior_interval_certified = false;
         }
@@ -887,43 +896,48 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
             if (!s->has_uncertified || v->record.t > s->uncertified_through)
                 s->uncertified_through = v->record.t;
             s->has_uncertified = true;
-            planned->discovery = *s;
+            planned->discovery.has_uncertified = s->has_uncertified;
+            planned->discovery.uncertified_through = s->uncertified_through;
         }
-        /* Retain publication evidence even if the following counter check
-         * faults. A later matching terminal proof still needs this EXIT;
-         * a rejected publication never reaches this point. */
+        /* Lifecycle history survives a fault for arrival/replacement checks.
+         * Discharge additionally requires this release attempt to commit. */
         if (published && !v->text && v->record.rank == PGWT_MERGE_EXIT) {
             published->exited = true;
             published->exit_record = v->record;
             published->exit_record.payload = NULL;
+            planned->exit_release_committed = true;
         }
         /* Published DATA counter checkpoint. */
         if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
         if (!same_counters(obs.counters, m->baseline))
             return fault(m, counter_fault(obs.counters, m->observed), obs);
-        if (discovery_transition && final_record && !published->discovery.has_lower_bound &&
+        if (discovery_transition && final_record && !planned->discovery.has_lower_bound &&
             !published->quiet_ready && (!v->record.discovery.marker ||
                                         v->record.discovery.baselines_refreshed)) {
-            published->discovery.has_lower_bound = true;
-            published->discovery.lower_bound = v->record.t;
-            published->discovery.source = v->record.source;
-            published->discovery.position = v->record.o;
-            planned->discovery = published->discovery;
+            planned->discovery.has_lower_bound = true;
+            planned->discovery.lower_bound = v->record.t;
+            planned->discovery.source = v->record.source;
+            planned->discovery.position = v->record.o;
         }
-        if (published && v->record.rank == PGWT_MERGE_EXIT && published->terminal_proved &&
+        if (published && !v->text && v->record.rank == PGWT_MERGE_EXIT && published->terminal_proved &&
             v->record.t == published->terminal_at) {
-            published->discovery.terminal_released = true;
-            published->discovery.terminal_time = published->terminal_at;
-            planned->discovery = published->discovery;
+            planned->discovery.terminal_released = true;
+            planned->discovery.terminal_time = published->terminal_at;
         }
         if (!v->text) { m->last = v->record; m->has_last = true; }
     }
     for (size_t i = 0; i < m->touched_count; ++i) {
         size_t slot = m->touched[i];
+        /* Ordinary lifecycle/sequence publication retains its old semantics.
+         * Discovery and discharge alone wait for the complete attempt. */
+        pgwt_discovery_state committed = m->attachments[slot].discovery;
+        bool exit_committed = m->attachments[slot].exit_release_committed;
         MERGE_WORK(STATE, 1);
         copy_generations(&m->attachments[slot], &m->prospective[i], 1);
+        m->attachments[slot].discovery = committed;
+        m->attachments[slot].exit_release_committed = exit_committed;
     }
-    /* Recycle only after every callback and checkpoint succeeded: fault()
+    /* Recycle only after every DATA callback and checkpoint succeeded: fault()
      * must still see the entire batch if publication stops partway through. */
     for (size_t i = 0; i < eligible; ++i) queue_recycle_min(m);
     uint64_t F = W - 1; /* contract §3 F=W-1; W>0 was proved above */
@@ -943,6 +957,12 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
         if (!same_counters(obs.counters, m->baseline))
             return fault(m, counter_fault(obs.counters, m->observed), obs);
+    }
+    for (size_t i = 0; i < m->touched_count; ++i) {
+        size_t slot = m->touched[i];
+        MERGE_WORK(STATE, 1);
+        m->attachments[slot].discovery = m->prospective[i].discovery;
+        m->attachments[slot].exit_release_committed = m->prospective[i].exit_release_committed;
     }
     size_t *link = &m->quiet_head;
     while (*link) {
@@ -1069,6 +1089,10 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
         }
         break;
     }
+    case PGWT_MERGE_UNCOVERED:
+        if (position(m, in->source, in->p, obs) == PGWT_MERGE_EXIT_REQUIRED)
+            return m->report.status;
+        break;
     case PGWT_MERGE_BOUNDARY:
         if (position(m, in->source, in->p, obs) == PGWT_MERGE_EXIT_REQUIRED)
             return m->report.status;

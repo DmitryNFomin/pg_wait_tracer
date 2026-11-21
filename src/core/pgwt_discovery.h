@@ -59,15 +59,19 @@ typedef struct {
     bool claims_completed_coherence;
 } pgwt_discovery_witness;
 typedef enum {
-    PGWT_DISC_ADMIT, PGWT_DISC_CONFIRM, PGWT_DISC_TERMINAL, PGWT_DISC_ABANDON
+    PGWT_DISC_ADMIT, PGWT_DISC_CONFIRM, PGWT_DISC_TERMINAL, PGWT_DISC_ABANDON,
+    PGWT_DISC_TERMINAL_UNRESOLVED
 } pgwt_discovery_control_kind;
 typedef struct {
     pgwt_discovery_control_kind kind;
     uint64_t pid, cookie, attachment_generation, e;
     pgwt_discovery_facts proof;
     pgwt_discovery_witness witness;
-    /* TERMINAL: retained matching kernel/lifecycle proof (not ESRCH). The
-     * subsequent matching EXIT must release successfully at terminal_time. */
+    /* TERMINAL: retained matching kernel/lifecycle proof (not ESRCH).
+     * false is unproved evidence, NOT a final disposition. An explicit
+     * TERMINAL_UNRESOLVED names the cookie-less EXIT by pid/terminal_time
+     * against the reserved inventory cookie. Both outcomes are final;
+     * duplicates must agree. Discharge requires a complete successful release. */
     uint64_t terminal_time;
     bool terminal_binding_proved;
 } pgwt_discovery_attempt;
