@@ -30,6 +30,23 @@ Notation additions:
 - AB is a control and consumes no transport source position.
 - Every new A row requests the final `discovery_abandoned_records` diagnostic, initially zero.
 - Numerical evaluations and startup-gap observations use the emitted coverage records decoded by the existing reader. Supply otherwise valid coverage, attribution and A2 evidence except for restrictions explicitly present in the row. Do not substitute an in-memory discovery lower bound for the persisted gap.
+- Existing source, counter, detection-time and publication defaults apply. `F0=boot_start=0` in displayed offsets; their absolute clock values are positive. Lifecycle activation completes before `F0`.
+- `TRY_NW_D(e;…)` is an adapter observation of the pointer-watch qualification sequence, not a claimed successful admission and not a wait-word attachment attempt.
+- Its default history is: bound pre-existing leader D; parent postmaster; qualified PG13 logger role 13; pointer watch opened disabled and made visible before enable; successful enable at `e`; pinned NULL read after `e`; completed fence after the read; zero fires through that fence; complete ownership, role, lifecycle and counter proofs.
+- The N-row fixture supplies independently qualified permanent-role entries for logger 13 and stats collector 12. These are synthetic qualification inputs, not a claim that platform qualification has occurred.
+- `NW_De{…}` expands to that physical history, `AD_De{route=c}`, then `CONFIRM_NO_WAIT_WORD(D,α,e,witness,20,C0)`. Overrides describe actual facts; an explicit false completed-proof claim is identified in the row.
+- `PTR_Dt(value)` records a qualified pointer fire at semantic time `t`, observed at detection time 20 with C0 unless overridden. It supplies no implicit transport DATA or boundary.
+- `Cr=C0` except `wait_read_fail=1`; `Ck=C0` except `lifecycle_fork_drop=1`.
+- N rows inspect attempt count, committed bound, persisted gap, role presentation and numerical-population contributions.
+- Unless overridden, J rows replace the default D census with one numeric observation of PID 50: listed at 2, failed open at 3, no bound lifetime, proposed census fence 5.
+- `U` denotes a lifetime subsequently bound to PID 50; its discovery cookie, when installed, is `2^63`. `R=(pid=50,g=1)` denotes a fork-route replacement.
+- `J_U4` supplies a retained kernel witness for PID 50, known start offset −100, leader, parent postmaster, no fork provenance, exit timestamp 4, complete reconciliation through fence 5 and C0. It requests J resolution and a matched disposition for the identified EXIT transport record.
+- `EXIT_U4@L{no cookie}` is that lifecycle DATA. A journal witness supplies no transport position by itself.
+- `G_50` supplies an ESRCH result at 4 after the failed open, no eligible J witness, and a completed lifecycle fence at 5 with unchanged C0 over `[F0,5]`.
+- `R_50{…}` supplies a new pinned binding and completed lifecycle reconciliation through fence 5. All required identity and history facts hold except stated overrides.
+- `KEXIT{…}` exercises the kernel exit filter. It supplies the actual task facts and exposes any emitted records and counter changes to the adapter. Default detection time is 20.
+- All J witnesses retain the corresponding EXIT transport identity. No current-map lookup supplies their identity.
+- In expected states, `P=L+Q` separates unresolved lifetime count L from unresolved numeric-observation count Q. `census=known/unknown` is explicit. Unless listed, no VOID, FAULT, UNTRACED or additional DATA is produced.
 
 | ID | Input sequence / starting-state override |
 |---|---|
@@ -103,3 +120,41 @@ Notation additions:
 | V2 | V1 with `TERM_D18` also delivered before `EXIT_D18@L`. |
 | V3 | `AB_D, TERM_D17, EXIT_D17@L, A18@P0, S(19)`, writer rejects A18 at 20 observing Cw; then `REARM(21,Cw,attachment_proofs), TERM_D17, S(20)`, observations after REARM at 22. |
 | V4 | `AB_D, TERM_D18, EXIT_D18@L, S(19)`, writer rejects F18 at 20 observing Cw; then `REARM(21,Cw,attachment_proofs), TERM_D18, S(20)`, observations after REARM at 22. |
+| N1 | `NW_D6, S(6), S(8)`. D runs during qualification; no inactivity observations or CPU seed are supplied. Inspect individual quantities and population contributions. |
+| N2 | `TRY_NW_D(6;role=client backend, permanent-role proof absent), S(8)`. Pointer remains NULL. |
+| N3 | `TRY_NW_D(6;the only NULL read occurs at 5 before enable), S(8)`. |
+| N4 | `TRY_NW_D(6;one pointer fire at 7 observes NULL; pinned NULL read at 8; completed fence at 9), S(10)`. |
+| N5 | N1's inputs, then `PTR_D12(non-NULL), S(14)`. All observations remain C0; detection time is 20. |
+| N6 | N1's inputs, then `PTR_D12(NULL), TERM_D12, EXIT_D12@L, S(13)`. No mutable numerical state exists. |
+| N7 | `TRY_NW_D(4;role=client backend, permanent-role proof absent), PTR_D9(non-NULL), AD_D12, B_D11{e=12}, S(13)`. The ordinary numerical attachment has one complete quiet-bracket attempt. |
+| N8 | `TRY_NW_D(4;role=client backend, permanent-role proof absent), TERM_D9, EXIT_D9@L, S(10)`. EXIT_D9 carries D's installed discovery cookie `g=2^63`, snapshotted before tombstoning. No wait-word attachment attempt occurs. |
+| N9 | `TRY_NW_D(6;the completion checkpoint observes Cf), CHECK(20,Cf), S(8)`. Subsequent observations use Cf. |
+| N10 | N1's inputs with role changed to the independently qualified stats-collector role 12. |
+| N11 | `TRY_NW_D(6;role=archiver, numeric value 11, no qualified permanent-role entry), S(8)`. |
+| N12 | `NW_D6{pointer watch was silently disabled between enable and the NULL read; AD explicitly claims continuous observation; CONFIRM truthfully records the disabling and makes no claim of completed continuity}, S(8)`. Only AD supplies a false-proof fault; no separate fault report is delivered. |
+| N13 | Census contains D and H. `NW_D6, AD_H8, H10(Y→X)@P0, S(11)`. |
+| N14 | `NW_D6, S(8)`. The writer rejects required supporting no-wait-word coverage evidence before any FRONTIER publication, at detection 20 with Cw. |
+| N15 | `TRY_NW_D(6;required pinned pointer read fails and increments wait_read_fail), CHECK(20,Cr), S(8)`. Subsequent observations use Cr. |
+| N16 | `TRY_NW_D(4;role=authenticating client, permanent-role proof absent, qualified remaining authentication deadline=14), AOP(deadline 14 expires; no initialization or matching terminal evidence), S(16)`. |
+| J1 | `J_U4, EXIT_U4@L{no cookie}, S(4), S(8)`. No `/proc` binding succeeds. |
+| J2 | `G_50, S(8)`. |
+| J3 | Failed open returns ENOENT; `AOP(kill(50,0) at 4 returns 0; no journal witness; completed lifecycle fence 5), S(8)`. |
+| J4 | Failed open returns EACCES; `AOP(kill(50,0) at 4 returns EPERM; no journal witness; completed lifecycle fence 5), S(8)`. |
+| J5 | `G_50{fence observes Cf}, CHECK(20,Cf), S(8)`. Subsequent observations use Cf. |
+| J6 | Journal contains J_U4's task facts, but its relevant producer has entered and not completed. No matching control or lifecycle boundary is supplied. `BOUNDARY(P0,8,p), BOUNDARY(P1,8,p), BOUNDARY(E,8,p)`. |
+| J7 | `KEXIT{pid=tid=tgid=50,parent=postmaster,start offset=0,exit=4,no fork cookie,no earlier accounting of the missing fork}, CHECK(20,Ck), S(8)`. Subsequent observations use Ck. |
+| J8 | Override: complete empty census, no numeric observations. `KEXIT{tid=50,tgid=60,parent=postmaster,start offset=-100,exit=4,no fork cookie,live stale discovery-map entry for 50}, S(8)`. |
+| J9 | Override: complete empty census, no numeric observations. `KEXIT{pid=tid=tgid=50,parent=unrelated,start offset=2,exit=4,no fork cookie,discovery-map tombstone for 50}, S(8)`. |
+| J10 | J9's inputs with a stale live discovery identity instead of the tombstone. |
+| J11 | `KEXIT{pid=tid=tgid=50,parent=postmaster,successfully read raw start value=0 meaning unknown,exit=4,no fork cookie}, S(8)`. Counters remain C0. |
+| J12 | `R_50{current holder R is leader,parent=postmaster,start offset=2,valid fork cookie}, K_R3, R6@P0, S(8)`. Use `H_A2>6 ns`; report R's Decision 25c numerical lower bound and `dN_0,dU_0`. |
+| J13 | `R_50{current holder U is leader,parent=postmaster,start offset=-100,no fork provenance; ordinary discovery binding and installation succeed}, AD_U6, U7(Y→X)@P0, S(8)`. |
+| J14 | `R_50{current holder is a proved non-child; no earlier eligible target terminal witness}, S(8)`. |
+| J15 | `J_U4, EXIT_U4@L{no cookie}, K_R6, R8@P0, S(9)`. R reuses PID 50, starts at 6 and has valid fork provenance. Use `H_A2>6 ns`; report R's Decision 25c numerical lower bound and each lifetime's `N_k,U_k` contributions. |
+| J16 | Override: U is already inventoried with retained kernel start offset −200; census complete. A supplied terminal control explicitly claims that J_U4's start offset −100 matches U. Then `EXIT_U4@L{no cookie}, S(8)`. |
+| J17 | `J_U4`, but its named lifecycle DATA is `EXIT_U5@L{no cookie}`; the terminal control explicitly claims equal journal/DATA timestamps. Then `S(8)`. |
+| J18 | J1's inputs without `S(4)`; the writer rejects EXIT_U4 at detection 20 with Cw. |
+| J19 | J1's inputs without `S(4)`; EXIT_U4 publication succeeds, but the following checkpoint observes Cf at detection 20 before FRONTIER publication. |
+| J20 | J2's inputs, then `LATE_U(40)` for an unlisted pre-existing target lifetime using PID 50. No additional transport DATA is supplied. |
+| J21 | `G_50{the only ESRCH observation occurs at 2 before the failed open at 3}, S(8)`. |
+| J22 | `R_50{current holder R is leader,parent=postmaster,start offset=-100,valid observed fork cookie}, K_R1, R6@P0, S(8)`. Retained history proves this observed fork despite its pre-`F0` task-start timestamp. Use `H_A2>6 ns`; report R's Decision 25c numerical lower bound and `dN_0,dU_0`. |
