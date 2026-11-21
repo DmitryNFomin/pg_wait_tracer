@@ -89,6 +89,7 @@ struct pgwt_merge_capture {
     struct discovery_numeric *numeric;
     size_t numeric_count;
     bool census_declared, lifecycle_lost;
+    bool unresolved_startup_exit; /* DECISION 40: permanent while gap open */
     pgwt_merge_counters census_counters;
     bool census_complete, startup_closed, startup_open_published;
     uint64_t census_fence, startup_closure;
@@ -595,7 +596,8 @@ static bool discovery_endpoint(uint64_t close, bool increment, uint64_t *endpoin
 static int discovery_progress(struct pgwt_merge_capture *c)
 {
     if (!c->config.discovery_enabled || !c->coverage_begun || c->startup_closed || !c->census_complete ||
-        c->preexisting_tracking_failed || pgwt_capture_report(c).status != PGWT_MERGE_OK)
+        c->preexisting_tracking_failed || c->unresolved_startup_exit ||
+        pgwt_capture_report(c).status != PGWT_MERGE_OK)
         return 0;
     if (pgwt_capture_discovery_status(c).unresolved_numeric) return 0;
     uint64_t close = c->census_fence;
@@ -794,6 +796,7 @@ int pgwt_capture_discovery_inventory(struct pgwt_merge_capture *c, uint64_t pid,
             .identity_bound = true};
         c->lifetime_index[slot] = c->lifetime_count;
     }
+    resolved_numeric(c, pid);
     return 0;
 }
 int pgwt_capture_discovery_census(struct pgwt_merge_capture *c, uint64_t fence,
@@ -1293,6 +1296,7 @@ static int mapped(struct pgwt_merge_capture *c, const ma_envelope *e,
             cookie = v->cookie;
         }
         if (unresolved) {
+            if (!c->startup_closed) c->unresolved_startup_exit = true;
             /* This is the original inventoried record, not a late-unlisted
              * observation. Count once at consumption, release its token and
              * position, and preserve census completeness/inventory exactly. */

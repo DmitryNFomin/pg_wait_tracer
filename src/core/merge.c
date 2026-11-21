@@ -547,18 +547,19 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
         switch (d->kind) {
         case PGWT_DISC_TRY_NO_WAIT_WORD:
             if (state->admitted) return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
-            state->pointer_watched = d->no_word.continuous;
+            state->pointer_watched = state->pointer_watched || d->no_word.continuous;
             state->authentication_deadline = d->authentication_deadline;
             return m->report.status;
         case PGWT_DISC_POINTER:
             ++state->pointer_observations;
+            if (!d->pointer_continuous) state->pointer_discontinuous = true;
+            if (d->pointer_read_ok && d->pointer_value) state->pointer_nonnull = true;
             if (state->no_wait_word && (!d->pointer_continuous ||
                 (d->pointer_read_ok && d->pointer_value))) {
                 state->has_lower_bound = state->confirmed = false;
                 a->quiet_ready = false;
                 return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
             }
-            if (d->pointer_read_ok && d->pointer_value) state->pointer_nonnull = true;
             return m->report.status;
         case PGWT_DISC_WAIT_ATTEMPT:
             if (state->admitted || (state->pointer_watched && !state->pointer_nonnull))
@@ -591,7 +592,12 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
     if (!a) return allocation_fault(m, PGWT_POOL_CORE_IDENTITY, obs);
     if (in->kind == PGWT_MERGE_ADMIT_DISCOVERY &&
         (!d->attachment_generation || !pgwt_discovery_has(d->proof, PGWT_DISC_ADMISSION_FACTS) ||
-         (d->route == PGWT_DISC_NO_WAIT_WORD && !no_word_valid(&d->no_word))))
+         (a->terminal_proved && d->e > a->terminal_at) ||
+         (d->route == PGWT_DISC_NO_WAIT_WORD && (!no_word_valid(&d->no_word) ||
+             a->discovery.pointer_nonnull || a->discovery.pointer_discontinuous ||
+             d->e != d->no_word.enable || a->quiet_pending)) ||
+         (d->route == PGWT_DISC_NUMERICAL && a->discovery.pointer_watched &&
+             !a->discovery.pointer_nonnull)))
         return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
     if (in->kind == PGWT_MERGE_CONFIRM_DISCOVERY &&
         !quiet_witness_valid(&d->witness) && d->witness.claims_completed_coherence)
@@ -607,6 +613,9 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
     m->held_cached = false;
     if (in->kind == PGWT_MERGE_TERMINAL_DISCOVERY) {
         if (d->terminal_binding_proved) {
+            if ((a->discovery.admitted || a->quiet_pending) &&
+                a->discovery.baseline.e > d->terminal_time)
+                return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
             if (a->terminal_proved && a->terminal_at != d->terminal_time)
                 return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
             a->terminal_proved = true;
@@ -654,6 +663,7 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
             return m->report.status;
         }
         if (!a->discovery.admitted || !a->discovery.no_wait_word ||
+            a->discovery.pointer_nonnull || a->discovery.pointer_discontinuous ||
             a->discovery.no_word_witness.role != d->no_word.role ||
             a->discovery.no_word_witness.enable != d->no_word.enable ||
             a->discovery.no_word_witness.read_at != d->no_word.read_at ||
@@ -662,7 +672,8 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
             a->discovery.no_word_witness.handle1 != d->no_word.handle1)
             return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
         no_word_baseline.t = no_word_baseline.e = d->no_word.enable;
-    } else if (a->discovery.no_wait_word) {
+    } else if (a->discovery.no_wait_word ||
+               (a->discovery.pointer_watched && !a->discovery.pointer_nonnull)) {
         return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
     }
     const pgwt_discovery_witness *w = no_word ? &no_word_baseline : &d->witness;
@@ -672,7 +683,8 @@ static pgwt_merge_status discovery_control(pgwt_merge *m, const pgwt_merge_input
             return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
         return m->report.status;
     }
-    if (!d->attachment_generation || (a->discovery.admitted &&
+    if ((a->terminal_proved && w->e > a->terminal_at) ||
+        !d->attachment_generation || (a->discovery.admitted &&
         (a->discovery.attachment_generation != d->attachment_generation ||
          a->discovery.baseline.e != w->e)) ||
         (a->quiet_pending && (a->discovery.baseline.t != w->t ||

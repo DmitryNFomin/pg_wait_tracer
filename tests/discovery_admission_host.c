@@ -172,7 +172,7 @@ static bool dsupport(void *ctx, uint64_t pid, uint64_t cookie,
     ++h->supporting;
     return true;
 }
-static struct dh *dsetup_inventory(size_t count, uint64_t fence, bool qmode, bool census)
+static struct dh *dsetup_start(size_t count, uint64_t fence, bool qmode, bool census, bool pid_only)
 {
     struct dh *h=calloc(1,sizeof(*h));DC(h,"host fixture allocation");
     h->snapshot=readable();h->detection=20;
@@ -191,7 +191,8 @@ static struct dh *dsetup_inventory(size_t count, uint64_t fence, bool qmode, boo
         {.pid=20,.g=1,.identity_bound=true}};
     ma_table premises={.lifetimes=lifetimes,.lifetime_count=2};
     h->capture=pgwt_capture_replay_create(&cfg,&initial,&premises);DC(h->capture,"capture create");
-    DC(pgwt_capture_coverage_begin(h->capture,DB,NULL,0,NULL)==0,"begin startup gap");
+    const uint32_t listed[]={30};
+    DC(pgwt_capture_coverage_begin(h->capture,DB,pid_only?listed:NULL,pid_only?1:0,NULL)==0,"begin startup gap");
     if(count) DC(pgwt_capture_discovery_inventory(h->capture,30,DG)==0,"D inventory");
     if(count && (discovery_case[0]=='A' || discovery_case[0]=='V' || discovery_case[0]=='G')) {
         uint64_t facts=PGWT_DISC_IDENTITY_VISIBLE | PGWT_DISC_EMISSION_IDENTITY;
@@ -202,6 +203,8 @@ static struct dh *dsetup_inventory(size_t count, uint64_t fence, bool qmode, boo
     if(census) DC(pgwt_capture_discovery_census(h->capture,DB+fence,true,DB+20,&h->snapshot)==0,"complete census");
     return h;
 }
+static struct dh *dsetup_inventory(size_t count, uint64_t fence, bool qmode, bool census)
+{ return dsetup_start(count,fence,qmode,census,false); }
 static struct dh *dsetup(bool two, uint64_t fence, bool qmode)
 { return dsetup_inventory(two?2:1,fence,qmode,true); }
 static pgwt_discovery_attempt admit(uint64_t pid,uint64_t cookie,uint64_t e,uint64_t gen)
@@ -1246,6 +1249,7 @@ static void nrow(struct dh *h,const char *id)
     }
     pgwt_discovery_state state={0};(void)pgwt_merge_discovery_state(h->capture->core,30,DG,&state);
     DC(state.wait_word_attempts==(!strcmp(id,"N7")?1:0),"NULL consumes no wait-word attempts");
+    if(!strcmp(id,"N5")) DC(state.pointer_nonnull,"non-NULL evidence survives its own fault");
     if(!strcmp(id,"N16")) DC(state.waiting_limit_exceeded,"authentication waiting limit exceeded");
     if(!strcmp(id,"N2") || !strcmp(id,"N11")) DC(state.pointer_watched && !state.admitted,
         "unqualified NULL remains pending with its pointer watch");
@@ -1490,7 +1494,7 @@ static void round5_guard(const char *id)
         dadmit(h,8);data(h,12,0,1);complete(h,13);
         record(h,25,30,0,3,PGWT_MERGE_EXIT,0,false,false);terminal_at(h,25,true);
         dcontrol(h,admit(40,DG+1,21,1));dcontrol(h,bracket(40,DG+1,20,21,1));complete(h,26);
-        out="D12[U] F12[C0] F25[C0]";pending=0;closed=true;
+        out="D12[U] F12[C0] F25[C0]";pending=0;
     } else if(!strcmp(id,"G_journal_unknown_start")) {
         pgwt_discovery_attempt a=journal();a.pid=30;a.resolution.tid=a.resolution.tgid=30;
         dcontrol(h,a);out="VOID20[C0,unknown_evidence]";
@@ -1533,6 +1537,223 @@ static void round5_guard(const char *id)
     pgwt_capture_destroy(h->capture);free(h);
 }
 
+/* Round 6 expectations are literal contract consequences, including every
+ * published DATA/FRONTIER/VOID and the complete persisted startup interval.
+ * Negative endpoints mean the gap remains open / no bound was committed. */
+struct round6_expected {
+    const char *id, *output;
+    size_t lifetimes, numeric;
+    bool census;
+    int close, endpoint, lower, terminal;
+    size_t gaps, support, uncovered;
+};
+static const struct round6_expected round6_cases[]={
+    {"G_pointer_before_admit", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_NULL_numerical_admit", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_NULL_quiet_confirm_first", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_pointer_before_try", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_pointer_break_before_admit", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_try_cannot_erase_watch", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_quiet_before_no_word_admit", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_nw_fence_before_read", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_nw_handles_differ", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_nw_no_binding", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_nw_no_ownership", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_nw_confirm_role", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_nw_enable_mismatch", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_pointer_break_after_bound", "F7[C0] VOID20[C0,unknown_evidence]",1,0,false,-1,-1,-1,-1,3,1,0},
+    {"G_nw_TRANS", "F7[C0] VOID20[C0,unknown_evidence]",0,0,true,6,6,6,-1,2,1,0},
+    {"G_nw_TRANS_before_admit", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_quiet_after_no_word", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_try_after_admit", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_wait_after_admit", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_wait_limit_before_deadline", "F7[C0]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_resolution_delta_J", "VOID20[Cr,counter_change]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_resolution_delta_R", "VOID20[Cr,counter_change]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_resolution_delta_G", "VOID20[Cr,counter_change]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_gone_fence_before_gone", "F7[C0]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_gone_journal_precedence", "F7[C0]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_rebind_journal_precedence", "F7[C0]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_rebind_no_binding", "F7[C0]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_rebind_no_handle", "F7[C0]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_journal_unnamed", "F7[C0]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_journal_no_position", "F7[C0]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_journal_wrong_tgid", "VOID20[C0,unknown_evidence]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_numeric_EXIT_before_J", "EXIT_U4 F7[C0]",0,0,true,5,5,-1,4,2,0,0},
+    {"G_resolution_F0_after_boot", "F7[C0]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_resolution_fence_before_census", "F7[C0]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_discovery_cookie_not_fork", "F7[C0]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_unqualified_clocks", "F7[C0]",0,1,false,-1,-1,-1,-1,1,0,0},
+    {"G_late_inventory_census", "",2,0,false,-1,-1,-1,-1,1,0,0},
+    {"G_named_exit_wrong_source", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_named_exit_wrong_time", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_terminal_before_admit", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_admit_before_terminal", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_terminal_before_quiet", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_quiet_before_terminal", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_terminal_before_nw_admit", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_nw_admit_before_terminal", "VOID20[C0,unknown_evidence]",1,0,true,-1,-1,-1,-1,1,0,0},
+    {"G_PID_only_binding", "D12[U] F12[C0]",0,0,true,12,13,12,-1,2,0,0},
+    {"G_unresolved_then_bound", "F18[C0] D22[U] F23[C0]",0,0,true,-1,-1,22,-1,1,0,1},
+    {"G_unresolved_before_EXIT_then_bound", "F18[C0] D22[U] F23[C0]",0,0,true,-1,-1,22,-1,1,0,1},
+};
+static void round6_case(const struct round6_expected *e)
+{
+    const char *id=e->id;
+    bool numeric=!strncmp(id,"G_resolution_",13) || !strncmp(id,"G_gone_",7) ||
+        !strncmp(id,"G_rebind_",9) || !strncmp(id,"G_journal_",10) ||
+        !strcmp(id,"G_numeric_EXIT_before_J") || !strcmp(id,"G_discovery_cookie_not_fork") ||
+        !strcmp(id,"G_unqualified_clocks");
+    bool pid_only=!strcmp(id,"G_PID_only_binding");
+    struct dh *h=pid_only?dsetup_start(0,5,false,false,true):dsetup_inventory(numeric?0:1,5,false,!numeric);
+    if(numeric) {
+        DC(!pgwt_capture_discovery_numeric(h->capture,50,DB+2,DB+3),"numeric census observation");
+        DC(!pgwt_capture_discovery_census(h->capture,DB+5,true,DB+20,&h->snapshot),"proposed census");
+    }
+    pgwt_discovery_attempt a=nw_attempt(13);
+    if(!strcmp(id,"G_pointer_before_admit") || !strcmp(id,"G_pointer_before_try")) {
+        if(!strcmp(id,"G_pointer_before_try")) pointer(h,9,0x2000);
+        dcontrol(h,a);
+        if(!strcmp(id,"G_pointer_before_admit")) pointer(h,9,0x2000);
+        a.kind=PGWT_DISC_ADMIT;a.proof=(pgwt_discovery_facts){PGWT_DISC_ADMISSION_FACTS,PGWT_DISC_ADMISSION_FACTS};
+        dcontrol(h,a);
+        DC(!strcmp(h->full_output,"VOID20[C0,unknown_evidence]"),"round six complete output");
+        a.kind=PGWT_DISC_CONFIRM_NO_WAIT_WORD;dcontrol(h,a);complete(h,10);
+    } else if(!strcmp(id,"G_NULL_numerical_admit") || !strcmp(id,"G_NULL_quiet_confirm_first")) {
+        dcontrol(h,a);
+        if(!strcmp(id,"G_NULL_quiet_confirm_first")) dquiet(h,11,12);
+        else {
+            dadmit(h,12);
+            DC(!strcmp(h->full_output,"VOID20[C0,unknown_evidence]"),"round six complete output");
+            dquiet(h,11,12);complete(h,13);
+        }
+    } else if(!strcmp(id,"G_pointer_break_before_admit")) {
+        dcontrol(h,a);dcontrol(h,(pgwt_discovery_attempt){.kind=PGWT_DISC_POINTER,.pid=30,.cookie=DG,.pointer_read_ok=true});
+        a.kind=PGWT_DISC_ADMIT;a.proof=(pgwt_discovery_facts){PGWT_DISC_ADMISSION_FACTS,PGWT_DISC_ADMISSION_FACTS};dcontrol(h,a);
+    } else if(!strcmp(id,"G_try_cannot_erase_watch")) {
+        dcontrol(h,a);a.no_word.continuous=false;dcontrol(h,a);dadmit(h,12);
+    } else if(!strcmp(id,"G_quiet_before_no_word_admit")) {
+        dquiet(h,5,6);a.kind=PGWT_DISC_ADMIT;
+        a.proof=(pgwt_discovery_facts){PGWT_DISC_ADMISSION_FACTS,PGWT_DISC_ADMISSION_FACTS};dcontrol(h,a);
+    } else if(!strcmp(id,"G_nw_fence_before_read") || !strcmp(id,"G_nw_handles_differ") ||
+              !strcmp(id,"G_nw_no_binding") || !strcmp(id,"G_nw_no_ownership")) {
+        if(!strcmp(id,"G_nw_fence_before_read")) a.no_word.fence=DB+6;
+        if(!strcmp(id,"G_nw_handles_differ")) a.no_word.handle1=2;
+        if(!strcmp(id,"G_nw_no_binding")) a.no_word.binding=false;
+        if(!strcmp(id,"G_nw_no_ownership")) a.no_word.ownership=false;
+        a.kind=PGWT_DISC_ADMIT;a.proof=(pgwt_discovery_facts){PGWT_DISC_ADMISSION_FACTS,PGWT_DISC_ADMISSION_FACTS};dcontrol(h,a);
+    } else if(!strcmp(id,"G_nw_confirm_role") || !strcmp(id,"G_nw_enable_mismatch")) {
+        a.kind=PGWT_DISC_ADMIT;a.proof=(pgwt_discovery_facts){PGWT_DISC_ADMISSION_FACTS,PGWT_DISC_ADMISSION_FACTS};
+        if(!strcmp(id,"G_nw_enable_mismatch")) a.e=DB+8;
+        dcontrol(h,a);
+        if(!strcmp(id,"G_nw_confirm_role")) {a.kind=PGWT_DISC_CONFIRM_NO_WAIT_WORD;a.no_word.role=12;dcontrol(h,a);}
+    } else if(!strcmp(id,"G_pointer_break_after_bound") || !strcmp(id,"G_nw_TRANS")) {
+        nw_deliver(h,a,false);complete(h,8);
+        if(!strcmp(id,"G_pointer_break_after_bound")) dcontrol(h,(pgwt_discovery_attempt){.kind=PGWT_DISC_POINTER,.pid=30,.cookie=DG,.pointer_read_ok=true});
+        else data(h,12,0,1);
+    } else if(!strcmp(id,"G_nw_TRANS_before_admit")) {
+        data(h,12,0,1);nw_deliver(h,a,false);
+    } else if(!strcmp(id,"G_quiet_after_no_word")) {
+        a.kind=PGWT_DISC_ADMIT;a.proof=(pgwt_discovery_facts){PGWT_DISC_ADMISSION_FACTS,PGWT_DISC_ADMISSION_FACTS};dcontrol(h,a);dquiet(h,5,6);
+    } else if(!strcmp(id,"G_try_after_admit") || !strcmp(id,"G_wait_after_admit")) {
+        dadmit(h,8);if(!strcmp(id,"G_wait_after_admit")) a.kind=PGWT_DISC_WAIT_ATTEMPT;dcontrol(h,a);
+    } else if(!strcmp(id,"G_wait_limit_before_deadline")) {
+        a.authentication_deadline=DB+30;dcontrol(h,a);a.kind=PGWT_DISC_WAIT_LIMIT;dcontrol(h,a);
+        complete(h,8);
+        pgwt_discovery_state state={0};DC(pgwt_merge_discovery_state(h->capture->core,30,DG,&state) && !state.waiting_limit_exceeded,
+            "deadline not exceeded before detection reaches it");
+    } else if(numeric) {
+        a=journal();
+        if(!strcmp(id,"G_numeric_EXIT_before_J")) {
+            record(h,4,50,0,3,PGWT_MERGE_EXIT,0,false,false);
+            DC(h->capture->uncovered_records==0 && pgwt_capture_pending_records(h->capture)==1,
+               "numeric EXIT retained before journal");
+            complete(h,8);DC(!h->full_length,"numeric EXIT holds frontier before journal");
+            dcontrol(h,a);
+        } else {
+            if(strstr(id,"delta_")) {
+                if(strstr(id,"_R")) {a.kind=PGWT_DISC_REBIND;a.resolution.journal_eligible=false;}
+                if(strstr(id,"_G")) {a.kind=PGWT_DISC_GONE;a.resolution.journal_eligible=false;}
+                h->snapshot.value[3]=1;
+            } else if(!strncmp(id,"G_gone_",7)) {
+                a.kind=PGWT_DISC_GONE;a.resolution.journal_eligible=!strcmp(id,"G_gone_journal_precedence");
+                if(!strcmp(id,"G_gone_fence_before_gone")) a.resolution.gone_at=DB+6;
+            } else if(!strncmp(id,"G_rebind_",9) || !strcmp(id,"G_discovery_cookie_not_fork") || !strcmp(id,"G_unqualified_clocks")) {
+                a.kind=PGWT_DISC_REBIND;a.resolution.journal_eligible=!strcmp(id,"G_rebind_journal_precedence");
+                if(!strcmp(id,"G_rebind_no_binding")) a.resolution.binding=false;
+                if(!strcmp(id,"G_rebind_no_handle")) a.resolution.handle=0;
+                if(!strcmp(id,"G_discovery_cookie_not_fork")) a.resolution.fork_cookie=DG+8;
+                if(!strcmp(id,"G_unqualified_clocks")) a.resolution.clocks_qualified=false;
+            } else if(!strcmp(id,"G_journal_unnamed")) a.names_exit=false;
+            else if(!strcmp(id,"G_journal_no_position")) a.exit_position=0;
+            else if(!strcmp(id,"G_journal_wrong_tgid")) a.resolution.tid=a.resolution.tgid=60;
+            else if(!strcmp(id,"G_resolution_F0_after_boot")) a.resolution.F0=DB+1;
+            else if(!strcmp(id,"G_resolution_fence_before_census")) a.resolution.fence=DB+4;
+            dcontrol(h,a);complete(h,8);
+        }
+    } else if(!strcmp(id,"G_late_inventory_census")) {
+        DC(!pgwt_capture_discovery_inventory(h->capture,40,DG+1),"late unlisted inventory");
+        /* Resolving an unrelated listed number cannot restore the declaration. */
+        DC(!pgwt_capture_discovery_numeric(h->capture,50,DB+2,DB+3),"unrelated numeric observation");
+        a=journal();a.kind=PGWT_DISC_GONE;a.resolution.journal_eligible=false;dcontrol(h,a);
+    } else if(!strcmp(id,"G_named_exit_wrong_source")) {
+        a=(pgwt_discovery_attempt){.kind=PGWT_DISC_TERMINAL,.pid=30,.cookie=DG,.terminal_time=DB+18,
+            .terminal_binding_proved=true,.names_exit=true,.exit_source=2,.exit_position=1};dcontrol(h,a);
+    } else if(!strcmp(id,"G_named_exit_wrong_time")) {
+        a=(pgwt_discovery_attempt){.kind=PGWT_DISC_TERMINAL,.pid=30,.cookie=DG,.terminal_time=DB+18,
+            .terminal_binding_proved=true,.names_exit=true,.exit_source=3,.exit_position=1};dcontrol(h,a);
+        record(h,19,30,0,3,PGWT_MERGE_EXIT,0,false,false);
+    } else if(!strcmp(id,"G_terminal_before_admit")) {
+        terminal_at(h,18,false);dadmit(h,20);
+    } else if(!strcmp(id,"G_admit_before_terminal")) {
+        dadmit(h,20);terminal_at(h,18,false);
+    } else if(!strcmp(id,"G_terminal_before_quiet")) {
+        terminal_at(h,18,false);dquiet(h,19,20);
+    } else if(!strcmp(id,"G_quiet_before_terminal")) {
+        dquiet(h,19,20);terminal_at(h,18,false);
+    } else if(!strcmp(id,"G_terminal_before_nw_admit") || !strcmp(id,"G_nw_admit_before_terminal")) {
+        a.kind=PGWT_DISC_ADMIT;a.proof=(pgwt_discovery_facts){PGWT_DISC_ADMISSION_FACTS,PGWT_DISC_ADMISSION_FACTS};
+        if(!strcmp(id,"G_terminal_before_nw_admit")) terminal_at(h,4,false);
+        dcontrol(h,a);
+        if(!strcmp(id,"G_nw_admit_before_terminal")) terminal_at(h,4,false);
+    } else if(pid_only) {
+        pgwt_capture_discovery_report pending=pgwt_capture_discovery_status(h->capture);
+        DC(pending.unresolved_numeric==1 && !pending.unresolved_lifetimes && !pending.census_complete,"PID-only is numeric until binding");
+        DC(!pgwt_capture_discovery_inventory(h->capture,30,DG),"bind PID-only observation");
+        DC(!pgwt_capture_discovery_census(h->capture,DB+5,true,DB+20,&h->snapshot),"bound census");
+        dadmit(h,8);data(h,12,0,1);complete(h,13);
+    } else if(!strcmp(id,"G_unresolved_then_bound") || !strcmp(id,"G_unresolved_before_EXIT_then_bound")) {
+        if(!strcmp(id,"G_unresolved_before_EXIT_then_bound")) terminal_at(h,18,true);
+        record(h,18,30,0,3,PGWT_MERGE_EXIT,0,false,false);complete(h,19);
+        if(!strcmp(id,"G_unresolved_then_bound")) terminal_at(h,18,true);
+        dadmit(h,20);data(h,22,0,1);complete(h,24);
+    } else DC(false,"round six case implemented");
+    if(!strcmp(id,"G_nw_TRANS") || !strcmp(id,"G_nw_TRANS_before_admit")) complete(h,14);
+    if(strcmp(h->full_output,e->output)) fprintf(stderr,"FULL GOT %s; EXPECTED %s\n",h->full_output,e->output);
+    DC(!strcmp(h->full_output,e->output),"round six complete output");
+    pgwt_capture_discovery_report r=pgwt_capture_discovery_status(h->capture);
+    DC(r.unresolved_lifetimes==e->lifetimes && r.unresolved_numeric==e->numeric &&
+       r.unresolved==e->lifetimes+e->numeric && r.census_complete==e->census && r.closed==(e->close>=0),
+       "round six complete census and pending");
+    if(e->close>=0) DC(r.closure==DB+(uint64_t)e->close,"round six closure time");
+    DC(h->ngaps==e->gaps && h->gaps[0].kind==PGWT_CAPTURE_GAP_PREEXISTING && h->gaps[0].at==DB,
+       "round six complete gap publication");
+    if(e->gaps>=2) DC(h->gaps[1].kind==PGWT_CAPTURE_GAP_PREEXISTING_END &&
+        h->gaps[1].at==DB+(uint64_t)(e->endpoint<0?6:e->endpoint),"round six persisted endpoint");
+    if(e->gaps==3) DC(h->gaps[2].kind==PGWT_CAPTURE_GAP_PREEXISTING && h->gaps[2].at==DB &&
+        h->gaps[2].detected==DB+20 && h->gaps[2].revoked,"round six boot revocation");
+    DC(base_verdict(h,99,100)==(e->endpoint>=0?PGWT_COV_COMPLETE:PGWT_COV_INCOMPLETE),"round six reader output");
+    if(e->endpoint>=0) DC(base_verdict(h,e->endpoint-1,e->endpoint)==PGWT_COV_INCOMPLETE &&
+        base_verdict(h,e->endpoint,e->endpoint+1)==PGWT_COV_COMPLETE,"round six reader endpoint");
+    pgwt_discovery_state state={0};(void)pgwt_merge_discovery_state(h->capture->core,numeric?50:30,DG,&state);
+    DC(state.has_lower_bound==(e->lower>=0) && (!state.has_lower_bound || state.lower_bound==DB+(uint64_t)e->lower) &&
+       state.terminal_released==(e->terminal>=0) && (!state.terminal_released || state.terminal_time==DB+(uint64_t)e->terminal),
+       "round six committed lower and terminal bounds");
+    DC(h->supporting==e->support && h->capture->uncovered_records==e->uncovered &&
+       !pgwt_capture_report(h->capture).discovery_abandoned_records,"round six complete accounting");
+    pgwt_capture_destroy(h->capture);free(h);
+}
+
 int main(int argc,char **argv)
 {
     size_t ran=0;
@@ -1564,6 +1785,11 @@ int main(int argc,char **argv)
         if(argc>1 && strcmp(argv[1],round5[i])) continue;
         discovery_case=round5[i];printf("REACHED discovery %s\n",discovery_case);fflush(stdout);
         if(!strcmp(discovery_case,"G_census_counter_class")) census_counter_class();else round5_guard(discovery_case);printf("discovery %s: PASS\n",discovery_case);++ran;
+    }
+    for(size_t i=0;i<sizeof(round6_cases)/sizeof(*round6_cases);++i) {
+        if(argc>1 && strcmp(argv[1],round6_cases[i].id)) continue;
+        discovery_case=round6_cases[i].id;printf("REACHED discovery %s\n",discovery_case);fflush(stdout);
+        round6_case(&round6_cases[i]);printf("discovery %s: PASS\n",discovery_case);++ran;
     }
     DC(ran>0,"named oracle row reached");
     if(argc==1) empty_census();

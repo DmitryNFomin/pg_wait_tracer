@@ -60,7 +60,10 @@ typedef struct {
 } pgwt_discovery_witness;
 /* These are retained observations, never source boundaries. Route c uses
  * the pointer watch rather than a numerical attachment. Role qualification is
- * lifetime-bound producer evidence, not a whitelist inferred from NULL. */
+ * lifetime-bound producer evidence, not a whitelist inferred from NULL.
+ * POINTER evidence covers the lifetime from enable and may precede ADMIT.
+ * Retain contradictory observations until a claim arrives; controls cannot
+ * erase a non-NULL fire or a demonstrated continuity break. */
 typedef enum { PGWT_DISC_NUMERICAL, PGWT_DISC_NO_WAIT_WORD } pgwt_discovery_route;
 typedef struct {
     uint64_t enable, read_at, fence, pointer, fires, handle0, handle1;
@@ -74,7 +77,9 @@ typedef struct {
 typedef struct {
     uint64_t F0, start, fence, failed_open, gone_at, handle;
     uint64_t tid, tgid, parent, postmaster;
-    uint64_t exit_time;
+    uint64_t exit_time; /* journal witness exit_ns; terminal_time below names
+                         * the lifecycle DATA semantic timestamp. Both must
+                         * agree with the actual named transport record. */
     /* Raw map observations are not membership or terminal-binding evidence. */
     uint64_t discovery_map_cookie;
     bool discovery_map_tombstone;
@@ -130,6 +135,7 @@ typedef struct {
 typedef struct {
     bool admitted, confirmed, has_lower_bound, terminal_released, abandoned;
     bool no_wait_word, pointer_watched, pointer_nonnull, waiting_limit_exceeded;
+    bool pointer_discontinuous; /* retained even before route-c ADMIT */
     uint64_t wait_word_attempts, pointer_observations, authentication_deadline;
     pgwt_discovery_no_word no_word_witness;
     bool has_uncertified;

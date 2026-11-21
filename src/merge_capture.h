@@ -128,7 +128,12 @@ struct pgwt_capture_config {
 };
 struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *);
 /* Begin boot coverage before advertising it. With discovery_enabled, PID-only
- * entries await lifetime binding and an explicit census. A cookie-less EXIT
+ * entries are numeric census observations until a successful inventory
+ * binding or a qualified J/R/G resolution discharges them. An explicit census
+ * is still required. REBIND is the only control that binds an enumerated PID
+ * to a live lifetime; inventory() also accepts the producer's retained binding.
+ * The capture baseline must be taken at or before F0 so lifecycle accounting
+ * covers the entire reconciliation interval. A cookie-less EXIT
  * waits for a final terminal disposition. Matched must complete its release
  * before discharge; TERMINAL_UNRESOLVED consumes it as uncovered, retaining
  * the unresolved census entry and open gap. Otherwise T-cov rules apply. */
