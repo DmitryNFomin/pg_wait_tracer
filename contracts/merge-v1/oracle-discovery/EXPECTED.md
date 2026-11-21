@@ -4,6 +4,8 @@
 
 `abandoned=n` is the capture-cumulative `discovery_abandoned_records` diagnostic. It counts records consumed under Decision 45, not records merely staged, rejected on arrival, or discarded by ordinary fault handling. It survives REARM.
 
+`uncovered +n` counts cookie-less records consumed as uncovered, separately from `abandoned=n`.
+
 `[U]` and `[T]` mean `prior_interval_certified=false/true`. They describe output semantics; this amendment adds no discovery storage carrier. `F<n>` and `VOID<d>[C,reason]` retain §5’s notation.
 
 Unless specified otherwise, final census completeness is known. Rows faulting before any lifetime discharge retain `G(open), P=1`. No listed row requires nonzero process exit. A11 additionally invalidates the epoch containing the disproved F15; no other listed row requires epoch invalidation.
@@ -72,6 +74,52 @@ Unless specified otherwise, final census completeness is known. Rows faulting be
 | A18 | `VOID20[C0,allocation_fail]`; no later DATA or frontier. `G(open), P=1, abandoned=0`. AB does not cancel the fault or rearm the epoch. D9 was discarded by ordinary fault handling, not consumed under Decision 45. |
 | A19 | `F15`; no TEXT, TRANS or MARKER publication. `G(open), P=1, abandoned=3`. The valid metadata dependency is reconciled before consumption; TEXT is not assigned a timestamp. |
 | A20 | `EXIT_D18 → F18 → VOID20[C0,unknown_evidence]`; `G(18), P=0, abandoned=0`. Terminal discharge closes the gap without an increment. The first AB arrives after closure and is rejected; it is not an idempotent retransmission. |
+| T1 | No output at S(19); after TERMU `F18`, then after S(21) `A20[T] → F20`; EXIT never published, uncovered +1, `G(open), P=1`, census complete still known, no VOID. |
+| T2 | No output at all, then `VOID50[C0,unknown_evidence]`, `G(open), P=1`. |
+| T3 | T1's output then `VOID20[C0,unknown_evidence]`, `G(open), P=1`. |
+| T4 | `F18`, no hold, uncovered +1, `G(open), P=1`. |
+| V1 | `EXIT_D18 → VOID20[Ce,counter_change] → F19`; `G(open), P=1`, no closure in either order. |
+| V2 | `EXIT_D18 → VOID20[Ce,counter_change] → F19`; `G(open), P=1`, no closure in either order. |
+| V3 | `EXIT_D17 → VOID20[Cw,writer_push_fail] → F19` (A18 not published; F19 after REARM, under Cw); `G(open), P=1` after REARM and TERM. |
+| V4 | `EXIT_D18 → VOID20[Cw,writer_push_fail] → F19` (F18 not published; F19 after REARM, under Cw); `G(open), P=1`. |
+| N1 | `F5 → F7`; at `S(6)`, no bound, `G(open), P=1+0`; at `S(8)`, `b_D=6, C_close=6, G(6), P=0+0, census=known`. Attempts 0. Show `present, not measured — logger`; individual quantities unavailable; no contribution to `N_k`, `U_k` or numerical numerators. |
+| N2 | `F7`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0, pointer watch retained. |
+| N3 | `F7`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0; the pre-enable read does not establish the required witness. |
+| N4 | `F9`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0, C0 unchanged; the initial zero-fire requirement fails without manufacturing a loss. |
+| N5 | `F5 → F7 → VOID20[C0,unknown_evidence]`; the pointer contradiction reports `FAULT(unknown_evidence,20,C0)`. Revoke `b_D` and coverage from 0, invalidate affected cached answers; final `G(open), P=1+0, census=unknown`. No F13 or handoff gap. |
+| N6 | `F5 → F7 → EXIT_D12 → F12`; `b_D=6, C_close=6, G(6), P=0+0, census=known`; C0 unchanged, no terminal TRANS, no numerical contribution. |
+| N7 | `F12`; `b_D=11, C_close=11, G(11), P=0+0, census=known`; one wait-word attempt, started after the non-NULL observation. PTR9 establishes no bound. |
+| N8 | `EXIT_D9 → F9`; no `b_D`, accepted `x_D=9`, `C_close=9, G(9), P=0+0, census=known`; attempts 0, no terminal TRANS or UNTRACED. |
+| N9 | `VOID20[Cf,counter_change]`; no bound or frontier; `G(open), P=1+0, census=unknown`; attempts 0. |
+| N10 | `F5 → F7`; final `b_D=6, C_close=6, G(6), P=0+0, census=known`; attempts 0. Show `present, not measured — stats collector`; individual quantities unavailable and no numerical-population contribution. |
+| N11 | `F7`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0. The unqualified role value supplies no permanence proof. |
+| N12 | `VOID20[C0,unknown_evidence]`; no accepted admission, bound or frontier; `G(open), P=1+0, census=known`. |
+| N13 | `H10[U] → F10`; `b_D=6, b_H=10, C_close=10, G(11), P=0+0, census=known`. H10 requires the endpoint increment; D contributes no numerical record. |
+| N14 | `VOID20[Cw,writer_push_fail]`; no frontier or committed bound; `G(open), P=1+0, census=known`. |
+| N15 | `VOID20[Cr,counter_change]`; no bound or frontier; `G(open), P=1+0, census=known`; no synthetic successful NULL observation. |
+| N16 | `F15`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0. Report exceeded waiting limit; deadline expiration discharges nothing. |
+| J1 | `F3 → EXIT_U4 → F7`; at `S(4)`, matched disposition is retained but no discharge commits, `G(open), P=1+0, census=known`; final `x_U=4, C_close=5, G(5), P=0+0, census=known`. No terminal TRANS or UNTRACED. |
+| J2 | `F7`; `C_close=5, G(5), P=0+0, census=known`; no inventory lifetime, terminal discharge or EXIT is invented. |
+| J3 | `F7`; `G(open), P=0+1, census=unknown`; no bound, terminal discharge or gone-proof. |
+| J4 | `F7`; `G(open), P=0+1, census=unknown`; EACCES and EPERM establish no resolution. |
+| J5 | `VOID20[Cf,counter_change]`; no frontier or G resolution; `G(open), P=0+1, census=unknown`. |
+| J6 | No merge output; no matched disposition or discharge; `G(open), P=0+1, census=unknown`. L remains unbounded and completion proof remains absent. |
+| J7 | `VOID20[Ck,counter_change]`; no discovery EXIT or discharge; `G(open), P=0+1, census=unknown`. Equality with `F0` does not pass the pre-existing exit test. |
+| J8 | `F7`; no lifecycle EXIT or terminal disposition; `C_close=5, G(5), P=0+0, census=known`; C0 unchanged. Required thread-history bookkeeping is retained. |
+| J9 | `F7`; no lifecycle EXIT or terminal disposition; `C_close=5, G(5), P=0+0, census=known`; C0 unchanged. |
+| J10 | `F7`; no lifecycle EXIT or terminal disposition; `C_close=5, G(5), P=0+0, census=known`; C0 unchanged. |
+| J11 | `VOID20[C0,unknown_evidence]`; no discovery EXIT, match or frontier; `G(open), P=0+1, census=unknown`. Raw zero is not a pre-`F0` timestamp. |
+| J12 | `FORK_R3 → R6[U] → F7`; `C_close=5, G(5), P=0+0, census=known`; no discovery admission for R. R's Decision 25c numerical lower bound is 6; R6's incoming numerical evidence is unavailable. R contributes `dN_0=1, dU_0=0`. |
+| J13 | `U7[U] → F7`; `b_U=7, C_close=7, G(8), P=0+0, census=known`. The number becomes one bound discovery lifetime before admission. |
+| J14 | `F7`; `C_close=5, G(5), P=0+0, census=known`; no discovery lifetime or terminal discharge is created. |
+| J15 | `EXIT_U4 → FORK_R6 → R8[U] → F8`; accepted `x_U=4`, `C_close=5, G(5), P=0+0, census=known`. R retains fork provenance and does not replace U's terminal identity. R's Decision 25c numerical lower bound is 8; R8's incoming numerical evidence is unavailable. R contributes `dN_0=1, dU_0=0`; U contributes nothing to `N_k,U_k`. |
+| J16 | `VOID20[C0,unknown_evidence]`; no matched discharge or frontier; `G(open), P=1+0, census=known`. PID equality cannot repair the start-identity contradiction. |
+| J17 | `VOID20[C0,unknown_evidence]`; no matched discharge or frontier; `G(open), P=1+0, census=known`. The journal establishes U, but the claimed terminal timestamp agreement is false. |
+| J18 | `VOID20[Cw,writer_push_fail]`; EXIT_U4 is not a successful output; no frontier or discharge; `G(open), P=1+0, census=known`. |
+| J19 | `EXIT_U4 → VOID20[Cf,counter_change]`; no frontier or committed discharge; `G(open), P=1+0, census=unknown`. The published EXIT belongs to the VOIDed suffix. |
+| J20 | `F7`; initially `G(5), P=0+0, census=known`; detection at 40 revokes coverage from 0 and affected cached answers, leaving `G(open), P=1+0, census=unknown`. The late-unlisted observation alone adds no DATA or VOID. |
+| J21 | `F7`; `G(open), P=0+1, census=unknown`; the pre-open ESRCH does not satisfy G. |
+| J22 | `FORK_R1 → R6[U] → F7`; `C_close=5, G(5), P=0+0, census=known`; observed fork provenance wins, with no discovery admission or journal-based discovery discharge. R's Decision 25c numerical lower bound is 6; R6's incoming numerical evidence is unavailable. R contributes `dN_0=1, dU_0=0`, using FORK timestamp 1. |
 
 **Required mutants**
 
@@ -161,6 +209,54 @@ All gap-end assertions must inspect the emitted GAP_CLOSE endpoint and zero rese
 | Let an earlier-attempt or pre-enable record establish `b_i` | Q09 |
 | Let delayed earlier-attempt DATA overwrite the confirmed baseline | Q09 |
 | Reset/reuse an attachment generation across retries | Q09 |
+| Release the held EXIT on a boundary or after N rounds | T2 |
+| Let unresolved go through the late-unlisted branch | T1 |
+| Accept matched-after-unresolved | T3 |
+| Discharge from the suffix of a VOIDed attempt | V1 |
+| Make discharge depend on TERM/EXIT order | V2 |
+| Discharge before the release attempt ends | V3, V4 |
+| Require a quiet bracket or CPU seed for no-wait-word confirmation | N1, N10 |
+| Accept NULL alone as a permanent-role proof | N2, N11 |
+| Accept the NULL read before pointer-watch enable | N3 |
+| Ignore an initial same-value pointer fire when testing zero fires | N4 |
+| Commit a no-wait-word bound at source-completeness equality | N1 |
+| Disable or silently replace the pointer watch after confirmation | N5, N12 |
+| Convert later non-NULL initialization into a fresh-record handoff gap | N5 |
+| Revoke coverage only from the contradiction's detection time | N5 |
+| Count a qualified later NULL fire as `wait_read_fail` | N6 |
+| Replace an established no-wait-word bound with its exit timestamp | N6 |
+| Manufacture a terminal TRANS or UNTRACED for a no-wait-word lifetime | N6, N8 |
+| Consume wait-word attempts while the pointer is NULL | N2, N7, N8, N16 |
+| Treat initialization notification itself as a lower bound | N7 |
+| Close startup coverage when authentication timeout expires | N16 |
+| Ignore journal-loss counter changes during no-word qualification | N9 |
+| Treat a required failed pointer read as a successful NULL observation | N15 |
+| Add no-wait-word lifetimes to numerical population, numerators, `N_k` or `U_k` | N1, N10 |
+| Display missing individual quantities as measured zero | N1, N10 |
+| Always add one nanosecond for a no-wait-word confirmation | N1, N6, N10 |
+| Suppress another lifetime's endpoint increment when route (c) exists | N13 |
+| Commit a no-word bound or closure despite rejected supporting publication | N14 |
+| Invent an inventory lifetime from an unreadable PID number | J2, J3, J4 |
+| Discharge a journal lifetime before strict EXIT eligibility | J1 |
+| Use open ENOENT, liveness success or EPERM as G | J3, J4 |
+| Accept a gone-proof taken before the failed open | J21 |
+| Accept G despite lifecycle/journal loss | J5 |
+| Match from journal contents without completed producer accounting | J6 |
+| Accept `start_time==F0` as pre-existing | J7 |
+| Silently drop an unaccounted post-`F0` child without counting missing-fork loss | J7 |
+| Allow a non-leader through the discovery exit filter | J8 |
+| Allow a tombstone to establish exit membership | J9 |
+| Allow a stale live discovery identity to establish exit membership | J10 |
+| Interpret raw zero/unknown start time as preceding `F0` | J11 |
+| Put a valid fork-route replacement into discovery inventory | J12, J22 |
+| Drop a successfully rebound pre-existing target as a non-member | J13 |
+| Keep a fully reconciled, rebound non-member pending | J14 |
+| Match an old EXIT using the replacement PID's current map value | J15, J16 |
+| Ignore journal/EXIT timestamp agreement | J17 |
+| Discharge after rejected EXIT publication | J18 |
+| Discharge from an EXIT in a subsequently VOIDed release attempt | J19 |
+| Let G suppress later-unlisted revocation | J20 |
+| Prefer task-start age over observed fork provenance | J22 |
 
 Pointer-ABA, stale-marker refresh, all-emission-site cookie consistency, writer synchronization and actual EL8 verifier acceptance remain producer qualification obligations. Their qualification fixtures must exercise the corresponding physical operation; merge oracle agreement alone cannot mark them qualified.
 

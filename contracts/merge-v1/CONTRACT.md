@@ -301,9 +301,25 @@ Measured before freezing (tests/results/session-20261120/quiet-witness/analysis.
 
 **DECISION 30 — Scope and provenance.** Discovery admission is a distinct attachment route for a lifetime proved present at capture startup. It initially applies only to exact_perf, sequence-free mode N. It creates neither FORK nor INIT and does not assert a birth timestamp. A task with valid observed fork provenance follows the existing fork route. A post-start birth, including a fork whose task start timestamp predates capture, cannot use discovery to replace missing fork evidence. Q-mode discovery remains unqualified.
 
-**DECISION 31 — Inventory and census.** Start reliable lifecycle accounting before startup enumeration and before any discovery installation. Maintain an inventory of unresolved lifetimes, including unreadable, failed and pending candidates. Reconcile enumeration with births and exits through a qualified census fence. The proof must cover processes appearing or disappearing during enumeration. An empty registry is not a complete empty census. Missing enumeration, lifecycle or completion evidence leaves census completion unknown; elapsed time does not complete it.
+**DECISION 31 — Inventory and census.** Activate reliable lifecycle accounting before startup enumeration and before any discovery installation. After activation completes, record `F0` as an event-clock instant and store it kernel-side before enumeration begins. Establish `F0≤boot_start`; use a qualified conversion when comparing a task start time with either instant. Unknown conversion, zero or unreadable task start time is unknown evidence, never proof that the task precedes `F0`. Observed fork provenance takes precedence over a start-time comparison.
+
+Maintain an inventory of bound lifetimes, including failed and pending attachments. Retain an enumerated PID that cannot be bound as an unresolved numeric census observation, separately from that inventory. It reserves no lifetime identity or discovery cookie. Repeated unresolved observations of the same number do not create additional lifetimes.
+
+Reconcile enumeration, numeric observations, births and exits through a qualified census fence. The proof covers processes appearing or disappearing during enumeration. An unresolved numeric observation prevents census completeness. An empty registry is not a complete empty census. Missing enumeration, lifecycle or completion evidence leaves census completion unknown; elapsed time does not complete it.
 
 Each inventory entry retains its binding evidence, reserved cookie if any, attachment attempts and terminal history. PID alone is not its lifetime identity.
+
+Resolve each unbound numeric observation by exactly one of J, R or G; otherwise retain it pending. All three require consistent PID namespaces, retained lifecycle history from `F0`, completed relevant producers and reliable failure accounting through the resolving fence.
+
+J: A retained kernel terminal witness identifies `(pid,start_ns)` and proves `tid==tgid`, `real_parent->tgid==postmaster`, a known `start_time<F0`, and absence of valid fork provenance. Reconcile all retained fork evidence before selecting this route. Create or identify the corresponding inventory lifetime from the witness and apply Decision 40's matched disposition at its `exit_ns`. No `/proc` read is required. An eligible J witness takes precedence over R or G.
+
+R: A new pinned handle binds the current holder of the number. Its lifetime, leader status, parent, start time and retained fork history classify it as an ordinary discovery candidate, a fork-route lifetime, or a non-member. A post-`F0` target child without valid fork evidence is not a non-member or a discovery substitute. Rebinding a replacement never removes a separate earlier lifetime established by the journal.
+
+G: After the failed open, `kill(pid,0)` returns ESRCH, and a subsequently completed lifecycle fence establishes that no eligible J witness exists and all relevant loss counters remain readable and unchanged over `[F0,fence]`. Drop the numeric observation as a non-member. G discharges no inventoried lifetime and supplies no `x_i`. Open failure, including ENOENT, is not the gone-proof; success, EPERM or another result from `kill(pid,0)` is not ESRCH.
+
+Journal insertion failure, capacity failure, unknown history or incomplete failure accounting authorizes none of these resolutions. Resolving a numeric observation never removes a retained target-lifetime witness or forgives a loss.
+
+For census completeness, the lifecycle-loss counter class comprises `lifecycle_fork_drop`, `lifecycle_init_drop`, `lifecycle_exit_drop` and `fork_state_update_fail`. A newly observed change in this class makes census completeness unknown even after an accepted census fence; retain established inventory identities and numeric-observation resolutions. Other counter changes, including `wait_read_fail`, `writer_push_fail` and `event_ring_drop`, do not by themselves invalidate an established census, although all retain their ordinary VOID consequences. Independently missing enumeration, identity, journal or completion evidence still leaves census completeness unknown.
 
 **DECISION 32 — Allocation authority.** Partition the capture’s nonzero uint64 cookie space: the serialized fork allocator owns `[1,2^63−1]`; the single serialized discovery allocator owns `[2^63,2^64−1]`. Neither crosses its partition. Reserve and burn a discovery cookie before attempting installation; failed reservations/installations do not recycle it. Exhaustion reports allocation failure without wrapping. REARM preserves allocated identities and allocator positions. Retrying attachment to the same proved lifetime retains its installed cookie.
 
@@ -333,7 +349,7 @@ All emission sites, including markers and terminal paths, implement the same ide
 
 `ADMIT_DISCOVERY(pid,g,attachment_generation,e,proof,d,C)`.
 
-Here `e` is the successful enable-completion time of the final attachment. The control establishes discovery provenance and continuous enablement from that attachment, but supplies no coverage lower bound or source boundary. Its proof includes Decisions 31–35, address qualification, installation visibility before enable, successful enable and preserved producer state. Unknown facts are false.
+Here `e` is the successful enable-completion time of the final attachment. The control establishes discovery provenance and continuous enablement from that attachment, but supplies no coverage lower bound or source boundary. Its proof includes Decisions 31–35, route-specific address qualification, installation visibility before enable, successful enable and preserved producer state. For Decision 37(c), the admitted attachment is the qualified pointer watch; no wait-word address, numerical seed or CPU baseline is asserted. Issue its ADMIT only after the initial NULL witness and permanent-role proof pass. Unknown facts are false.
 
 Issue ADMIT once for the final startup attachment. A valid control may arrive after dependent DATA; those records and their release frontier wait for matching ADMIT or accepted ABANDON_DISCOVERY under Decision 45. Abandonment permits validated consumption of the abandoned numerical stream, not its publication or numerical certification. Matching terminal lifecycle evidence retains Decision 40’s discharge route without ADMIT. Contradictory provenance or a claimed admission proof containing a false required fact reports `FAULT(unknown_evidence,d,C)`.
 
@@ -341,7 +357,7 @@ A record from an earlier attachment attempt, or stamped before `e`, cannot estab
 
 No genuine INIT repairs an invalid discovery attempt. Admission neither rearms a suspended epoch nor cancels a fault.
 
-**DECISION 37 — Two lower-bound routes.** A discovery lifetime obtains its lower bound by exactly one of:
+**DECISION 37 — Three lower-bound routes.** A discovery lifetime obtains its lower bound by exactly one of:
 
 (a) **Fresh-record route.** Its first successfully released TRANS/MARKER belonging to the final continuously enabled attachment establishes coherent post-record state. Mark its incoming interval uncertified, including duration, CPU and completed-wait count. Set `b_i` to that record’s semantic timestamp and ordered position. A marker qualifies only if it refreshes the necessary wait/time/CPU baselines. Earlier-attempt records remain numerically uncertified and do not establish or replace this state.
 
@@ -375,7 +391,17 @@ On successful commitment set `b_i=t`. Subsequent intervals based on this seed re
 
 A failed witness supplies no confirmation. A control that falsely claims completed coherence, identity or continuity reports `FAULT(unknown_evidence,d,C)`; it cannot convert contradictory evidence into a normal retry.
 
-**DECISION 38 — Confirmation failure and retries.** Use a finite configured maximum of `N` attempts, recorded in diagnostics. Every attempt starts with the watchpoint disabled. Every retry is a disable followed by completion fencing of earlier producers and a complete new bracket in Decision 37(b)’s order. Preserve earlier records, counters and producer updates. Every retry occurs before ADMIT.
+(c) **No-wait-word route.** This route applies only to a bound discovery lifetime whose qualified permanent role cannot acquire or use a wait word. A NULL pointer alone does not establish that role.
+
+Open the qualified pointer watch disabled on the pinned task, establish identity and observation-state visibility, enable it and record successful completion time `e`. After `e`, read the complete pointer through the pinned memory handle and observe NULL. Complete a producer/lifecycle fence after that read. The retained witness establishes zero pointer-watch fires between enable and that fence, unchanged readable counters, continuous binding and ownership, and a lifetime-bound permanent-role fact obtained through the same binding. No inactivity bracket, voluntary-switch equality, wait-word read or numerical seed is required.
+
+Add control input `CONFIRM_NO_WAIT_WORD(pid,g,attachment_generation,e,witness,d,C)`. The witness includes the ordered enable/read/fence observations, pointer-watch coverage, role qualification, binding, producer completion and reliable failure accounting. It consumes no transport position and supplies no source boundary.
+
+Commit `b_i=e` only after matching route-(c) ADMIT, qualified source completeness strictly beyond `e`, reconciliation of all retained attachment and lifecycle evidence, completed failure accounting, and successful publication of the required supporting coverage evidence. A failed candidate witness supplies no bound. A control falsely claiming completed identity, coherence or continuity reports `FAULT(unknown_evidence,d,C)`.
+
+Keep the pointer watch continuously armed for the remaining lifetime. A subsequent fire whose qualified observation is NULL supplies no numerical or lifecycle event and manufactures no loss; retain its internal observation accounting. A fire observing non-NULL contradicts the permanent-role proof and follows Decision 43. A failed required pointer read retains its ordinary failure accounting. This route creates no TRANS, MARKER, INIT, wait seed or CPU seed.
+
+**DECISION 38 — Confirmation failure and retries.** Use a finite configured maximum of `N` wait-word attachment attempts, recorded in diagnostics. Every such attempt starts with the wait-word watchpoint disabled. The independent pointer watch remains continuously armed where required. Every retry is a disable followed by completion fencing of earlier producers and a complete new bracket in Decision 37(b)’s order. Preserve earlier records, counters and producer updates. Every retry occurs before ADMIT (for a cookie-less EXIT, see the final terminal disposition of Decision 40).
 
 After ADMIT there is no disable, reseed or replacement of the admitted attachment to repair its history. Confirmation-control delivery and fence completion may still be pending; neither authorizes another physical bracket.
 
@@ -385,7 +411,15 @@ On exhaustion, a lifetime with an independently valid final attachment may recei
 
 The quiet-baseline route is required scope. Ordinary indefinitely idle, otherwise qualified clients and auxiliaries must be exercised by qualification; waiting for their first transition does not satisfy that requirement.
 
-**DECISION 39 — Address and ownership qualification.** Apply identical admission semantics to PG13 and PG18 while qualifying address resolution separately. PG13 uses resolved `MyProc` plus the qualified field offset; PG18 uses the resolved wait-pointer target. Reading the pointer variable or a stale former target is insufficient.
+A successfully read NULL pointer is not a failed wait-word address read and consumes no attachment attempt. A NULL candidate without a qualified permanent role receives no ADMIT for Decision 37(c), no numerical baseline and no lower bound. Retain its pointer watch and pending inventory entry.
+
+A qualified non-NULL pointer fire makes that still-pending lifetime eligible for ordinary Decision 37(a) or 37(b) attachment; wait-word attempts start then. The pointer fire itself supplies neither a lower bound nor a numerical record. A matching exit uses Decision 40.
+
+For an authenticating client, the waiting target is at most its remaining qualified `authentication_timeout`. Expiration alone supplies no initialization, terminal discharge, census completeness or coverage bound. If the expected initialization or exit evidence is absent at that limit, retain pending status and report that the waiting limit was exceeded. Do not extend the timeout claim to other unqualified roles.
+
+An accepted Decision 37(c) bound cannot transition to a fresh-record or quiet-baseline route. Later initialization contradicts its permanence proof and requires Decision 43 fault handling and revocation.
+
+**DECISION 39 — Address and ownership qualification.** Apply identical admission semantics to PG13 and PG18 while qualifying address resolution separately. For Decisions 37(a) and 37(b), PG13 qualifies resolved `MyProc` plus the field offset, and PG18 qualifies the resolved wait-pointer target. Reading only the pointer variable or a stale former target is insufficient for either numerical route. Decision 37(c) instead qualifies the complete pointer variable and its permanent-role proof; it does not qualify a NULL target as a wait-word address.
 
 Quiet confirmation assumes one thread throughout the bracket, no foreign writer of the observed wait word or its address chain, and no producer writer outside the qualified initialization/ownership protocol. Thread count comes from status observations through the pinned task handle; lifecycle evidence must also exclude an intervening thread or lifetime change. Endpoint thread counts alone do not prove that history.
 
@@ -393,13 +427,31 @@ Inactivity protects the in-bracket address resolution, not future address stabil
 
 An address mismatch rejects the bracket. A later ADMIT requires its own valid address proof; the failed bracket does not authorize admission against the wrong address. A demonstrated observation-continuity violation follows the existing fault rules.
 
+For Decision 37(c), qualify a per-major, binary-specific permanent-role set. Read `MyBackendType`, or another independently qualified role discriminator, through the pinned binding and require membership in that set. The qualification establishes that the identified role cannot acquire or use a wait word during the remaining lifetime. A process title, shared executable, one NULL observation or an unqualified numeric role value is insufficient.
+
+The pointer watch covers the complete qualified pointer width and every relevant write, including same-value writes and both legs of ABA. Its observation protocol preserves each relevant written value or reliably reports failure; silently missing a non-NULL value followed by NULL is forbidden. It remains effective across permitted scheduling and migration without silent disabling or multiplexing.
+
+Single-thread ownership, absence of foreign writers, qualified executable identity and complete thread/exec history hold from pointer-watch binding through lifetime termination. Endpoint observations alone do not prove this history. A change invalidating an accepted no-wait-word proof follows Decision 43. Unknown or unsupported assumptions refuse confirmation. Permanent-role qualification for one major does not qualify another major.
+
 **DECISION 40 — Terminal discharge without state.** EXIT accounting must not depend on `state_map` existence. For an unresolved census lifetime, a complete matching kernel terminal proof at `x_i` may discharge its inventory entry without establishing numerical evidence.
 
-If a discovery cookie exists, snapshot it before tombstoning. If exit precedes identity installation, retain a kernel terminal witness and resolve it against retained census/lifecycle history; do not infer identity from the PID’s current map entry. An unresolved or contradictory match supplies no terminal discharge. Cookie-less EXIT is not automatically matching evidence.
+If a discovery cookie exists, snapshot it before tombstoning. If exit precedes identity installation, retain a kernel terminal witness and resolve it against retained census/lifecycle history; do not infer identity from the PID’s current map entry. Cookie-less EXIT is not automatically matching evidence. For every cookie-less lifecycle EXIT whose PID matches an inventory entry the daemon issues exactly one final terminal disposition, a control that consumes no source position and supplies no boundary: matched, when retained census/lifecycle history binds the EXIT to exactly one inventoried lifetime, otherwise unresolved. That EXIT and its frontier are held only until the disposition; no elapsed time, idle period or source boundary substitutes for it, and a capture finished without it reports FAULT(unknown_evidence). On unresolved the EXIT is consumed as an uncovered record: counted once, never published, no VOID; the entry stays unresolved, the pending count and census completeness are unchanged, and the startup gap stays open for the rest of the capture. A matched disposition after an unresolved one for the same EXIT, or the reverse, reports FAULT(unknown_evidence); an identical duplicate is idempotent. A disposition delivered before the EXIT it names applies when that EXIT is consumed, which is then not held. A contradictory match supplies no discharge.
 
-Without mutable interval state, emit no invented terminal TRANS. Publish the lifecycle witness with ordinary reserve-before-timestamp and reliable failure-accounting rules. ENOENT, ESRCH, a missing `/proc` entry and later negative liveness checks alone are insufficient.
+Without mutable interval state, emit no invented terminal TRANS. Publish the lifecycle witness with ordinary reserve-before-timestamp and reliable failure-accounting rules. ENOENT, ESRCH, a missing `/proc` entry and later negative liveness checks alone are insufficient to discharge an inventoried lifetime. Decision 31(G) applies only to an unbound numeric observation and additionally requires its completed, loss-free journal proof.
 
-**DECISION 41 — Startup gap and closure.** Open a hard base-coverage gap at `boot_start` before advertising startup coverage. Each inventoried lifetime remains unresolved until it supplies either a committed lower bound `b_i` or an accepted terminal discharge `x_i`. An exit after establishment of `b_i` does not replace that lower bound.
+Resolve valid current-lifetime fork provenance first and preserve the existing fork route. Without such provenance, emit a cookie-less lifecycle EXIT only when the exiting task proves all three facts: `tid==tgid`, `real_parent->tgid==postmaster`, and known `start_time<F0`. A discovery cookie is usable only when it is bound to this exact kernel lifetime and the same three facts hold. Neither the existence of a live discovery identity nor a tombstone is a pass condition.
+
+A leader that is a postmaster child with known `start_time>=F0` and no valid fork cookie is a missing-fork loss, never a discovery terminal. Reliably account it in `lifecycle_fork_drop` when that missing fork has not already been accounted; preserve independently recorded failures. Emit no discovery EXIT for it. An unknown start time cannot pass either time comparison; for a postmaster-child leader without valid fork provenance, report `FAULT(unknown_evidence,d,C)` without inventing a loss-counter increment. Non-leaders and non-children emit no discovery lifecycle EXIT; retain any thread/lifecycle journal bookkeeping required for ownership proofs.
+
+Construct terminal witnesses in the exiting task's context, retaining `(pid,start_ns)`, leader and parent facts, fork provenance, and `exit_ns`. The corresponding lifecycle EXIT has that same semantic timestamp and a retained transport identity. Journal insertion and publication obey reserve-before-timestamp, producer-completion and reliable failure-accounting rules.
+
+A J witness from Decision 31 establishes the journal-only inventory lifetime before its matched disposition is applied. Require completed relevant producers, including entered/completed accounting, and readable unchanged relevant counters from `F0` through the terminal reconciliation fence. For an already bound inventory entry, require exact agreement with its retained kernel start identity. Match the particular EXIT transport record and journal witness; never match through the PID's current map value, first-EXIT arrival order or a later replacement.
+
+A matched disposition supplies `x_i=exit_ns` only when the corresponding EXIT passes strict release eligibility and the complete release attempt commits without fault, including all counter checkpoints and any required FRONTIER publication. Control receipt, a journal entry alone, or an EXIT in a subsequently VOIDed release attempt supplies no discharge. Preserve the existing unresolved-disposition and duplicate-disposition rules.
+
+If an otherwise valid J witness's `exit_ns` contradicts its named lifecycle EXIT timestamp, report `FAULT(unknown_evidence,d,C)` and supply no discharge. Retain the J-established inventory lifetime and resolution of the numeric observation; this timestamp mismatch alone changes neither census completeness nor those established identities.
+
+**DECISION 41 — Startup gap and closure.** Open a hard base-coverage gap at `boot_start` before advertising startup coverage. Each inventoried lifetime remains unresolved until it supplies either a committed lower bound `b_i` from Decision 37(a), 37(b) or 37(c), or an accepted terminal discharge `x_i`. An exit after establishment of `b_i` does not replace that lower bound.
 
 Replace T-cov rule 5’s closure condition with:
 
@@ -407,7 +459,9 @@ Replace T-cov rule 5’s closure condition with:
 
 Compute `C_close` only after census completeness and discharge of every inventory entry. Require qualified completeness strictly beyond `C_close`, successful validation and accounting of all applicable Decision 45 discards, and successful publication of all supporting records and coverage evidence before committing closure. Persist the gap end `P_close` defined by Decision 42. Publication failure commits neither the affected lower bound nor gap closure. Neither `C_close` nor `P_close` supplies a source boundary or advances FRONTIER.
 
-The interval `[boot_start,P_close)` is unavailable, with `P_close` from Decision 42. Windows beginning at or after `P_close` are eligible only under all other coverage, loss, attribution and A2 rules. Abandonment supplies neither a lower bound nor terminal discharge; an abandoned lifetime remains unresolved until Decision 40 discharges it. Pending diagnostics report the number of unresolved inventoried lifetimes and separately report whether census completeness is known. A known complete census with no unresolved lifetimes is distinct from an unknown census.
+The interval `[boot_start,P_close)` is unavailable, with `P_close` from Decision 42. Windows beginning at or after `P_close` are eligible only under all other coverage, loss, attribution and A2 rules. Abandonment supplies neither a lower bound nor terminal discharge; an abandoned lifetime remains unresolved until Decision 40 discharges it. Pending diagnostics separately report unresolved inventoried lifetimes and unresolved numeric census observations, and report their sum as the total pending count. A number is not counted again after it is resolved into an inventory lifetime. Separately report whether census completeness is known. A known complete census with no unresolved obligations is distinct from an unknown census.
+
+Decision 37(c) changes neither the `C_close` formula nor its completeness and publication requirements. Its bound alone supplies no uncertified TRANS/MARKER at `C_close` and therefore triggers no Decision 42 increment. Apply Decision 42 to all other applicable records and discards: their presence at `C_close` can still require `P_close=C_close+1 ns`. A later lifecycle EXIT for a no-wait-word lifetime does not change its committed bound or the already persisted startup endpoint.
 
 **DECISION 42 — No discovery storage carrier.** Use the existing persisted startup gap; add no per-record discovery storage carrier. For an admitted lifetime, uncertified incoming intervals, including earlier-attempt intervals, must end at or before its committed `b_i≤C_close`. For an abandoned lifetime resolved by terminal discharge, its discarded timed records must be stamped at or before its accepted `x_i≤C_close`. Reconcile these facts before closure; contradictory evidence retains its existing fault consequences. Preserve the raw payload bytes of published records.
 
@@ -422,6 +476,12 @@ The quiet-baseline route qualifies only when subsequently certified intervals us
 Retain the existing late-unlisted startup revocation: discovering an unlisted pre-existing lifetime after closure revokes base coverage from `boot_start`, including affected cached answers. This remains a regression requirement. Discovery does not authorize recovery-time admission or automatic REARM. Independently established faults retain their existing VOID behavior.
 
 Discovery contributes neither an observed birth to `N_k` nor an omission to `U_k`. A pre-existing terminal discharge is not UNTRACED. Apply this clarification to coverage-a2-v1’s population and late-attachment rules.
+
+A Decision 37(c) lifetime contributes nothing to `N_k`, `U_k`, any numerical numerator or the measured population. It supplies no wait duration, completed-wait count, CPU time or off-CPU time. Absence of contributions is not a measurement of zero work.
+
+Show the process as 'present, not measured', with its qualified role. Its individual numerical quantities are unavailable, not zero; identify the exclusion when presenting the measured population. Preserve the lifetime-bound role and coverage evidence required to maintain this meaning on replay and cache reuse. A persisted gap endpoint alone supplies no role or numerical observation.
+
+A non-NULL pointer fire after an accepted Decision 37(c) bound reports `FAULT(unknown_evidence,d,C)`. A demonstrated break in its required continuous observation or ownership proof has the same consequence, in addition to independently established counter faults. Revoke that lower bound and base coverage from `boot_start`, invalidate affected cached answers, reopen the startup gap and return the lifetime to pending status. Census completeness must be re-established. Do not replace revocation with a handoff gap or automatically REARM.
 
 **DECISION 44 — Qualification and evidence.** exact_perf remains non-default and EL8-only until the actual vendor 4.18 kernel passes PG13 and PG18 qualification. Ubuntu qualification is separate. Preserve the separately authorized idle-boundary default. Idle boundaries advance completeness; they do not establish a backend baseline.
 
@@ -465,7 +525,7 @@ Two independent answer sets (oracle-discovery/answers-sol.md, answers-opus.md) a
 - A wait that is still open in a row contributes no completed count and no duration; it is not reported as zero duration (row D02c).
 
 After the review of the merge unit found two gaps (the instant C, and an identity installed but never admitted), DECISIONs 36, 38, 41 and 42 were revised and DECISION 45 (abandoned discovery) was added. The persisted gap end follows Fable's rule (C+1 only when an uncertified discovery record is stamped exactly C; no flag in the reserved field); Astra, who had proposed a flag, raised no soundness objection to it. Two fresh independent answer sets for the 34 changed and new rows (oracle-discovery/answers-delta-sol.md, answers-delta-opus.md, compare-delta.md) agreed with each other and with the expected outputs on 33 rows. This sentence decides the remaining one; it changes no agreed answer.
-- A terminal discharge commits only when its lifecycle EXIT has been published successfully. A rejected EXIT publication leaves the lifetime pending and the startup gap open (row A15).
+- A terminal discharge commits only when the release attempt that output its EXIT completes without fault, including every counter checkpoint and the FRONTIER publication when one is due; an EXIT output in an attempt that is then VOIDed discharges nothing in that or any later epoch, whatever the order of TERM and EXIT. A rejected EXIT publication likewise leaves the lifetime pending and the startup gap open (rows A15, V1-V4).
 
 ### Oracle
 
