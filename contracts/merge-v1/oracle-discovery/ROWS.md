@@ -37,7 +37,7 @@ Notation additions:
 - `NW_De{…}` expands to that physical history, `AD_De{route=c}`, then `CONFIRM_NO_WAIT_WORD(D,α,e,witness,20,C0)`. Overrides describe actual facts; an explicit false completed-proof claim is identified in the row.
 - `PTR_Dt(value)` records a qualified pointer fire at semantic time `t`, observed at detection time 20 with C0 unless overridden. It supplies no implicit transport DATA or boundary.
 - `Cr=C0` except `wait_read_fail=1`; `Ck=C0` except `lifecycle_fork_drop=1`.
-- N rows inspect attempt count, committed bound, persisted gap, role presentation and numerical-population contributions.
+- N rows inspect attempt count, committed bound, persisted gap, backend listing and numerical-population contributions.
 - Unless overridden, J rows replace the default D census with one numeric observation of PID 50: listed at 2, failed open at 3, no bound lifetime, proposed census fence 5.
 - `U` denotes a lifetime subsequently bound to PID 50; its discovery cookie, when installed, is `2^63`. `R=(pid=50,g=1)` denotes a fork-route replacement.
 - `J_U4` supplies a retained kernel witness for PID 50, known start offset −100, leader, parent postmaster, no fork provenance, exit timestamp 4, complete reconciliation through fence 5 and C0. It requests J resolution and a matched disposition for the identified EXIT transport record.
@@ -47,6 +47,14 @@ Notation additions:
 - `KEXIT{…}` exercises the kernel exit filter. It supplies the actual task facts and exposes any emitted records and counter changes to the adapter. Default detection time is 20.
 - All J witnesses retain the corresponding EXIT transport identity. No current-map lookup supplies their identity.
 - In expected states, `P=L+Q` separates unresolved lifetime count L from unresolved numeric-observation count Q. `census=known/unknown` is explicit. Unless listed, no VOID, FAULT, UNTRACED or additional DATA is produced.
+- R rows (forward-only certification latch, order-independent refutation): Use existing source, ordering, publication and detection defaults. D is installed and independently bound; numeric pending is zero. Each parameter combination below is a separate execution, with its parameter tuple retained in the result.
+- `ADc6`, `CN6` are the separate controls from `NW_D6`; `TRY_NW_D6` supplies that physical history. Controls explicitly asserting completed proof are identified below.
+- `K=CHECK(20,Cr)`; subsequent observations retain Cr. `RA=REARM(21,current-vector,fresh attachment_proofs)`; subsequent observations use detection time 22. Explicit REARM uses the abstract replay entry.
+- `h∈{0,1}` means H absent or inventoried and unresolved, respectively. Census fence remains 5 and completeness is known.
+- `p∈{empty,AD_D6,AB_D}`. `q∈{empty,K}`. `r∈{empty,RA}`. Each TERM names its exact EXIT transport record.
+- `{earlier}` means retained origin α1 against final α2; `{final}` proves final membership. In R1 also execute the membership-unproved variant.
+- Every row observes public commitments, pending split, census, latch, closure, persisted gap history, faults, invalidations and consumption counts after every primitive input.
+- P rows use the amended N-row defaults; no role-support publisher exists.
 
 | ID | Input sequence / starting-state override |
 |---|---|
@@ -120,7 +128,7 @@ Notation additions:
 | V2 | V1 with `TERM_D18` also delivered before `EXIT_D18@L`. |
 | V3 | `AB_D, TERM_D17, EXIT_D17@L, A18@P0, S(19)`, writer rejects A18 at 20 observing Cw; then `REARM(21,Cw,attachment_proofs), TERM_D17, S(20)`, observations after REARM at 22. |
 | V4 | `AB_D, TERM_D18, EXIT_D18@L, S(19)`, writer rejects F18 at 20 observing Cw; then `REARM(21,Cw,attachment_proofs), TERM_D18, S(20)`, observations after REARM at 22. |
-| N1 | `NW_D6, S(6), S(8)`. D runs during qualification; no inactivity observations or CPU seed are supplied. Inspect individual quantities and population contributions. |
+| N1 | `NW_D6, S(6), S(8)`. D runs during qualification; no inactivity observations or CPU seed are supplied. Inspect backend listing, population contributions and absence of role-support publication. |
 | N2 | `TRY_NW_D(6;role=client backend, permanent-role proof absent), S(8)`. Pointer remains NULL. |
 | N3 | `TRY_NW_D(6;the only NULL read occurs at 5 before enable), S(8)`. |
 | N4 | `TRY_NW_D(6;one pointer fire at 7 observes NULL; pinned NULL read at 8; completed fence at 9), S(10)`. |
@@ -129,11 +137,11 @@ Notation additions:
 | N7 | `TRY_NW_D(4;role=client backend, permanent-role proof absent), PTR_D9(non-NULL), AD_D12, B_D11{e=12}, S(13)`. The ordinary numerical attachment has one complete quiet-bracket attempt. |
 | N8 | `TRY_NW_D(4;role=client backend, permanent-role proof absent), TERM_D9, EXIT_D9@L, S(10)`. EXIT_D9 carries D's installed discovery cookie `g=2^63`, snapshotted before tombstoning. No wait-word attachment attempt occurs. |
 | N9 | `TRY_NW_D(6;the completion checkpoint observes Cf), CHECK(20,Cf), S(8)`. Subsequent observations use Cf. |
-| N10 | N1's inputs with role changed to the independently qualified stats-collector role 12. |
+| N10 | N1's amended inputs with role changed to the independently qualified stats-collector role 12. |
 | N11 | `TRY_NW_D(6;role=archiver, numeric value 11, no qualified permanent-role entry), S(8)`. |
 | N12 | `NW_D6{pointer watch was silently disabled between enable and the NULL read; AD explicitly claims continuous observation; CONFIRM truthfully records the disabling and makes no claim of completed continuity}, S(8)`. Only AD supplies a false-proof fault; no separate fault report is delivered. |
 | N13 | Census contains D and H. `NW_D6, AD_H8, H10(Y→X)@P0, S(11)`. |
-| N14 | `NW_D6, S(8)`. The writer rejects required supporting no-wait-word coverage evidence before any FRONTIER publication, at detection 20 with Cw. |
+| N14 | `NW_D6, S(8)`. During the release attempt, before bound commitment or FRONTIER publication, the writer rejects the required startup GAP_CLOSE with endpoint 6, at detection 20 with Cw. |
 | N15 | `TRY_NW_D(6;required pinned pointer read fails and increments wait_read_fail), CHECK(20,Cr), S(8)`. Subsequent observations use Cr. |
 | N16 | `TRY_NW_D(4;role=authenticating client, permanent-role proof absent, qualified remaining authentication deadline=14), AOP(deadline 14 expires; no initialization or matching terminal evidence), S(16)`. |
 | J1 | `J_U4, EXIT_U4@L{no cookie}, S(4), S(8)`. No `/proc` binding succeeds. |
@@ -158,3 +166,18 @@ Notation additions:
 | J20 | J2's inputs, then `LATE_U(40)` for an unlisted pre-existing target lifetime using PID 50. No additional transport DATA is supplied. |
 | J21 | `G_50{the only ESRCH observation occurs at 2 before the failed open at 3}, S(8)`. |
 | J22 | `R_50{current holder R is leader,parent=postmaster,start offset=-100,valid observed fork cookie}, K_R1, R6@P0, S(8)`. Retained history proves this observed fork despite its pre-`F0` task-start timestamp. Use `H_A2>6 ns`; report R's Decision 25c numerical lower bound and `dN_0,dU_0`. |
+| R1 | `AD_D6{α2}, D14@P0{earlier}, S(15), B_D6{e=6,α2; explicitly claims completed reconciliation}, S(25)`. Repeat with D14's final-attachment membership unproved. |
+| R2 | For every p, execute both `p, TERM_D18, D20@P0, EXIT_D18@L, S(25)` and `p, D20@P0, TERM_D18, EXIT_D18@L, S(25)`. For each, also insert K immediately before the TERM/DATA pair, or between its two members. No REARM. |
+| R3 | For every h and q: `NW_D6, S(8), q, D12@P0`. Repeat replacing D12 with `PTR_D12(non-NULL)` and with a demonstrated pointer-observation continuity break. |
+| R4 | For every h and q: `AD_D13, B_D12, S(14), q, D15@P0{earlier}`. |
+| R5 | For every h, p and q: `p, TERM_D18, EXIT_D18@L, S(19), q, D20@P0`. |
+| R6 | `AB_D, EXIT_D18@L, D20@P0, S(21), TERM_D18`. |
+| R7 | (a) `TERM_D18, EXIT_D18@L, S(19), K, RA, S(25)`. (b) `AD_D6, D12@P0{final}, S(13), D20@P0{final}[Cr], RA, S(25)`. |
+| R8 | For each r: (a) `AD_D6, K, r, S(25), D26@P0{final}, S(27)`; (b) `AD_D6, B_D6, K, r, S(25)`; (c) `NW_D6, K, r, S(25)`. Bounds have no source completeness before K. RA's fresh attachment proofs include D's attachment. |
+| R9 | For each r: (a) `AD_D6, EXIT_D18@L, S(19), K, r, TERM_D18, S(25)`; (b) `AD_D6, TERM_D26, K, r, EXIT_D26@L, S(27)`. Terminal bindings are independently valid; their controls make no false claim. |
+| R10 | `TRY_NW_D6, ADc6, PTR_D9(non-NULL), CN6, S(10)`. CN6 explicitly asserts completed permanent-role/continuity reconciliation despite PTR9. Repeat with the demonstrated continuity break. |
+| R11 | D never receives ADMIT or ABANDON: `EXIT_D18@L, S(19)`. No disposition or capture-finish input follows. |
+| R12 | D never receives ADMIT or ABANDON: `TERM_D18, EXIT_D18@L, S(19), D12@P0`. |
+| P1 | N1, with no role-support publisher installed. |
+| P2 | N1, then a demonstrated pointer-observation continuity break at detection 20, C0; `S(14)`. |
+| P3 | N6, persisted and read back; inspect startup endpoint and backend/omission populations. |
