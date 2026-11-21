@@ -478,8 +478,11 @@ PYEOF
     for name in ${!PG@}; do TRACER_ENV+=("$name=${!name}"); done
     # Start synchronously: a signal trap runs only after systemd-run returns,
     # so stop cannot race creation of the daemon's unit. ExecStopPost records
-    # the real daemon exit before --collect removes the unit.
+    # the real daemon exit before --collect removes the unit. Bound tracing
+    # even if SIGKILL prevents the test's traps: normal capture needs roughly
+    # ESC_SECONDS + 8 seconds; allow startup headroom, then bound stop too.
     systemd-run --quiet --collect --unit="$TRACER_UNIT" \
+        -p "RuntimeMaxSec=$((ESC_SECONDS + 60))" -p TimeoutStopSec=10 \
         -p StandardOutput=null -p "StandardError=file:$LOG" \
         -p "ExecStopPost=/bin/sh \"$SCRIPT_DIR/xval_daemon_exit.sh\" \"$TRACE_DIR/daemon.exit\"" \
         /usr/bin/env "${TRACER_ENV[@]}" "$TRACER" --daemon --pid "$PM_PID" \

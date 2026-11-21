@@ -522,6 +522,14 @@ Two behaviors are by design and must be handled by your service manager:
   any unit under `system.slice` can enable the controller for sibling units
   and separate the tracer's CPU group from PostgreSQL's
   ([placement measurements](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-6998288488)).
+  On cgroup v1, a unit with a CPU property makes systemd place processes under
+  per-slice CPU cgroups. On the clean-boot EL8 host, after a transient
+  `CPUShares=512` unit stopped, the postmaster was observed in
+  `/system.slice/postgresql-18.service` and a new plain unit in `/system.slice`.
+  Later readings had both in `/`; the duration was not measured
+  ([EL8 observation](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7068935283)).
+  The startup warning identifies the groups when a split is present on either
+  cgroup version.
   The documented sampled-tier accuracy figures apply only when both share a
   CPU scheduling group. If they differ, the tracer warns at startup that
   nice does not act across CPU groups and **no sampled-tier accuracy figure

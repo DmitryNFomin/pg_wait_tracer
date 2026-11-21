@@ -50,11 +50,14 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   separately in #757); this change is the compare-join fix only.
 
 - **fix: sampler timer health and scheduling disclosure (#675/#697).**
-  New runtime env var `PGWT_SAMPLER_NICE` accepts integers -20..19 for the
-  daemon's own niceness (unset/empty leaves it unchanged; `0` verifies
-  without changing it); malformed or out-of-range values are refused with a
-  warning. Nice does not remove the sampled CPU figure's lower-bound bias
-  under CPU contention. Rename the shutdown label from "sampled CPU
+  `PGWT_SAMPLER_NICE` accepts integers -20..19 for the sampler's calling
+  thread. Unset defaults to -10; an explicit `0` applies nice 0. Empty,
+  malformed or out-of-range values warn and use -10. Failure to apply the
+  requested value warns and capture continues. Nice -10 reduced deviation
+  in measured plain-service setups sharing PostgreSQL's CPU group; residual
+  under-read remains. Startup warns when CPU groups differ, and no sampled-tier
+  accuracy figure is claimed for that setup (Refs #306).
+  Rename the shutdown label from "sampled CPU
   confidence" to "sampler timer health": it measures timer scheduling delay,
   and every verdict now states that the sampled CPU figure is a lower bound.
   This is stderr-only wording; the control-socket fields and wire format are

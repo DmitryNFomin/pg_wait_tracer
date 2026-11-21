@@ -1631,7 +1631,8 @@ sampled CPU can under-read more under contention without that weight.
 
 Nice changes scheduling weight within a CPU group. In measurement 7's plain
 system service with no CPU property and the tracer and PostgreSQL sharing a
-CPU group, the median CPU-share under-read fell from **7.45 to 4.15 pp on
+CPU group, the median deviation (largest absolute share disagreement over
+eligible events) fell from **7.45 to 4.15 pp on
 Ubuntu**, and from **9.85 to 3.55 pp on EL8** (each arm **n=8**;
 [owner decision](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7004963488)).
 Residual under-read remains. When the CPU groups differ, nice does not act
@@ -1646,6 +1647,13 @@ process's cgroup path to the nearest group whose parent enables `cpu` in
 alone therefore need not mean a different CPU group. Keep the service free of
 CPU properties: on v2 a CPU property on any sibling under `system.slice` can
 enable the controller for siblings and separate the tracer from PostgreSQL.
+On v1, a unit with a CPU property makes systemd place processes under per-slice
+CPU cgroups. On the clean-boot EL8 host, a split was observed after a transient
+`CPUShares=512` unit stopped: the postmaster was in
+`/system.slice/postgresql-18.service` and a new plain unit in `/system.slice`.
+Later readings had both in `/`; the duration was not measured
+([EL8 clean-boot observation](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7068935283)).
+In either case, the administrator sees the startup warning if the groups differ.
 See [the service example](INSTALL.md#operational-contracts-run-under-a-supervisor).
 
 **Full tier (exact, during escalation).** A **CPU hardware debug register**
@@ -1927,10 +1935,11 @@ thread's nice value during the workload. A mismatched layout or a nice value
 other than **-10** is invalid, independently of the numerical comparison.
 
 **The accuracy figures apply only to a shared CPU scheduling group.** With a
-plain service and no CPU property, measurement 7 found median CPU-share
-under-read of **4.15 pp on Ubuntu** and **3.55 pp on EL8** with nice **-10**,
-versus **7.45** and **9.85 pp** without it (**n=8 per arm**). With PostgreSQL in its own CPU
-group, the EL8 arm read **10.35 pp** low and nice did not help. These are
+plain service and no CPU property, measurement 7 found median deviation
+(largest absolute share disagreement over eligible events) of **4.15 pp on
+Ubuntu** and **3.55 pp on EL8** with nice **-10**, versus **7.45** and
+**9.85 pp** without it (**n=8 per arm**). With PostgreSQL in its own CPU
+group, the EL8 arm's deviation was **10.35 pp** and nice did not help. These are
 setup-specific measurements, not portable bounds
 ([measurement 7 and owner decision](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7004963488)).
 When groups differ, startup warns and **no sampled-tier accuracy figure is
