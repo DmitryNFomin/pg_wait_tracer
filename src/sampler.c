@@ -75,9 +75,10 @@ int pgwt_sampler_parse_nice(const char *env, int default_nice, int *out)
 enum pgwt_sampler_sched_request
 pgwt_sampler_sched_request(const char *env, int *out_nice)
 {
-    if (!env || !*env)
-        return PGWT_SAMPLER_SCHED_LEAVE_ALONE;
-    return pgwt_sampler_parse_nice(env, 0, out_nice)
+    *out_nice = -10;
+    if (!env)
+        return PGWT_SAMPLER_SCHED_DEFAULT;
+    return *env && pgwt_sampler_parse_nice(env, 0, out_nice)
         ? PGWT_SAMPLER_SCHED_APPLY : PGWT_SAMPLER_SCHED_REFUSED;
 }
 
@@ -89,7 +90,7 @@ int pgwt_sampler_apply_sched(int want_nice, struct pgwt_sampler_sched *out)
     };
     if (want_nice < -20 || want_nice > 19)
         out->err = EINVAL;
-    else if (want_nice != 0 && setpriority(PRIO_PROCESS, 0, want_nice) != 0)
+    else if (setpriority(PRIO_PROCESS, 0, want_nice) != 0)
         out->err = errno;
 
     /* getpriority may return -1 as a legitimate nice value. Preserve a
@@ -103,6 +104,29 @@ int pgwt_sampler_apply_sched(int want_nice, struct pgwt_sampler_sched *out)
         out->err = read_err ? read_err : (applied == want_nice ? 0 : EIO);
     out->ok = (out->err == 0);
     return out->ok;
+}
+
+int pgwt_sampler_save_sched(struct pgwt_sampler_saved_sched *saved)
+{
+    errno = 0;
+    int nice = getpriority(PRIO_PROCESS, 0);
+    *saved = (struct pgwt_sampler_saved_sched){
+        .valid = errno == 0, .nice = nice, .err = errno,
+    };
+    return saved->valid;
+}
+
+int pgwt_sampler_restore_sched(struct pgwt_sampler_saved_sched *saved,
+                              struct pgwt_sampler_sched *out)
+{
+    if (!saved->valid) {
+        *out = (struct pgwt_sampler_sched){.requested = 20, .applied = 20,
+                                            .err = ENOENT};
+        return 0;
+    }
+    int want = saved->nice;
+    saved->valid = 0; /* exactly one attempt, including a permission failure */
+    return pgwt_sampler_apply_sched(want, out);
 }
 
 enum pgwt_sampler_timer_health

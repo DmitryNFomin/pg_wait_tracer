@@ -24,7 +24,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_wp_attr \
             test_trace_perms \
             test_exact_probe \
-            test_effective_cores \
+            test_effective_cores test_cpu_group cpu_group_readback \
             test_coop test_bucket \
             test_backend_status_layout test_sampled_attr_io test_sampled_attr_lifetime \
             test_synthetic_query \
@@ -415,7 +415,7 @@ test_trace_v2: test_trace_v2.c $(BUILD)/server_event_writer.o \
 # build, and src/idle_rule.c is a ~110-line BPF-free TU with no deps of
 # its own -- which is exactly why the idle rule lives there.
 test_sampler: test_sampler.c ../src/sampler.c ../src/anomaly.c ../src/idle_rule.c
-	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -pthread
 
 # Pure timing + real writer/reader; also runnable on macOS. The compatibility
 # header aborts if the Linux process reader is accidentally invoked there.
@@ -464,6 +464,12 @@ test_exact_probe: test_exact_probe.c ../src/exact_probe.c \
 # modifies the host's cgroup configuration.
 test_effective_cores: test_effective_cores.c ../src/effective_cores.c
 	$(CC) $(CFLAGS) -o $@ $^
+
+test_cpu_group: test_cpu_group.c ../src/cpu_group.c ../src/cpu_group.h
+	$(CC) $(CFLAGS) -o $@ test_cpu_group.c ../src/cpu_group.c
+
+cpu_group_readback: cpu_group_readback.c ../src/cpu_group.c ../src/cpu_group.h
+	$(CC) $(CFLAGS) -o $@ cpu_group_readback.c ../src/cpu_group.c
 
 # Stage 1 PgBackendStatus discovery is BPF-free.  The test feeds synthetic
 # readelf streams into the strict parser and exercises both architecture

@@ -12,6 +12,7 @@
 #include "perf_event.h"
 #include "provider_coop.h"
 #include "sampler.h"
+#include "cpu_group.h"
 #include "wait_event.h"
 #include "percpu_transport.h"
 #include "merge_capture.h"
@@ -688,38 +689,59 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
         d->running = false;
 }
 
-static void start_sampler_sched(void)
+static void check_sampler_cpu_group(pid_t postmaster)
+{
+    struct pgwt_cpu_group daemon, postgres;
+    enum pgwt_cpu_group_relation relation = pgwt_cpu_group_compare(
+        "/proc", "/sys/fs/cgroup", getpid(), postmaster, &daemon, &postgres);
+    if (relation == PGWT_CPU_GROUP_UNKNOWN) {
+        fprintf(stderr, "WARNING: sampler CPU group: unknown; %s%s%s\n",
+                daemon.reason, *daemon.reason && *postgres.reason ? "; " : "",
+                postgres.reason);
+    } else if (relation == PGWT_CPU_GROUP_DIFFERENT) {
+        fprintf(stderr, "WARNING: sampler CPU groups differ: tracer %s:%s, "
+                "PostgreSQL %s:%s; the sampler's nice value does not act "
+                "across CPU groups; documented sampled-tier accuracy figures "
+                "do not apply in this setup.\n", pgwt_cpu_group_source(&daemon),
+                daemon.path, pgwt_cpu_group_source(&postgres), postgres.path);
+    } else {
+        fprintf(stderr, "INFO: sampler CPU group: shared %s:%s\n",
+                pgwt_cpu_group_source(&daemon), daemon.path);
+    }
+}
+
+static void start_sampler_sched(struct pgwt_daemon *d)
 {
     struct pgwt_sampler_sched sched;
     const char *override = getenv("PGWT_SAMPLER_NICE");
     int want;
     switch (pgwt_sampler_sched_request(override, &want)) {
-    case PGWT_SAMPLER_SCHED_LEAVE_ALONE:
-        fprintf(stderr, "INFO: sampler scheduling: left unchanged (default); "
-                "the sampled tier CPU figure is a lower bound under CPU "
-                "contention because the daemon observes only when the "
-                "scheduler runs it. PGWT_SAMPLER_NICE does not remove "
-                "that bias, because nice is a CFS weight and not a "
-                "scheduling class.\n");
-        return;
+    case PGWT_SAMPLER_SCHED_DEFAULT:
     case PGWT_SAMPLER_SCHED_APPLY:
-        pgwt_sampler_apply_sched(want, &sched);
         break;
     case PGWT_SAMPLER_SCHED_REFUSED:
         fprintf(stderr, "WARNING: sampler scheduling: PGWT_SAMPLER_NICE "
-                "\"%s\" refused (expected integer -20..19); scheduling left "
-                "unchanged; the sampled tier CPU figure is a lower bound "
-                "under CPU contention because the daemon observes only "
-                "when the scheduler runs it.\n", override);
-        return;
+                "\"%s\" invalid (expected integer -20..19); applying "
+                "default nice -10.\n", override);
+        break;
     }
+    int have_original = pgwt_sampler_save_sched(&d->sampler_saved_sched);
+    pgwt_sampler_apply_sched(want, &sched);
+    if (have_original && (want == d->sampler_saved_sched.nice ||
+                          sched.applied == d->sampler_saved_sched.nice))
+        d->sampler_saved_sched.valid = 0; /* no change to restore or retry */
 
-    if (sched.ok)
-        fprintf(stderr, "INFO: sampler scheduling: applied nice %d as "
-                "requested; measured NOT to move S/G on CFS "
-                "(nice is a CFS weight, not a scheduling class).\n",
+    if (sched.ok) {
+        fprintf(stderr, "INFO: sampler scheduling: applied nice %d; "
+                "nice -10 reduced sampled CPU under-read in measured plain "
+                "service setups sharing PostgreSQL's CPU group; residual "
+                "under-read remains.\n",
                 sched.applied);
-    else {
+        if (!have_original)
+            fprintf(stderr, "WARNING: sampler scheduling: cannot save prior "
+                    "nice: %s; cleanup cannot restore it before later "
+                    "workers are created.\n", strerror(d->sampler_saved_sched.err));
+    } else {
         fprintf(stderr, "WARNING: sampler scheduling: nice not verified "
                 "(requested nice %d, ", sched.requested);
         if (sched.applied == 20)
@@ -730,9 +752,9 @@ static void start_sampler_sched(void)
         else
             fprintf(stderr, "readback %d): %s", sched.applied,
                     strerror(sched.err));
-        fprintf(stderr, "; continuing; the sampled tier's CPU figure "
-                "is a LOWER BOUND under CPU contention because the daemon's "
-                "observation instants are selected by the scheduler.\n");
+        fprintf(stderr, "; continuing without retry; sampled CPU may "
+                "under-read under CPU contention; no scheduling improvement "
+                "is verified by this request.\n");
     }
 }
 
@@ -1696,7 +1718,8 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             perror("timerfd_create (sampler)");
             goto fail;
         }
-        start_sampler_sched();
+        start_sampler_sched(d);
+        check_sampler_cpu_group(d->postmaster_pid);
         srand((unsigned)(time(NULL) ^ getpid()));
         arm_sample_timer_jittered(d);
     }
@@ -2300,6 +2323,17 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
     if (d->epoll_fd >= 0) { close(d->epoll_fd); d->epoll_fd = -1; }
     if (d->timer_fd >= 0) { close(d->timer_fd); d->timer_fd = -1; }
     if (d->sample_timer_fd >= 0) { close(d->sample_timer_fd); d->sample_timer_fd = -1; }
+    /* Daemon supervision can rediscover and re-init in this same process.
+     * Restore before that work, so subprocesses and new workers do not inherit
+     * the sampler-only adjustment. This also covers init's fail path. */
+    if (d->sampler_saved_sched.valid) {
+        struct pgwt_sampler_sched restored;
+        if (!pgwt_sampler_restore_sched(&d->sampler_saved_sched, &restored))
+            fprintf(stderr, "WARNING: sampler scheduling cleanup: cannot "
+                    "restore prior nice %d: %s; continuing without retry; "
+                    "later workers may inherit the sampler's nice.\n",
+                    restored.requested, strerror(restored.err));
+    }
     if (d->coverage_timer_armed) {
         close(d->coverage_timer_fd);
         d->coverage_timer_armed = false;

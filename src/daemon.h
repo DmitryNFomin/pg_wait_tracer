@@ -307,6 +307,7 @@ struct pgwt_daemon {
     int epoll_fd;
     int timer_fd;
     int sample_timer_fd;   /* high-rate sampler tick (sampled/tiered); -1 if unused */
+    struct pgwt_sampler_saved_sched sampler_saved_sched; /* main-thread only */
     uint64_t sample_armed_ns;      /* the jittered period last armed */
     uint64_t sample_armed_at_ns;   /* CLOCK_MONOTONIC instant it was armed */
     int signal_fd;
