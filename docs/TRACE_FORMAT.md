@@ -210,6 +210,19 @@ write), `sample_period_ns = 0`, v4 extension 0. Payload (little-endian):
 | 3 GAP_OPEN | start | 0 | gap_id | detection |
 | 4 GAP_CLOSE | end | 0 | gap_id | 0 |
 | 5 SEAL | W_final | 0 | 0 | 0 |
+| 3 GAP_OPEN, reason 5 UNTRACED_LIFETIME | fork_ns | pid | gap_id | detection_ns |
+| 4 GAP_CLOSE, reason 0, matching UNTRACED_LIFETIME | exit_ns | g | gap_id | receive_ns |
+| 7 A2_BUCKET, reason 0 | J_k.start | J_k.end | N_k | U_k |
+
+GAP_OPEN reasons are 1 PAUSE, 2 DROP, 3 REVOKED, 4 COUNTERS_UNKNOWN and
+5 UNTRACED_LIFETIME; other kinds require reason 0. Kind 6 is reserved.
+The A2 records remain schema 1, 48 bytes. The untraced-lifetime pair binds
+`(writer_boot,pid,g)` through a boot-unique gap_id shared across all gap types;
+its interval is `[fork_ns,exit_ns)` and is never expanded to watermark floors.
+`detection_ns` is declaration time; `receive_ns` preserves the original FORK
+dequeue timestamp. A2_BUCKET carries a finalized cohort's distinct birth and
+omission counts. These are carrier shapes only; this codec adds no emitter
+or A2 verdict.
 
 A writer session that enables coverage (the daemon always does) writes BOOT
 as the first block of every file and file_no runs on across rotation. The

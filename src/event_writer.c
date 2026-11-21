@@ -991,8 +991,11 @@ static int write_coverage_block(struct pgwt_event_writer *w,
         return -1;
     if (w->num_blocks >= PGWT_MAX_FILE_BLOCKS && !w->force_rotate)
         w->force_rotate = true;
-    if (block_index_reserve(w) != 0)
+    if (block_index_reserve(w) != 0) {
+        w->enabled = false;
+        w->failed = true;
         return -1;
+    }
 
     long file_offset = ftell(w->fp);
     struct pgwt_trace_block_header bh = {
@@ -1027,6 +1030,8 @@ static int write_coverage_block(struct pgwt_event_writer *w,
         fprintf(stderr, "WARN: trace flush failed (%s) — coverage block %d "
                 "is not visible to readers and is not being advertised\n",
                 strerror(errno), w->num_blocks);
+        w->enabled = false;
+        w->failed = true;
         return -1;
     }
     write_meta_count(w);
@@ -1644,29 +1649,64 @@ int pgwt_writer_coverage_watermark(struct pgwt_event_writer *w,
     return write_coverage_block(w, &r, observation_ns);
 }
 
+static int write_coverage_gap(struct pgwt_event_writer *w,
+                               uint64_t observation_ns,
+                               const struct pgwt_coverage_record *r)
+{
+    if (cov_ready(w, true) != 0)
+        return -1;
+    if (write_coverage_block(w, r, observation_ns) != 0)
+        return -1;
+    /* A gap is the one coverage fact that REVOKES something already
+     * written, so it must survive a crash that follows it at once. */
+    if (r->kind == PGWT_COVK_GAP_OPEN && fsync(fileno(w->fp)) != 0) {
+        fprintf(stderr, "WARN: could not fsync coverage gap %llu (%s)\n",
+                (unsigned long long)r->c, strerror(errno));
+        w->enabled = false;
+        w->failed = true;
+        return -1;
+    }
+    return 0;
+}
+
 int pgwt_writer_coverage_gap(struct pgwt_event_writer *w,
                              uint64_t observation_ns, bool open,
                              uint64_t gap_id, uint64_t t_ns, uint8_t reason)
 {
-    if (cov_ready(w, true) != 0)
-        return -1;
     struct pgwt_coverage_record r = {
         .kind = open ? PGWT_COVK_GAP_OPEN : PGWT_COVK_GAP_CLOSE,
         .reason = open ? reason : 0,
-        .a = t_ns,
-        .c = gap_id,
-        .d = open ? observation_ns : 0,
+        .a = t_ns, .c = gap_id, .d = open ? observation_ns : 0,
     };
-    if (write_coverage_block(w, &r, observation_ns) != 0)
+    return write_coverage_gap(w, observation_ns, &r);
+}
+
+int pgwt_writer_coverage_untraced_lifetime(struct pgwt_event_writer *w,
+                                           uint64_t observation_ns, bool open,
+                                           uint64_t t_ns, uint64_t pid_or_g,
+                                           uint64_t gap_id,
+                                           uint64_t detection_or_receive_ns)
+{
+    struct pgwt_coverage_record r = {
+        .kind = open ? PGWT_COVK_GAP_OPEN : PGWT_COVK_GAP_CLOSE,
+        .reason = open ? PGWT_COVR_UNTRACED_LIFETIME : PGWT_COVR_NONE,
+        .a = t_ns, .b = pid_or_g, .c = gap_id, .d = detection_or_receive_ns,
+    };
+    return write_coverage_gap(w, observation_ns, &r);
+}
+
+int pgwt_writer_coverage_a2_bucket(struct pgwt_event_writer *w,
+                                   uint64_t observation_ns,
+                                   uint64_t start_ns, uint64_t end_ns,
+                                   uint64_t births, uint64_t untraced)
+{
+    if (cov_ready(w, true) != 0)
         return -1;
-    /* A gap is the one coverage fact that REVOKES something already
-     * written, so it must survive a crash that follows it at once. */
-    if (open && fsync(fileno(w->fp)) != 0) {
-        fprintf(stderr, "WARN: could not fsync coverage gap %llu (%s)\n",
-                (unsigned long long)gap_id, strerror(errno));
-        return -1;
-    }
-    return 0;
+    struct pgwt_coverage_record r = {
+        .kind = PGWT_COVK_A2_BUCKET,
+        .a = start_ns, .b = end_ns, .c = births, .d = untraced,
+    };
+    return write_coverage_block(w, &r, observation_ns);
 }
 
 int pgwt_writer_coverage_seal(struct pgwt_event_writer *w,

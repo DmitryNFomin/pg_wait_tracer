@@ -90,6 +90,11 @@ def splice(path, far_obs):
         if k == 0:
             add(cov_block(mid + 1, 3, a=first, c=1, d=mid + 1, reason=2), mid + 1)
             add(cov_block(mid + 2, 4, a=mid, c=1), mid + 2)
+            # The pre-A2 server leaves this gap unexpanded and the
+            # A2_BUCKET certificate is a no-op, just like other metadata.
+            add(cov_block(mid + 3, 3, a=first, b=4321, c=2, d=mid, reason=5), mid + 3)
+            add(cov_block(mid + 4, 4, a=mid, b=17, c=2, d=first), mid + 4)
+            add(cov_block(mid + 5, 7, a=first, b=last + 1, c=10, d=1), mid + 5)
     add(cov_block(far_obs, 2, a=far_obs, b=far_obs, c=far_obs), far_obs)
     add(cov_block(far_obs + 1, 5, a=far_obs), far_obs + 1)
     for ts, off in index:
