@@ -843,6 +843,15 @@ static int write_stream(const char *dir, bool with_cov)
             if (s == 3)
                 pgwt_writer_coverage_gap(&w, BASE + 950 * SEC, true, 9,
                                          BASE, PGWT_COVR_DROP);
+            if (s == 4) {
+                if (pgwt_writer_coverage_untraced_lifetime(&w, BASE + 951 * SEC,
+                        true, BASE + MS, 4321, 10, BASE + 3 * MS) != 0 ||
+                    pgwt_writer_coverage_untraced_lifetime(&w, BASE + 952 * SEC,
+                        false, BASE + 2 * MS, 17, 10, BASE + MS) != 0 ||
+                    pgwt_writer_coverage_a2_bucket(&w, BASE + 953 * SEC,
+                        BASE, BASE + SEC, 10, 1) != 0)
+                    return -1;
+            }
         }
     }
     if (with_cov)
@@ -1025,6 +1034,72 @@ static void test_version_gate(void)
     rm_rf(dir);
 }
 
+/* A2 carrier only: read while live (fflush), then read the closed trace. */
+static void test_a2_carrier(void)
+{
+    char dir[] = "/tmp/pgwt_cov_a2_XXXXXX";
+    if (make_dir(dir) != 0) { failures++; return; }
+    struct pgwt_event_writer w;
+    CHECK(pgwt_writer_init(&w, dir, 18, 24, NULL) == 0, "init A2");
+    CHECK(pgwt_writer_coverage_untraced_lifetime(&w, BASE, true,
+              BASE, 4321, 90, BASE + 3 * MS) != 0 &&
+          pgwt_writer_coverage_a2_bucket(&w, BASE, BASE, BASE + SEC, 10, 1) != 0,
+          "A2 APIs refuse unconfigured writer");
+    pgwt_writer_coverage_configure(&w, BASE, 0, 0);
+    CHECK(pgwt_writer_coverage_untraced_lifetime(&w, BASE + 4 * MS, true,
+              BASE + MS, 4321, 90, BASE + 3 * MS) == 0, "A2 open");
+    CHECK(pgwt_writer_coverage_untraced_lifetime(&w, BASE + 5 * MS, false,
+              BASE + 2 * MS, 0x1020304050607080ULL, 90, BASE + MS) == 0,
+          "A2 close: receive can precede exit");
+    CHECK(pgwt_writer_coverage_a2_bucket(&w, BASE + 2 * SEC,
+              BASE, BASE + SEC, 10, 1) == 0, "A2 bucket");
+    CHECK(pgwt_writer_coverage_a2_bucket(&w, BASE + 3 * SEC,
+              BASE + SEC, BASE + 2 * SEC, 0, 0) == 0, "empty A2 bucket");
+    char path[600];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    for (int closed = 0; closed <= 1; closed++) {
+        if (closed) CHECK(pgwt_writer_close(&w) == 0, "close A2");
+        struct covlist c;
+        CHECK(read_cov(path, &c) == 0 && c.n == 5 && c.bad == 0 &&
+              c.data_blocks == 0, "live/closed A2 records decode as valid");
+        if (c.n != 5) continue;
+        CHECK(c.rec[1].kind == PGWT_COVK_GAP_OPEN && c.rec[1].reason == 5 &&
+              c.rec[1].a == BASE + MS && c.rec[1].b == 4321 &&
+              c.rec[1].c == 90 && c.rec[1].d == BASE + 3 * MS &&
+              c.obs[1] == BASE + 4 * MS, "A2 open preserves all fields");
+        CHECK(c.rec[2].kind == PGWT_COVK_GAP_CLOSE && c.rec[2].reason == 0 &&
+              c.rec[2].a == BASE + 2 * MS && c.rec[2].b == 0x1020304050607080ULL &&
+              c.rec[2].c == 90 && c.rec[2].d == BASE + MS &&
+              c.obs[2] == BASE + 5 * MS, "A2 close preserves all fields");
+        CHECK(c.rec[3].kind == 7 && c.rec[3].reason == 0 &&
+              c.rec[3].a == BASE && c.rec[3].b == BASE + SEC &&
+              c.rec[3].c == 10 && c.rec[3].d == 1,
+              "A2_BUCKET preserves start/end/counts");
+        CHECK(c.rec[4].kind == 7 && c.rec[4].a == BASE + SEC &&
+              c.rec[4].b == BASE + 2 * SEC && c.rec[4].c == 0 && c.rec[4].d == 0,
+              "A2_BUCKET preserves empty finalized cohort");
+    }
+    pgwt_writer_destroy(&w);
+    rm_rf(dir);
+
+    /* Real lazy-open failure, then both APIs must refuse every later call. */
+    char bad[] = "/tmp/pgwt_cov_a2_fail_XXXXXX";
+    if (make_dir(bad) != 0) { failures++; return; }
+    CHECK(pgwt_writer_init(&w, bad, 18, 24, NULL) == 0, "init failing A2");
+    pgwt_writer_coverage_configure(&w, BASE, 0, 0);
+    CHECK(rmdir(bad) == 0, "remove output directory");
+    CHECK(pgwt_writer_coverage_untraced_lifetime(&w, BASE, true,
+              BASE, 4321, 1, BASE) != 0 && w.failed && !w.enabled,
+          "A2 open failure sticks");
+    for (int i = 0; i < 2; i++) {
+        CHECK(pgwt_writer_coverage_untraced_lifetime(&w, BASE, false,
+                  BASE, 7, 1, BASE) != 0 &&
+              pgwt_writer_coverage_a2_bucket(&w, BASE, BASE, BASE + SEC, 1, 1) != 0,
+              "failed writer refuses A2 pair/certificate");
+    }
+    pgwt_writer_destroy(&w);
+}
+
 int main(void)
 {
     printf("test_coverage_writer (#947 U1)\n");
@@ -1041,6 +1116,7 @@ int main(void)
     test_v4_paths_skip_type3();
     test_idle_publish();
     test_version_gate();
+    test_a2_carrier();
     printf("%d checks, %d failures\n", checks, failures);
     if (failures == 0)
         printf("ALL PASS\n");
