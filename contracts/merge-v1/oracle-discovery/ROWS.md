@@ -215,3 +215,47 @@ Notation additions:
 | G6 | `TRY_NW_D6, AD_D6, S(19)`. No qualified non-NULL pointer fire is supplied. |
 | G7 | `TERM_D18, EXIT_D18@L, S(19), AD_D6, B_D6`. |
 | G8 | Census `{D,H}`. `EXIT_D18@L, S(19), AD_H8, A20@P0{requires x}, H21@P0{final}, S(22), TERM_D18`. TEXT x remains unavailable throughout. |
+
+H rows use the G-row defaults unless explicitly overridden: installed, independently bound D; complete census `{D}` at fence 5; mode N; C0; detection time 20. Each row below is an independent execution. Source positions follow the existing rules.
+
+`RA` in H rows always means `REARM(21,current-vector,fresh valid A/B attachment_proofs)`, including D's independently qualified continuing attachment when D has a valid recorded ADMIT. A valid startup ADMIT delivered after RA supplies its own independently qualified continuity evidence for the same startup attachment through RA and through the current observation; no new physical attachment is implied. Subsequent observations use detection time 22. `K` retains its existing meaning and makes subsequent observations use Cr.
+
+`BREAK_D` is a demonstrated pointer-observation continuity break, with no separate FAULT input. `WAIT_D6` is delivery of a historical wait-word attempt report for D, not execution of a new physical attachment bracket.
+
+All controls explicitly claiming completed proof assert their required facts unless overridden. In H3d, before AB the attachment attempts have permanently ended without a valid final attachment; D's installed identity and record attribution remain independently established.
+
+Observe commitments, `admitted`, pending split, census, latch, epoch suspension, persisted gap history, fault diagnostics and consumption after every primitive input. Additionally, in every H row containing a revoking fault, inspect the public views and persisted reader at entry to each VOID callback. H8 additionally retains the persisted prefix at that entry and evaluates it independently with no later publication.
+
+| ID | Input sequence / starting-state override |
+|---|---|
+| H1a | `TERM_D18, EXIT_D18@L, S(19), AD_D19`. |
+| H1b | `AD_D19, EXIT_D18@L, S(20)`. No TERM or confirmation is supplied. |
+| H1c | `TERM_D18, EXIT_D18@L, S(19), AD_D18`. |
+| H1d | `AD_D18, TERM_D18, EXIT_D18@L, S(19)`. |
+| H2a | `K, RA, S(25), AD_D6, D26@P0{final}, S(27)`. |
+| H2b | `K, AD_D6, RA, S(25), D26@P0{final}, S(27)`. |
+| H2c | `K, AD_D6, D26@P0{final}, S(27)`. No REARM. |
+| H2d | `K, RA, AD_D6, AB_D`. |
+| H2e | `K, RA, ADc6, AB_D`. |
+| H3a | `D12@P0{final}, ADc6, TRY_NW_D6`. |
+| H3b | `D12@P0{final}, ADc6, PTR_D14(non-NULL)`. |
+| H3c | `D12@P0{final}, ADc6, BREAK_D`. |
+| H3d | `D12@P0{final}, ADc6, AB_D, RA, D26@P0{earlier}, S(27)`. |
+| H4a | `AD_D6, TRY_NW_D6, RA, B_D6{e=6}, A26@P0, S(27)`. |
+| H4b | `AD_D6, TRY_NW_D6, RA, B_D6{e=6}, TRY_NW_D6, S(27)`. |
+| H5a | `B_D6{e=6,α2}, K, RA, D14@P0{earlier}`. |
+| H5b | `K, RA, B_D6{e=6,α2}, D14@P0{earlier}`. |
+| H6a | `TERM_D19, D20@P0, RA, EXIT_D18@L, S(25)`. TERM names the source position subsequently occupied by EXIT_D18, but claims terminal timestamp 19. |
+| H6b | `D20@P0, TERM_D19, RA, EXIT_D18@L, S(25)`. TERM names the source position subsequently occupied by EXIT_D18, but claims terminal timestamp 19. |
+| H6c | `TERM_D19, D20@P0, RA, TERM_D21`. Both terminal controls name the same prospective EXIT source position. No EXIT DATA is delivered. |
+| H7a | `AD_D6, D12@P0{final}, D14@P0{earlier}, A20@P0{requires x}, S(40)`. TEXT x remains unavailable. |
+| H7b | `AD_D6, A10@P1{requires x}, D12@P0{final}, D14@P0{earlier}, S(40)`. TEXT x remains unavailable. |
+| H8a | `AD_D6, B_D6{e=6}, S(19), TRY_NW_D6`. No qualified non-NULL pointer fire is supplied. |
+| H8b | `NW_D6, S(19), PTR_D12(non-NULL)`. |
+| H9a | `PTR_D5(non-NULL), AD_D6, B_D6{e=6}, S(8), TRY_NW_D6`. |
+| H9b | `PTR_D5(non-NULL), AD_D6, B_D6{e=6}, S(8), WAIT_D6`. |
+| H10a | `TERM_D18, EXIT_D18@L{no cookie}, S(19), TERMU_D18{cookie=0; names exactly that EXIT; explicitly claims final unresolved disposition}`. TERM_D18 supplies the independently valid binding to installed D. |
+| H10b | Override with the J-row numeric-observation defaults. `X_4, A6@P0, S(8), J_U4, TERMU_U4`. Both controls name exactly X_4; the final control explicitly claims final unresolved disposition despite the preceding J resolution. |
+| H11a | `AD_D19, EXIT_D18@L, TERM_D18`. TERM names exactly this independently bound EXIT and has no separately false or conflicting facts. No source boundary or additional input is supplied. |
+| H11b | H1a's complete inputs, then `D20@P0{final}`. D20 is independently attributable to D, has valid transport identity and arrival ordering, and supplies no independent operation failure or fault report. No REARM or subsequent boundary is supplied. |
+| H11c | H2a's complete inputs, overriding only the post-RA ADMIT's continuation evidence: `K, RA, S(25), AD_D6, D26@P0{final}, S(27)`. AD_D6 proves its original historical startup-admission facts, but supplies no proof of continuity through RA or the current observation and makes no false claim that this missing continuation was proved. No independent attachment interruption or required-operation failure is reported. RA supplies fresh valid A/B proofs and no D proof because D's startup ADMIT is still pending. D26's identity and final-attachment membership are independently established; neither supplies the missing continuous-observation proof. |

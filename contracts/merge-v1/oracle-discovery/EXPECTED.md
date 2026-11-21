@@ -87,7 +87,7 @@ R rows: `b=—, x=—` means neither commitment exists. `L=1` denotes the perman
 | V1 | `EXIT_D18 → VOID20[Ce,counter_change] → F19`; `G(open), P=1`, no closure in either order. |
 | V2 | `EXIT_D18 → VOID20[Ce,counter_change] → F19`; `G(open), P=1`, no closure in either order. |
 | V3 | `EXIT_D17 → VOID20[Cw,writer_push_fail] → F19` (A18 not published; F19 after REARM, under Cw); `G(open), P=1` after REARM and TERM. |
-| V4 | `EXIT_D18 → VOID20[Cw,writer_push_fail] → F19` (F18 not published; F19 after REARM, under Cw); `G(open), P=1`. |
+| V4 | Merge stream: `EXIT_D18 → VOID20[Cw,writer_push_fail] → F19[Cw]`; rejected F18 is absent. Combined publication timeline: `OPEN → EXIT_D18 → END18 → OPEN → VOID20[Cw,writer_push_fail] → F19[Cw]`. At the L boundary of S(19), EXIT and END succeed, then F18 is rejected; the second OPEN is successfully persisted before the resulting VOID callback begins. Both OPENs are plain; O! count is zero. END18 never commits closure or discharge. At VOID entry: epoch suspended, `admitted=false, b=—, x=—, G(open), P=1+0, census=known, latch=1`; the public views, callback reader and independently reopened saved prefix agree that startup coverage is unavailable, including `[50,60)` with otherwise valid supplied coverage. No cached answer may retain coverage inferred from END18. RA restores an active epoch; the repeated TERM adds no fault or discharge, and the L boundary of S(20) publishes F19 under Cw. Final discovery state is unchanged from VOID entry; epoch active, `abandoned=0`, uncovered increment 0. Exactly one writer_push_fail diagnostic increment and its stated storage-counter increment; no additional fault, END, O!, epoch invalidation or nonzero exit. |
 | N1 | `F5 → F7`; at `S(6)`, no bound, `G(open), P=1+0`; at `S(8)`, `b_D=6, C_close=6, G(6), P=0+0, census=known`. Attempts 0. No backend listing or role-support publication; no contribution to `N_k`, `U_k` or numerical numerators. |
 | N2 | `F7`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0, pointer watch retained. |
 | N3 | `F7`; no ADMIT or bound; `G(open), P=1+0, census=known`; attempts 0; the pre-enable read does not establish the required witness. |
@@ -135,7 +135,7 @@ R rows: `b=—, x=—` means neither commitment exists. `L=1` denotes the perman
 | R7 | (a) `EXIT_D18 → F18 → VOID20[Cr,counter_change] → F24[Cr]`; retain `x=18, G(18), P=0+0, L=1`, exactly one historical END and no O!. (b) `D12[U] → F12 → VOID20[Cr,counter_change] → F24[Cr]`; retain `b=12, G(13), P=0+0, L=1`, exactly one END and no O!. |
 | R8 | All: `b=—, x=—, G(open), P=1+0, L=1`, no END or O!. Without RA, only `VOID20[Cr,counter_change]`. With RA, (a) adds `F24[Cr] → D26[U] → F26[Cr]`; (b,c) add `F24[Cr]`. No refused candidate supplies certified numerical evidence. |
 | R9 | All: `b=—, x=—, G(open), P=1+0, L=1`, no END or O!. (a) `EXIT_D18 → F18 → VOID20[Cr,counter_change]`, plus `F24[Cr]` iff RA. (b) `VOID20[Cr,counter_change]`, plus `EXIT_D26 → F26[Cr]` iff RA. Valid TERM adds no fault. |
-| R10 | `VOID20[C0,unknown_evidence] → VOID20[C0,unknown_evidence]`; `b=—, x=—, G(open), P=1+0, census=known, L=1`; no O!. The admitted permanence contradiction and the separately false CN claim each fault. |
+| R10 | Both pointer and continuity-break variants: `VOID20[C0,unknown_evidence] → VOID20[C0,unknown_evidence]`; `b=—, x=—, G(open), P=1+0, census=known, L=1`; no O!. The first observation refutes the accepted admission before any bound commits; the separately false CN claim faults again. Neither candidate-only refutation revokes coverage or resets the census. |
 | R11 | `EXIT_D18 → F18`; `b=—, x=—, G(open), P=1+0, census=known, L=0`; no hold, END, fault or uncovered increment. |
 | R12 | `EXIT_D18 → F18 → VOID20[C0,seal_violation]`; invalidate the supporting epoch, remove `x=18`, retain historical END 18 followed by O!; final `b=—, x=—, G(open), P=1+0, census=known, L=1`. No additional unknown-evidence fault: D12 does not postdate EXIT18. |
 | P1 | N1’s amended output and state; absence of the publisher does not hold confirmation or invoke writer failure. |
@@ -167,6 +167,63 @@ R rows: `b=—, x=—` means neither commitment exists. `L=1` denotes the perman
 | G6 | `Vu` at AD_D6; no accepted admission; final `b=—, x=—, G(open), P=1+0, L=1`; no DATA, FRONTIER, END or O!. |
 | G7 | `EXIT_D18 → F18`; discharge and END 18 commit at S(19); later AD_D6 and B_D6 are recorded without fault and commit no bound; final `b=—, x_D=18, C_close=18, G(18), P=0+0, L=0`; exactly one END, no O!. |
 | G8 | `EXIT_D18 → F18`; S(22) holds A20, H21 and F21; TERM commits only `x_D=18`; final `b_D=—, b_H=—, x_H=—, G(open), P=1+0, L=0`; no END, O! or fault; the persisted reader remains INCOMPLETE, including for `[50,60)`. |
+
+H rows: `Vk=VOID20[Cr,counter_change]`; `Vu20=VOID20[C0,unknown_evidence]`; `Vu22[C]=VOID22[C,unknown_evidence]`. Frontiers use C0 unless marked Cr. Every execution begins with the ordinary startup OPEN.
+
+Unless a row states otherwise, its final state is `b=—, x=—, G(open), P=1+0, census=known, latch=1`; `abandoned=0`, uncovered increment 0, no END, no revoked OPEN, no epoch invalidation and no nonzero exit. Listed output streams are complete. Each listed VOID increments only its named fault diagnostic; discovery faults add no storage-counter increment. `admitted` is false unless expressly stated.
+
+For every listed revocation, remove the affected commitment, update public views, invalidate dependent cached answers and persist exactly one O! before the associated VOID callback begins. At entry to every H-row VOID callback the epoch is already suspended. Historical END and DATA remain observable. The persisted reader rejects coverage dependent on the revoked proof, including `[50,60)` with otherwise valid supplied coverage. In every H-row release attempt that closes the startup gap, supporting DATA precedes END and END precedes FRONTIER; the commitments complete only after the whole attempt succeeds.
+
+| ID | Expected output and state |
+|---|---|
+| H1a | `EXIT_D18 → F18 → Vu20`. At S(19), `x_D=18, G(18), P=0+0, latch=0`; AD_D19 is rejected without recording admission. Remove x and persist O! before Vu20. Final default state; historical END 18 remains. |
+| H1b | `Vu20` at EXIT arrival; EXIT is not published. `admitted=true` records the earlier accepted ADMIT, whose proof is now refuted. No bound or discharge ever commits; final default state otherwise. |
+| H1c | `EXIT_D18 → F18`. `admitted=true, b=—, x_D=18, G(18), P=0+0, census=known, latch=0`; exactly one END 18; no fault or O!. |
+| H1d | `EXIT_D18 → F18`. `admitted=true, b=—, x_D=18, G(18), P=0+0, census=known, latch=0`; exactly one END 18; no fault or O!. |
+| H2a | `Vk → F24[Cr] → D26[U] → F26[Cr]`. `admitted=true` after AD; final default commitment/pending/gap state. The final epoch remains active. |
+| H2b | `Vk → F24[Cr] → D26[U] → F26[Cr]`. `admitted=true` immediately after AD during suspension and after RA; final default commitment/pending/gap state. The final epoch remains active. |
+| H2c | Only `Vk`. `admitted=true`; epoch remains suspended. D26 supplies no publication or consumption; no implicit REARM. |
+| H2d | `Vk → Vu22[Cr]`, the second fault at AB. `admitted=true`; abandonment is rejected and records no disposition or consumption. |
+| H2e | `Vk → Vu22[Cr]`, the second fault at AB. `admitted=true`; abandonment is rejected and records no disposition or consumption. No route-(c) bound commits. |
+| H3a | Only `Vu20`, at ADc6. No admission, route-(c) baseline or permanence claim is recorded. The subsequent TRY is not a late-ADMIT violation and produces no additional fault. |
+| H3b | Only `Vu20`, at ADc6. The pointer observation produces no additional fault from the rejected admission; census remains known. |
+| H3c | Only `Vu20`, at ADc6. The continuity observation produces no additional fault from the rejected admission; census remains known. |
+| H3d | `Vu20 → F26`. ADc6 is not recorded; AB is accepted during suspension without another fault. D12 was dropped by ordinary fault handling and is not counted. After RA, D26 is consumed without publication; `abandoned=1`. Final epoch active; no bound, discharge or END. |
+| H4a | `Vu20 → A26[T] → F26`. `admitted=true`; TRY is not recorded. B6 is recorded without another fault, supplies no commitment, and does not hold ordinary A release. Final epoch active. |
+| H4b | `Vu20 → Vu22[C0]`. `admitted=true`; B6 itself adds no fault. The second late TRY independently violates Decision 38 and faults; neither TRY is recorded. No DATA or frontier. |
+| H5a | `Vk → Vu22[Cr]`, the second fault at D14 arrival. The pre-K quiet candidate survives K and RA as evidence, is refuted once and supplies no readiness or commitment. No O!, because it never committed. |
+| H5b | `Vk → Vu22[Cr]`, the second fault at D14 arrival. The post-K quiet candidate is retained and refuted with exactly the same consequences as H5a. |
+| H6a | `Vu20 → EXIT_D18 → F24`. The first fault occurs at D20 and refutes the recorded terminal claim. EXIT18 supplies no repeated contradiction report and no discharge; final epoch active. |
+| H6b | `Vu20 → EXIT_D18 → F24`. The first fault occurs at TERM_D19, which retained D20 already contradicts; no accepted terminal disposition or discharge results. EXIT18 adds no discovery fault; final epoch active. |
+| H6c | `Vu20 → Vu22[C0]`. D20 refutes the first terminal claim. The separately delivered conflicting TERM_D21 faults independently; it neither replaces nor restores the first claim. |
+| H7a | Only `Vu20`, during S(40)'s eligible-batch validation. The proposed fresh bound 12 conflicts with earlier-attempt D14 despite the unavailable TEXT dependency. `admitted=true`; no DATA, TEXT, frontier or committed bound. |
+| H7b | Only `Vu20`, during S(40)'s eligible-batch validation. Encountering the unavailable A10 dependency earlier in output order does not stop validation of D12 and D14. `admitted=true`; no DATA, TEXT, frontier or committed bound. |
+| H8a | `F18 → Vu20`. Before TRY: `admitted=true, b_D=6, G(6), P=0+0, census=known, latch=0`, one END 6. Before entry to the VOID callback: b removed, `closed=false, P=1+0, census=known, latch=1`, O! persisted and dependent cached answers invalidated. Both the callback's reader and the independently reopened prefix report INCOMPLETE. Final default state with `admitted=true`. |
+| H8b | `F18 → Vu20`. Before PTR: `admitted=true, b_D=6, G(6), P=0+0, census=known, latch=0`, one END 6. Before entry to the VOID callback: b removed, `closed=false, P=1+0, census=unknown, latch=1`, O! persisted and dependent cached answers invalidated. Both the callback's reader and the independently reopened prefix report INCOMPLETE. Final `b=—, x=—, G(open), P=1+0, census=unknown, latch=1, admitted=true`. |
+| H9a | `F7 → Vu20`. Retain `admitted=true, b_D=6, x=—, G(6), P=0+0, census=known, latch=1`; exactly one END 6 and no O!. The historical late TRY faults but the retained qualified non-NULL fire prevents address-proof revocation. |
+| H9b | `F7 → Vu20`. Retain `admitted=true, b_D=6, x=—, G(6), P=0+0, census=known, latch=1`; exactly one END 6 and no O!. The historical late wait-attempt report faults but the retained qualified non-NULL fire prevents address-proof revocation. |
+| H10a | `EXIT_D18 → F18 → Vu20`. At S(19), `x_D=18, G(18), P=0+0`. Reject the cookie-zero unresolved control, retain the historical MATCHED disposition, remove x and persist O! before Vu20. Final default state; historical END 18 remains; uncovered increment 0. |
+| H10b | No output before J; then `EXIT_U4 → A6[T] → F7 → Vu20`. J establishes U, resolves the number and commits `x_U=4, G(5), P=0+0, census=known`. Reject TERMU, retain the historical MATCHED disposition, revoke x and persist O! before Vu20. Final `b_U=—, x_U=—, G(open), P=1+0, census=known, latch=1`; historical END 5 remains; uncovered increment 0. |
+
+| ID | Expected output and state |
+|---|---|
+| H11a | Merge stream: `Vu20`; combined timeline: `OPEN → Vu20`. AD_D19 records `admitted=true` while the epoch remains active and latch=0. EXIT_D18 arrival establishes the enable/EXIT contradiction, refutes the recorded admission proof, sets latch=1 and suspends the epoch; EXIT is never published. At that VOID entry, `admitted=true, b=—, x=—, G(open), P=1+0, census=known, latch=1`; public views and the persisted reader agree that startup coverage is unavailable, including `[50,60)`. TERM_D18 is then recorded as refuted and adds no fault, discharge or publication. Final epoch suspended and the same discovery state. Exactly one unknown_evidence diagnostic increment, C0 unchanged, `abandoned=0`, uncovered increment 0; no DATA, FRONTIER, END, O!, epoch invalidation or nonzero exit. |
+| H11b | Merge stream: `EXIT_D18 → F18 → Vu20`; combined timeline: `OPEN → EXIT_D18 → END18 → F18 → O! → Vu20`. TERM and EXIT receipt commit nothing; the first three boundaries of S(19) commit nothing, and its L boundary completes the release and commits `x_D=18, G(18), P=0+0, census=known, latch=0`. AD_D19 is rejected without recording admission; it refutes the recorded matched terminal claim, revokes x and dependent coverage, invalidates affected cached answers and persists one O! before its VOID callback. At VOID entry and finally: epoch suspended, `admitted=false, b=—, x=—, G(open), P=1+0, census=known, latch=1`; public views and the persisted reader agree that startup coverage is unavailable, including `[50,60)`. D20 arrives during suspension, retains attributable evidence and has its payload disposed of without consumption; the terminal claim is already refuted, so D20 adds no fault or publication. Exactly one unknown_evidence diagnostic increment, C0 unchanged, `abandoned=0`, uncovered increment 0; one historical END18 and one O!, no epoch invalidation or nonzero exit. |
+| H11c | Merge stream: `Vk → F24[Cr] → Vu22[Cr]`; combined timeline: `OPEN → Vk → F24[Cr] → Vu22[Cr]`. K suspends the epoch and sets latch=1; at its VOID entry `admitted=false, b=—, x=—, G(open), P=1+0, census=known`. RA restores an active epoch. The first three boundaries of S(25) publish nothing; its L boundary publishes F24 under Cr. AD_D6 records `admitted=true` without a fault but supplies no current-epoch D attachment proof. D26 is staged; its arrival and the first three boundaries of S(27) do not make it eligible. At S(27)'s L boundary, D26's first eligible-batch validation finds the missing continuity proof and produces Vu22[Cr], disposing of D26 without publication or consumption. At this VOID entry and finally: epoch suspended, `admitted=true, b=—, x=—, G(open), P=1+0, census=known, latch=1`. At both VOID entries, public views and the persisted reader agree that startup coverage is unavailable, including `[50,60)`. Diagnostics: counter_change +1, unknown_evidence +1; the vector remains Cr after K, with no synthetic storage-counter increment. `abandoned=0`, uncovered increment 0; no D DATA, F26, END, O!, epoch invalidation or nonzero exit. |
+
+Existing rows whose ordering expectations are strengthened:
+
+- **N5 and P2:** the pointer/continuity revocation's O! and census change precede VOID publication.
+- **R3:** every DATA, pointer and continuity variant, for every h and q, exposes its completed revocation before the contradiction's VOID. Preserve each variant's existing census result.
+- **R4:** every h/q variant persists its bound-revocation O! before the contradiction's VOID.
+- **R5:** every h/p/q variant commits x_D=18 at S(19), before any optional K, and persists its discharge-revocation O! before D20's contradiction VOID. With h=1 the startup gap never closed, but D's discharge still committed and its revocation still requires O!.
+- **R12:** supporting-epoch invalidation and discharge revocation are reflected, with O! persisted, before its seal-violation VOID.
+- **G2b:** numerical-bound revocation precedes the late-TRY VOID.
+- **G3, revocation variant only:** bound revocation precedes the appended VOID; retained terminal evidence still supplies no replacement discharge.
+- **G4, both variants:** discharge revocation precedes the conflicting-control VOID.
+- **G4b:** discharge revocation precedes the unresolved-control VOID.
+
+Their merge-only output streams, exact fault counts, historical END values, final states and consumption counts are unchanged. No existing row receives an optional fault count or a changed final answer. Existing two-fault observations preserve their arrival-fault-first diagnostic order.
 
 **Required mutants**
 
@@ -336,6 +393,50 @@ All gap-end assertions must inspect the emitted GAP_CLOSE endpoint and zero rese
 | Use a held release's prospective bound to close on a later terminal control | G8 |
 | Let a diagnostic cutoff bypass closure's completed-release requirements | G8 |
 | Prevent a valid late terminal discharge merely because another batch is held | G8 |
+| Fault late ADMIT but retain its contradicted committed discharge | H1a |
+| Record an ADMIT already contradicted by retained EXIT evidence | H1a |
+| Check enable-versus-EXIT provenance only when ADMIT arrives last | H1b |
+| Erase historical admission when later EXIT refutes its proof | H1b |
+| Treat enable/EXIT timestamp equality as contradictory | H1c, H1d |
+| Expose certification eligibility as `admitted`, or leave the missing-ADMIT hold after valid post-latch admission | H2a, H2b |
+| Record valid admission only in an active epoch | H2b |
+| Let recorded admission implicitly rearm or release during suspension | H2c |
+| Accept abandonment after numerical or route-(c) admission recorded under the latch | H2d, H2e |
+| Commit a new bound or mark D26 certified after post-latch admission | H2a, H2b |
+| Record route-(c) admission before checking retained numerical evidence | H3a, H3b, H3c |
+| Treat rejected admission as barring otherwise valid abandonment | H3d |
+| Count fault-dropped D12 as an abandonment discard | H3d |
+| Retain the rejected late TRY as NULL-pointer history and fault the subsequent otherwise valid B | H4a |
+| Suppress a separately delivered repeat late-attempt report after the first fault | H4b |
+| Drop quiet evidence on VOID or REARM | H5a |
+| Refuse or forget valid quiet evidence recorded under the latch | H5b |
+| Re-fault a rearmed epoch solely because EXIT contradicts an already refuted terminal claim | H6a |
+| Record a terminal claim already contradicted on delivery as an accepted proof | H6b |
+| Suppress a separately delivered conflicting terminal control because an earlier claim was refuted | H6c |
+| Return held before validating the batch's prospective-bound contradiction | H7a, H7b |
+| Stop validation upon encountering the first missing dependency in output order | H7b |
+| Publish a prospective bound, DATA or frontier from the contradictory held batch | H7a, H7b |
+| Persist revoked OPEN only after the VOID callback returns | H8a, H8b |
+| Update status only after VOID, or leave pointer-driven census invalidation until input return | H8a, H8b |
+| Repair only live views while the persisted prefix retains the unretracted END | H8a, H8b |
+| Revoke a numerical bound on late TRY despite a retained qualified non-NULL fire | H9a |
+| Revoke a numerical bound on late wait-attempt report despite a retained qualified non-NULL fire | H9b |
+| Require the conflicting unresolved control's cookie to equal the committed discharge's cookie before revoking | H10a, H10b |
+| Replace MATCHED with the rejected unresolved disposition or count another uncovered consumption | H10a, H10b |
+| Retain fault-dropped DATA for release or a missing-ADMIT hold after REARM | H3d, H6a, H6b |
+| Require D's continuing-attachment evidence inside REARM despite a later independently valid startup ADMIT supplying it | H2a |
+| Publish startup END before supporting DATA or after the same attempt's FRONTIER | H1a, H10b |
+| Expose an active epoch at entry to a VOID publication callback | H8a, H8b, H10a, H10b |
+| Manufacture a continuity-refutation fault from H3c's rejected route-(c) admission | H3c |
+| Publish revoked OPEN or reset census solely for an uncommitted route-(c) claim's refutation | R10, both variants |
+| Defer a retained quiet candidate's contradiction until eligible-batch validation | H5a, H5b |
+| Propose a fresh-record bound and fault before complete eligible-batch validation | H7a, H7b |
+| Treat an observational TRY after rejected admission as another false permanence claim | H3a |
+| Omit discharge revocation because another lifetime kept the startup gap open | R5, every h=1 variant |
+| Leave a failed attempt's END as the last startup-gap record at VOID entry | V4 |
+| Report another unknown_evidence fault when the matching TERM arrives after the enable/EXIT contradiction was already reported | H11a |
+| Revoke the discharge but leave its recorded terminal claim unrefuted, so later attributable D20 faults again | H11b |
+| Release D26 despite its missing current-epoch continuity proof | H11c |
 
 Pointer-ABA, stale-marker refresh, all-emission-site cookie consistency, writer synchronization and actual EL8 verifier acceptance remain producer qualification obligations. Their qualification fixtures must exercise the corresponding physical operation; merge oracle agreement alone cannot mark them qualified.
 
