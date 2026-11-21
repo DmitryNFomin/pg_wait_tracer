@@ -795,5 +795,8 @@ fi
 
 echo
 echo "box-check ($OS, PG=${PG:-all}, EPHEMERAL=$EPHEMERAL) exit=$rc — summary:"
-tail -n 25 "$log" | sed 's/^/  /'
+tail -n 25 "$log" | sed '/^  Failed: /d; s/^/  /'
+# Keep every runner's failed list visible even if later diagnostics or a long
+# known-failing report pushed it outside the tail (including multi-PG runs).
+sed -n '/^  Failed: /p' "$log" | sed 's/^/  /'
 exit "$rc"

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Offline #760 tests: execute the runner's real classifier and final summary.
+"""Offline runner tests: execute the runner's real classifier and final summary.
 
 Only this extracted harness supplies detector arguments; production has no
-identity environment override. Every acceptance case has a source mutation
-that its assertion must reject. No build, PostgreSQL, root, or eBPF is involved.
+identity environment override. Source mutants must reach the intended case
+and fail its assertion. No build, PostgreSQL, root, or eBPF is involved.
 """
 import json
 import os
@@ -26,12 +26,12 @@ def mutate(old, new):
     return RUNNER.replace(old, new, 1)
 
 
-def harness(source, extra=""):
+def harness(source, extra="", before=""):
     # These spans include the real table, startup validation/detection, run_test,
     # and every final gate condition. Never reproduce the classifier in Python.
-    prefix = source[source.index("passed=0\n"):source.index("\nskip_test() {")]
+    prefix = source[source.index("passed=0\n"):source.index("\n# A test whose")]
     summary = source[source.index("# Summary\n"):]
-    return "set -uo pipefail\n" + prefix + r'''
+    return "set -uo pipefail\n" + prefix + "\n" + before + "\n" + r'''
 if [[ "$4" != "production" ]]; then
     known_failing_detect_platform "$1" "$2"
 fi
@@ -42,9 +42,9 @@ run_test "$6" bash -c 'echo KF_EXECUTED; [[ -z "$2" ]] || echo "TIERED_DEVIATION
 ''' + extra + "\n" + summary
 
 
-def run(root, os_name, release, rc, source=RUNNER, production=False, env=None, extra="", deviations="", test=TEST):
+def run(root, os_name, release, rc, source=RUNNER, production=False, env=None, extra="", deviations="", test=TEST, before=""):
     return subprocess.run(
-        [BASH, "-c", harness(source, extra), "known-failing-selftest",
+        [BASH, "-c", harness(source, extra, before), "known-failing-selftest",
          str(root / os_name), release, str(rc),
          "production" if production else "fixture", deviations, test],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -52,7 +52,7 @@ def run(root, os_name, release, rc, source=RUNNER, production=False, env=None, e
 
 
 def check_result(result, passed=0, failed=0, known=0, xpass=0, executed=1, deviations=None,
-                 test=TEST, issue=675, expected_exit=79):
+                 test=TEST, issue=675, expected_exit=79, failed_tests=None, refused=0, skipped=0, fixture_executed=1):
     lines = result.stdout.splitlines()
     records = [line[len("RUN_ALL_SUMMARY "):] for line in lines
                if line.startswith("RUN_ALL_SUMMARY ")]
@@ -63,8 +63,21 @@ def check_result(result, passed=0, failed=0, known=0, xpass=0, executed=1, devia
     assert summary["status"] == ("FAIL" if failed else "PASS"), summary
     assert (summary["passed"], summary["failed"], summary["known_failing_count"],
             summary["xpass"]) == (passed, failed, known, xpass), summary
-    assert summary["executed"] == summary["total"] == executed, summary
-    assert summary["refused"] == summary["skipped"] == summary["excluded"] == 0
+    assert summary["executed"] == executed, summary
+    assert summary["total"] == executed + skipped, summary
+    assert (summary["refused"], summary["skipped"], summary["excluded"]) == (refused, skipped, 0)
+    actual_failures = summary["failed_tests"]
+    assert len(actual_failures) == failed, summary
+    if failed_tests is not None:
+        assert actual_failures == failed_tests, summary
+    if failed:
+        rendered_failures = ", ".join(
+            f"{r['test']} (exit {r['exit']})"
+            + (f" [{r['reason']}]" if "reason" in r else "") for r in actual_failures)
+        assert lines.count("  Failed: " + rendered_failures) == 1, result.stdout
+    else:
+        assert actual_failures == [], summary
+        assert not any(line.startswith("  Failed: ") for line in lines), result.stdout
     assert summary["issues"] == ([issue] if known else []), summary
     expected = ([dict(test=test, issue=issue, exit=0 if xpass else expected_exit,
                       xpass=bool(xpass))] if known else [])
@@ -73,7 +86,7 @@ def check_result(result, passed=0, failed=0, known=0, xpass=0, executed=1, devia
         rendered = ", ".join(f"{rate}Hz={delta:.1f}" for rate, delta in deviations.items())
         assert f"deviations (pp): {rendered}" in result.stdout, result.stdout
     assert summary["known_failing"] == expected, summary
-    assert lines.count("KF_EXECUTED") == 1, "listed tests must execute exactly once"
+    assert lines.count("KF_EXECUTED") == fixture_executed, "fixture must execute exactly once unless capture fails"
     verdict = ("FAIL" if failed else
                f"PASS with 1 known-failing (issues: #{issue})" if known else "PASS")
     if known and not failed and deviations is not None:
@@ -118,6 +131,82 @@ with tempfile.TemporaryDirectory(prefix="pgwt-known-failing-") as temp:
         "empty": '',
     }.items():
         (root / name).write_text(contents)
+
+    # Failure reporting exercises every former failed++ site, including the
+    # paths that never launch a command. Expected exits come from fixtures.
+    def check_failure(result, failures, **counts):
+        return check_result(result, failed=len(failures), failed_tests=failures, **counts)
+
+    ordinary = [dict(test="ordinary_failure", exit=42)]
+    forced = run(root, "ubuntu", "6.8.0", 42, test="ordinary_failure")
+    check_failure(forced, ordinary)
+    assert "  ordinary_failure\n" in forced.stdout, forced.stdout
+    assert "KF_EXECUTED\n  FAILED (exit 42)\n" in forced.stdout, forced.stdout
+    print("  PASS ordinary failure: named block + FAILED (exit 42), human list, JSON list")
+
+    # Keep the counter and execution intact: only omit recording. This mutant
+    # must reach the fixture, report failed=1, and fail the name-list assertion.
+    missing_record = mutate('    failed_results+=("$1" "$2" "${3:-}")', "    :")
+    mutant = run(root, "ubuntu", "6.8.0", 42, test="ordinary_failure", source=missing_record)
+    assert mutant.returncode == 1 and "KF_EXECUTED" in mutant.stdout
+    assert '"failed": 1' in mutant.stdout and '"failed_tests": []' in mutant.stdout
+    negative("failed++ without recording name", lambda r: check_failure(r, ordinary), mutant)
+
+    second = dict(test="second_failure", exit=17)
+    ordered = run(root, "ubuntu", "6.8.0", 42, test="ordinary_failure",
+                  extra="run_test second_failure bash -c 'exit 17'")
+    check_failure(ordered, ordinary + [second], executed=2)
+    assert "  FAILED (exit 17)\n" in ordered.stdout
+    print("  PASS two failures: execution order retained in human and JSON lists")
+    escaped_name = 'fixture "quoted" | \\ path'
+    check_failure(run(root, "ubuntu", "6.8.0", 9, test=escaped_name),
+                  [dict(test=escaped_name, exit=9)])
+
+    check_result(run(root, "el8", "4.18.0", 79), known=1, failed_tests=[])
+    check_failure(run(root, "el8", "4.18.0", 42), [dict(test=TEST, exit=42)])
+    for rc in (126, 127):
+        check_failure(run(root, "el8", "4.18.0", rc), [dict(test=TEST, exit=rc)])
+    print("  PASS known-failing: expected exit absent; different exit and failed-to-run exits named")
+
+    for extra, name, reason in (
+        ('REQUIRE_LIVE=1\nskip_live_test live_fixture "requires root"', "live_fixture",
+         "--require-live set, but: requires root"),
+        ('undeclared_phase_test phase_fixture "declaration absent"', "phase_fixture",
+         "undeclared phase-marker expectation: declaration absent"),
+    ):
+        check_failure(run(root, "ubuntu", "6.8.0", 0, extra=extra),
+                      [dict(test=name, exit=1, reason=reason)], passed=1, executed=2)
+    print("  PASS require-live skip and undeclared phase: named with exit 1 and reason")
+
+    check_result(run(root, "ubuntu", "6.8.0", 0,
+                     extra='skip_live_test live_fixture "requires root"'),
+                 passed=1, skipped=1, failed_tests=[])
+    check_failure(run(root, "ubuntu", "6.8.0", 0, before='mktemp() { return 23; }'),
+                  [dict(test=TEST, exit=23, reason="cannot capture test output")], fixture_executed=0)
+    check_failure(run(root, "ubuntu", "6.8.0", 78), [dict(test=TEST, exit=78)])
+    check_result(run(root, "ubuntu", "6.8.0", 0, extra=
+                     'phase_expectation=0\nrun_test test_execution_cardinality bash -c '
+                     "'echo PHASE-CONTRACT-REFUSED; exit 78'"),
+                 passed=1, refused=1, executed=2, failed_tests=[])
+    print("  PASS capture error and invalid exit 78 named; normal skip and valid refusal stay unlisted")
+
+    # Execute box-check's actual footer against a log whose failed list is
+    # beyond the tail. No SSH, builds, or writes to tests/results are involved.
+    box_source = Path(__file__).resolve().parents[1].joinpath("scripts/box-check.sh").read_text()
+    footer = box_source[box_source.index('echo "box-check ($OS, PG='):]
+    log = root / "box.log"
+    log.write_text(forced.stdout + "later diagnostic\n" * 40)
+    def box_summary(source):
+        return subprocess.run([BASH, "-c", source], text=True, capture_output=True,
+                              env=dict(os.environ, OS="fixture", PG="13", EPHEMERAL="0",
+                                       rc="1", log=str(log)), check=False)
+    def check_box(result):
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert result.stdout.count("    Failed: ordinary_failure (exit 42)\n") == 1, result.stdout
+    check_box(box_summary(footer))
+    negative("box-check omits failed list outside tail", check_box,
+             box_summary(footer.replace('sed -n \'/^  Failed: /p\' "$log" | sed \'s/^/  /\'', ":")))
+    print("  PASS box-check final summary repeats failed list outside log tail; mutant rejected")
 
     # Pin precisely the authorized table; dropping the scope must break this
     # test as well as the Ubuntu failure case below.
