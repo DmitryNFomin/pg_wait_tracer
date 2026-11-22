@@ -1,0 +1,14 @@
+# Settle 2: the challenge to your interface specification
+
+Read-only: edit no file. Answer in at most 40 lines as your final message. Mark every claim VERIFIED (file:line read) or INFERRED. scratchpad = SP
+
+You (a previous session) wrote scratchpad/a2go/integ/astra-spec.md. The second adviser challenged it: scratchpad/a2go/integ/fable-challenge2.md (51 lines; read all of it). Snapshots: wt-pc (producer 6e6034c7), wt-discm (merge 748218d7); master 346ccc95 is readable with git show origin/master:<path>.
+
+For each point answer ACCEPT, or REJECT with the concrete schedule, reader behaviour or contract sentence that breaks it. Do not restate your specification.
+
+1. **Persisted form (challenge section 2).** One new record kind 8 ROLE_SUPPORT in the existing COVERAGE block (48 bytes: a = e, b = pid | role<<32 | major<<48, c = cookie, d = revocation detection time), written through the existing checked writer with an fsync, live assertions re-emitted after BOOT in each new file, revocation by appending a record with d != 0, no sidecar, no BOOT capability bit, no new contract directory; one amendment to merge-v1 DECISION 43 with reader rows. The challenge's two load-bearing claims: an old reader fails CLOSED on an unknown kind (coverage_record.h:201-202 -> event_reader.c:468 -> coverage.c:114) while the sidecar fails OPEN because no reader reads BOOT field d. Check both. Is kind 8 sufficient for DECISIONs 37(c), 42 and 43, including replay after rotation, a revocation whose record is lost with a damaged tail, and capture identity?
+2. **REBIND of a live pre-existing holder (challenge section 4):** deliver that class as the ordinary INVENTORY control (merge_capture.c:784-785, 799), use REBIND only for FORK and NONMEMBER, move J13 from P to E. Sound under the contract's conservative tick bound (CONTRACT.md:328)? Does row J13's expected output accept it?
+3. **Header edits (challenge section 1):** REBIND only with all four identifiers nonzero and the binding known; drop the qualification identity; the coordinator writes the revocation before delivering the contradicting POINTER; cut listed_at, holder and bound_at or name their consumer; keep the pre-enable acknowledgement vector out of every record (export it on the final attempt or through the binding accessor); say which of record totals and checkpoint totals fences the census.
+4. **Route-c without a publisher faults rather than waits (merge.c:933-937):** confirm, and state the rule the coordinator needs.
+5. **Row classes:** 79 end to end for the coordinator alone, 85 with persistence; "end to end" ends at record-level read-back, since no verdict consumer exists.
+6. **Sizing:** the challenge estimates U-P at 2 rounds, U-I at 4 to 5 rounds plus four live cells, persistence at 1 round after 1 contract commit. Say where you think that is wrong, and what could be cut without losing soundness.

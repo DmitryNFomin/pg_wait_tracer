@@ -1,0 +1,53 @@
+# Brief: discovery admission, merge side: the independent enumeration test, round 5 (the disposition accessor, repeated controls, the new rows)
+
+## Authorised by
+
+Owner decision, 2026-11-20, recorded verbatim on #988: "a" (build discovery admission). Round 4 of this test (f477ec0b) enumerated 2,242,221 short schedules; run against the merge implementation it passed every pinned row and model-free invariant and exposed one place where the contract did not decide (an EXIT, a terminal control the EXIT already contradicts, then a qualified one). The contract now decides it the way your predecessor's model already read it (commit 798b9831 on this branch, contracts only). Two blind spots of the test were found on the way and this round closes them. You are a fresh implementer. Another implementer is changing the merge's product code on another branch at the same time; neither of you sees the other's work, on purpose.
+
+Issue #988; live comments (refreshed at dispatch):
+
+```console
+$ gh api repos/DmitryNFomin/pg_wait_tracer/issues/988/comments --paginate --jq '.[] | {id: .id, body: .body}'
+{"body":"**Quiet-baseline mechanism: agreed by both design advisers, and its control passed on both kernels (2026-11-20)**\n\nAn idle process found at startup (an idle pooled connection, an auxiliary asleep) never makes a transition, so it needs a baseline that does not wait for one. Both advisers rejected \"seed, enable, re-read the wait word\" (a transition and its reverse can hide in buffers) and my first replacement (scheduler counters plus the state letter: the kernel sets the sleeping state before it decides to sleep).\n\nAgreed mechanism (Fable found it; Astra had named the same kernel primitive): a bracket in which the kernel itself proves the task was off every runqueue.\n- `/proc/\u003cpid\u003e/syscall` prints \"running\" unless `wait_task_inactive` succeeds under the runqueue lock (not on a CPU, not queued). The task must read inactive at both ends of the bracket, and its voluntary context-switch count must be equal at both ends.\n- Inside the bracket: resolve the wait address and compare it with the armed one, read the wait word, take a fresh timestamp t, install the seed (that wait value, time t, off-CPU, a valid zero-consumption CPU base), enable the watchpoint and confirm.\n- If the bracket holds, the task executed nothing in it, so the seed is its exact state at t and the first later record needs no exclusion. A failed, denied or unreadable proof is a failed bracket, never a pass; after bounded retries the process falls back to waiting for its first record.\n- Today's seeding is not coherent for this (it opens an on-CPU stretch when the wait word is 0 and has no valid CPU base), so the producer unit changes it.\n\nControl on the real kernels (tests/results/session-20261120/quiet-witness/analysis.md on the lead's Mac): on EL8 4.18.0-553 and on Ubuntu 6.8, a sleeper reads inactive with an unchanged count, a spinner reads \"running\" in 200 of 200 reads, a sleeper woken once between the reads shows the count move from 1 to 2, and 1,000 quiet brackets gave 0 anomalies. Not measured: a PostgreSQL backend as the subject, and reads under load.\n\nNext: the consolidated merge-v1 amendment (DECISIONs 30-44 with this route), two independent answer sets from the rows alone, an isolated contract commit, then the producer and merge units.\n\nRefs #988\n","id":7047038197}
+{"body":"**Owner decisions, 2026-11-21 12:11 UTC, verbatim: \"B b a\"**\n\nAnswering three a-or-b questions put in this order:\n\n1. **The three PostgreSQL 13 helper processes with no wait state (logger, statistics collector, archiver).** Options as put: a = list each as \"present, not measured\" (needs a new record in the capture files, reader rules and a contract amendment); b = do not list or count them, and say so in the documentation. Answer: **b**.\n2. **What counts as a backend.** Options as put: a = count every connection process wherever PostgreSQL keeps a wait state; b = count a process only while it holds a PostgreSQL process slot, on every version (health checks, cancel requests and silent clients are then \"not a backend\"). Answer: **b**.\n3. **Real-time priority for the tracer's main loop** (issue 989). Options as put: a = on by default wherever the per-CPU transport is on, with `--no-rt-priority` to turn it off; b = opt-in only. Answer: **a**.\n\nWhat follows from 1 and 2 here:\n- Contract merge-v1: the no-wait-word route (DECISION 37(c)) keeps its proof and its bound but loses the durable support-publication precondition and the per-process \"present, not measured\" line (DECISION 43); rows N1, N10 and N14 get new expected answers through the usual two independent answer sets. Documentation sentence: \"On PostgreSQL 13 the logger, the statistics collector and the archiver never hold a PostgreSQL process slot. They are not backends: they are not listed and not counted.\"\n- The rule for fork-born processes that never initialise (contract delta 3b) is finalised under the process-slot rule.\n- No new record kind is added to the capture files for this.\n\nCopied here from the comment on the churn issue (comment 7062393007 there) now that no implementation round in flight cites this issue. State on 2026-11-21 17:55 UTC: the contract part of 1 is on master (6f18da28: the no-wait-word route without role-support publication; rows N1, N10, N14); the process-slot population rule of 2 is written as a draft delta and belongs to the bounded-omissions unit, not applied yet.\n\nRefs #988\n","id":7066825885}
+```
+
+CONTROLLING SCOPE DECISION: #988 comment 7047038197 "If the bracket holds, the task executed nothing in it, so the seed is its exact state at t and the first later record needs no exclusion."
+
+## Starting point
+
+Run scripts/lead/codex-task.sh on the EXISTING branch agent/988-merge-enum at 798b9831. First run `git log --oneline -1`; it must print 798b9831. Otherwise print WRONG_HEAD <sha> and stop.
+
+The LAST line of .codex-commit-msg is exactly "Refs #988". Do not push. Do not run `make check`. Do not touch contracts/ or anything under src/. Everything builds and runs on the Mac as host C; run nothing eBPF-related and no browser tests.
+
+**Do not stop on a scope question.** If the contract does not determine what the model should do for some input, do not look at the code and do not guess: record it in the list "UNDETERMINED" with the input and the two readings, mark those outcomes as withheld from comparison, and finish everything else.
+
+## The independence rule (unchanged, and the point of this unit)
+
+Your model comes from the contract, not from the implementation. You MAY read: contracts/merge-v1/ (the contract, ROWS.md, EXPECTED.md, the TASK, answers and compare files), the specification SP/a2go/disc/delta4/astra-delta4r.md (sections TABLE MODEL and LATCH INVARIANT AND ENUMERATION; where it and the amended contract differ, the contract wins: say where), the public headers src/merge_capture.h, src/core/pgwt_discovery.h, src/core/pgwt_merge.h and the headers they include, tests/discovery_admission_host.c only as an example of driving the public entry points, and your own round-1 files. You MUST NOT open src/core/merge.c, src/core/merge_adapter.c, src/merge_capture.c, any review file under scratchpad/a2go/disc/review-*, scratchpad/rv*/, scratchpad/rv*/, scratchpad/a2go/disc/m9/, scratchpad/a2go/disc/m10/, scratchpad/a2go/disc/m11/, scratchpad/a2go/disc/m12/ or scratchpad/a2go/disc/m13/ (they state what the product does). The product code on this branch is an OLD one; it is expected to fail much of this test, and that is not your concern.
+
+## Task
+
+1. **Model check against the amended text.** `git show 798b9831 -- contracts/merge-v1/CONTRACT.md contracts/merge-v1/oracle-discovery/EXPECTED.md` shows the amendment (section 3; DECISIONs 36, 40, 41; rows H11g, H12a-H12e, H13). Confirm, sentence by sentence, that the model rejects on delivery a terminal control contradicted by evidence already retained (in every admission state, including against a retained undecided cookie-less EXIT), keeps a control validly recorded before its contradiction as the retained refuted claim, and marks prior_interval_certified as section 3 now states for discovery. Change what differs and say what.
+2. **Compare the exit-disposition accessor.** Round 4 compared no disposition accessor, so a product that recorded a wrong disposition with the right output stream was invisible. Read `pgwt_capture_exit_disposition` (src/merge_capture.h) after every input for every EXIT the schedule has named or delivered and compare it with the model's value; add a model-free invariant: the accessor never reports MATCHED for an EXIT whose only terminal controls were rejected on delivery. Non-vacuity counters pinned non-zero.
+3. **Repeated controls.** Round 4's alphabet never repeats a token, so an identical retransmission was never exercised. Add the repetition of each terminal control token (identical retransmission) to both families at a bounded count, state the new exact descriptor counts and the runtime, and compare faults and the accessor across it (DECISION 40: an identical retransmission repeats no already established contradiction report and restores no proof).
+4. **Finish.** Where a schedule ends with a finish, compare the fault a missing final disposition draws (row H12c) and the unfinished-record count (row H11g).
+5. **Pins.** Pinned cases for H11g, H12a, H12b, H12c, H12d, H12e and H13, each asserting the complete expected output from EXPECTED.md, the accessor after every input included.
+6. **Run it** on this tree (old product, expected red). Report: descriptor counts, runtime and peak memory; the failing classes with counts and one minimal word each; all non-vacuity counters; the UNDETERMINED list (aim: empty). Then the self-check as before.
+
+## Excluded
+
+src/ (all of it), contracts/, tests/discovery_admission_host.c and tests/test_discovery_admission.py (the other implementer's), registration (the files stay unregistered and not named test_*), depth 5, Q mode, capacity faults, PID reuse across lifetimes, the production recovery entry, retries, tolerances.
+
+## Done
+
+Report: commit sha (from the wrapper), `git diff --stat 798b9831`, the list of model and driver rules you changed with the contract sentence behind each, the descriptor counts, the runtime, the failing classes on this tree with minimal words, the pins and their results on this tree, the self-check results, the UNDETERMINED list, `git diff --check`.
+
+## Budget
+
+Rounds: 1
+Wall-clock minutes: 240
+
+## Report by
+
+At the end of the budget, even if incomplete: at most 15 lines.

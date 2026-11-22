@@ -1,0 +1,39 @@
+# Opus second reading: process-slot population rule (delta 5 part B)
+Refs read: origin/master 7815defb (merge-v1, coverage-a2-v1, oracle-a2), local branch agent/988-discovery-producer at 39f159d2 (it has no origin copy: `git log origin/agent/988-discovery-producer` gave "unknown revision"). Part A is already on master: merge-v1:500 has the owner sentence (VERIFIED).
+
+**1. Can the tracer observe it? Acquisition: only partly today. Relinquishment: the EXIT is enough.**
+- What exists today: a hardware write-watch on `my_wait_ptr_addr` (MyProc on PG13, `my_wait_event_info` on 17/18). It sets the sticky flags BOOTSTRAP_FIRED/INIT_STORED and `init_ts`, which travel in the EXIT record (VERIFIED bpf.c:1324-1361, 1549-1552). INIT_STORED=1 does prove a slot was taken. In exact_perf mode, (1,0) with no change in the WAIT_READ/INIT_NO_STATE fail counters means every fire read NULL (VERIFIED bpf.c:1335-1356). That is the PG13 `max_connections` refusal: InitProcess writes NULL to MyProc and then FATALs (INFERRED, PG13 `InitProcess`; the draft cites pg13-proc.c:339-346).
+- The gap: that watch is armed by the daemon *after* the fork. The code itself says that if the child writes the pointer first, the watch never fires (VERIFIED backend.c:1193-1211). The post-arm read covers a child that is still alive. It does not cover a child that took a slot and exited before the arm. That case ends as ESRCH/ENOENT with flags (0,0), which is exactly what A2 rows M44/M48/M57a/M63a/M63b admit today as `U(...)` (VERIFIED answers-sol.md). A cancel request or a TCP connect-and-close gives the same (0,0). So for a fast exit the tracer cannot say slot or no slot. Ring loss is not the gap: the flags sit in the fork-seeded state and are carried by the EXIT, and a lost EXIT or a missing state is already counted.
+- Smallest complete observable (INFERRED): a uretprobe on `InitProcess` and `InitAuxiliaryProcess`. Both are non-static, and a uprobe is armed for the whole binary before the fork, so there is no arm race. It sets a sticky `slot_acquired` bit and a timestamp in the fork-seeded state, and the EXIT carries them.
+  - A refusal FATALs and never returns, so it cannot set the bit. Walsenders, background workers and autovacuum workers go through InitProcess; checkpointer, bgwriter, walwriter, startup and walreceiver go through InitAuxiliaryProcess (INFERRED, PG `postmaster.c`/`auxprocess.c`). They therefore hold slots and count as backends; the draft never says so.
+  - It behaves the same on 4.18 and 6.8 (INFERRED). A missing state entry stays a counted failure, which is truthful. Issue 979 (in-kernel arming at fork) is the same direction (VERIFIED title).
+- Relinquishment needs no probe (INFERRED, PG `ProcKill`/`AuxiliaryProcKill`, `pgstat_report_wait_start`, `pgstat_reset_wait_event_storage`). After ProcKill, MyProc is NULL on PG13 and wait storage is back to private on 17/18, so nothing measurable happens between leaving the slot and the EXIT. No PG process takes a slot a second time. `[entry, EXIT)` is therefore exact for counting and at most microseconds wide for intervals. The draft's LEAVE event has no probe today: `on_bootstrap` returns at once when `init_stored` is set (VERIFIED bpf.c:1356). ProcKill is static, so it may have no symbol in a stripped build (INFERRED).
+- **A defect in the producer under decision 2:** on 17/18 `qualified_address` accepts the B_LOGGER role's *private* word as a qualified target (VERIFIED discovery_producer.c:941-962). So the PG17/18 logger, which never holds a slot (INFERRED, `SysLoggerMain`), can be admitted and counted as a backend. The draft's S11/S12 aim at this; the producer still has to change.
+
+**2. Entry-time cohort key.** It does two jobs. Certificates cannot be changed, so a process born in J_k that takes its slot later cannot be counted back into J_k. And a living silent client cannot hold its birth cohort open (that is up to `authentication_timeout`, INFERRED).
+- The owner's decision does not require a cohort. For the counted population, "from the first record that proves the slot until EXIT" is enough (VERIFIED that `init_ts` is already in the EXIT record, bpf.c:1552).
+- Cohorts matter only for A2's K/L limits. There the smaller rule is to key the cohort *and* N_k by slot entry, with N_k = backends started. Then 0<=U_k<=N_k still holds (coverage-a2:39). E_k, E_qual, the joint envelope, the origin companion and the two-record certificate (draft items 18-23, 30, 32) all go away. The cost is that the fork load of non-slot processes is no longer a per-cohort runtime count. Whether qualification can record that load as a cell parameter is a question only the author can answer.
+
+**3. Where the rule lives (INFERRED proposal).**
+- merge-v1: one paragraph in DECISION 30 (population = slot holders, both provenance routes, every version). One sentence in the §4 A2 admission (merge-v1:154-186): "a fork-born lifetime whose EXIT proves no successful slot acquisition and whose fail counters are unchanged is not a backend. Release its FORK/EXIT with no UNTRACED and no INIT loss, whatever BOOTSTRAP_FIRED says." This replaces the draft's items 3-5 and 12.
+- coverage-a2-v1: scope (:9) becomes a slot-holding lifetime keyed and counted by entry. Yes, "not a backend" changes the limit: non-slot fast exits stop counting toward K_A2.
+- Existing rows whose expected output changes: M44, M48, M57a, M63a, M63b (they have to state slot status: a slot gives `U`, no slot gives no U) and M49 (a PG13 refusal stops being VOID). VERIFIED answers-sol.md and ROWS.md:65-117. N1/N10/N14 are already done.
+- New rows needed for the smallest version: about 6, not 12. A refusal; a pre-arm slot-and-exit; a non-slot fast exit; an entry in a later cohort; the PG17/18 logger; and a failed probe or missing state.
+
+**4. Interface and documentation.**
+- README (draft line 164) is fine with one addition: "Process slots include auxiliary processes (checkpointer, background writer, WAL writer, startup, WAL receiver)."
+- UI: label the panel "Backends (processes holding a PostgreSQL process slot)" and show no row for a connection that never took a slot.
+- A separate "connections that never became backends: N" count would need a new carrier. That is an owner UX question, not required by "b".
+
+**5. Order and size.** Two units:
+1. A contract-only unit (merge-v1 + coverage-a2-v1, fresh answer sets).
+2. One producer+BPF+merge unit: the slot bit, EXIT flag, merge disposition and logger exclusion. It needs an el8 box-check.
+
+Unit 2 overlaps bpf.c and discovery_producer.c with P1/P2, so it waits for both. The coordinator only carries the new flag. Removing the churn exception (#959) depends on the slot bit, not on the full draft. Without the bit, A2 counts non-slot fast exits as "untraced backends", which is a wrong number under RULE 2 (INFERRED; whether the churn workloads actually produce non-slot exits was not measured).
+
+**6. Verdict: send back for a smaller design.** The three things most likely to be wrong in the draft:
+- (a) It has two no-slot proofs: the ordered MyProc/`proc_exit_inprogress` read witness plus kernel history. One birth-effective kernel bit makes the witness redundant, and the draft itself says the witness cannot classify pre-arm exits (draft:155).
+- (b) `leave_ns` as a separately observed endpoint, plus the "at most one episode" qualification. Nothing can be measured after ProcKill and there is no probe for it, so EXIT is the end.
+- (c) The cohort apparatus: E_k/N_k in different cohorts, E_qual, A2_ORIGIN, the two-member certificate and revision 4. It is oversized for a decision that changes membership, not limits.
+
+The author's own answer is indispensable on two points: dropping the fork-load count from N_k, and whether the live no-slot FORK release (draft item 4) is needed to stop a silent client holding the frontier (merge-v1:186 holds FORK until EXIT).

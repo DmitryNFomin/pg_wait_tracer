@@ -1,0 +1,31 @@
+VERIFIED — References below: **D** = `scratchpad/u2b/diagnosis-r13.md`; **S** = `scratchpad/m871/spec-coverage-label-r2.md`; source/test paths refer to `scratchpad/wt-u2b13`, whose `git rev-parse --short=8 HEAD` returned `b291215c`.
+VERIFIED — CONTROLLING SCOPE DECISION: “Their whole-window numbers are withheld, the same as for any window whose coverage cannot be confirmed.” [Live #947 comment](https://github.com/DmitryNFomin/pg_wait_tracer/issues/947#issuecomment-6980525535).
+VERIFIED — A2 owner decision: “1.a but c must be filed and added to the backlog / 2.b / 3. yes”; its recorded sequence explicitly says “After U1 and U2b: the new gap reason and the display.” [Live #959 comment](https://github.com/DmitryNFomin/pg_wait_tracer/issues/959#issuecomment-7019757566).
+
+INFERRED — **1(a):** For an unknown victim, capture-wide `[floor_db, detecting tick)` is the appropriate conservative extent under this contract: a lost closing record can describe an interval beginning before the previous watermark, and a PID filter cannot establish innocence.
+VERIFIED — That extent is prescribed by S:39–49,62 and implemented by `src/coverage.c:316–353`; it is not an accidental interpretation introduced by the test.
+INFERRED — **1(b):** For a positively identified, never-attached lifetime with birth and exit proven, that extent is unnecessarily broad; the intended A2 treatment is lifetime-bounded evidence plus the qualifying cohort’s limit verdict.
+INFERRED — **Merge decision:** U2b may retain the coarse extent with a named #959/A2 verdict-and-display follow-up, following the explicit sequencing above; that is not release clearance or permission to defer indefinitely.
+INFERRED — RULE 2 and tag criterion **(b)** still matter: excessive withholding can make a real path unusable despite showing no wrong number; criterion **(c)** applies if the delivered behavior contradicts a promised guarantee. The justification for staging is the recorded scope decision, not “no wrong numbers” alone (`CLAUDE.md:24–35`).
+
+INFERRED — **2: Sound witness:** For every unmet numeric assertion, require its actual requested/resolved window to be withheld as `incomplete/capture_loss`, an intersecting loss range from the same capture/boot, and a valid positive counter delta attributable to the tick that generated that range.
+INFERRED — Observe all 15 vector components with validity and monotonicity checks; associate deltas with the daemon’s previous/current counter snapshots and paired DROP gap, rather than merely finding any increase somewhere in the run.
+INFERRED — Use the underlying, unclipped gap endpoint/detection provenance: a response’s uncovered range may end at the request boundary, not at the detecting tick. Accept SEAL detection after the numeric window only when that specific gap reaches back into it.
+INFERRED — Polling that merely brackets detection is weaker than tick-linked evidence; ambiguous association, missing baselines, resets, unreadable counters or unrelated later losses must not qualify.
+INFERRED — Full-vector observation is not blanket exit-94 authorization: the identified cause must also match an explicitly scoped, filed defect. Every non-numeric check, incorrect returned number, unexplained failure and uncovered window without this witness must fail ordinarily.
+VERIFIED — The present helper requires in-window ring-counter reads and gives ordinary failures precedence (`tests/coverage_loss.py:45–68`); expanding it would change the current exception.
+
+INFERRED — **3:** Keep #871 for event-ring loss; use #959 for diagnosed short-backend omissions. Tests encountering both need cause-specific attribution to both issues, not relabeling every vector change as #871 or #959.
+INFERRED — Keep these proposed invocation exceptions restricted to `el8@4.18` pending evidence and authorization for additional scopes; one passing Ubuntu run establishes neither immunity nor a reason to broaden exemptions.
+VERIFIED — #959’s live A2 decision covers all OSes, and its measurement comment reports omissions on both Ubuntu and EL8; defect scope and test-exception scope therefore differ. [Decision](https://github.com/DmitryNFomin/pg_wait_tracer/issues/959#issuecomment-7019757566), [measurement](https://github.com/DmitryNFomin/pg_wait_tracer/issues/959#issuecomment-7020958480).
+
+INFERRED — **4(a):** Silent omission in the live CLI is a tag-blocker under **(b)** and, where totals/counts/shares are presented as complete, **(a)**. Track the live-output defect separately, linked to #871; U2b’s specified CLI route is replay (S:87,133–134).
+VERIFIED — The probe records the missing sleeper’s absent PgSleep interval and one wait-transition drop (`u2b/diag13/b_trace_findings.txt:4–11`); D:54–63 documents the missing user notice and unchanged live path.
+INFERRED — **4(b):** Mode B must remain an ordinary failure under the current rule: its displayed result is silently incomplete, not honestly withheld. A diagnostic server verdict cannot repair what the CLI user saw; a ring delta alone does not authorize exit 94.
+INFERRED — Any temporary Mode B exception requires an explicit change to the exception’s scope; it must not be smuggled into the numeric-withholding predicate merely to pass EL8.
+
+VERIFIED — **5: Corrections:** F3’s original round-13 component is undetermined; INIT loss was reproduced separately. D:20–30 explicitly distinguishes those claims.
+VERIFIED — F1 also includes counter unreadability/recovery, not just increments (`src/open_snapshot.c:382–410`); such uncertainty is not itself evidence of counted loss.
+INFERRED — The 2.23 ms aggregate diagnostic does not itself supply durable per-lifetime identity and bounds to the reader; narrowing coverage requires that evidence, not just replacing the floor with an aggregate duration.
+INFERRED — Long non-idle intervals can make later drops revoke substantial earlier coverage, including windows previously reported complete. Ordinary ClientRead with `cmd_open == 0` pins the idle floor only; “idle in transaction” alone does not prove it pins `floor_db` (`src/open_snapshot.c:300–306`).
+INFERRED — Missing a query row can also distort every surviving row’s `% Event`, because the denominator sums surviving event records (`src/output.c:1132–1140`); percentages summing to 100% cannot detect that loss.

@@ -1,0 +1,16 @@
+# Design question to an adviser (RULE 1 of CLAUDE.md): what should the capture's advertised range (and the UI's "All") be when loss stalls the coverage watermark in the middle of a capture?
+
+This is a written design question from the lead to a design adviser, one question, one answer. It is not an implementation brief; scripts/lead/check-brief.sh does not apply; do not run it. Read-only: edit no file except your answer if told to write one. At most 25 lines. Mark every claim VERIFIED (file:line read, or command and output) or INFERRED. scratchpad = SP
+
+## Background
+Your earlier answers on the entirely lost capture: scratchpad/u2b/astra-info-label.md and scratchpad/u2b/fable-info-label.md (read both). The lead took the second adviser's shape: one pair of names; the default window is the certified range when that is non-empty, else the boot's observed extent. It is implemented in commit 859c1963 (branch agent/947-coverage-server; worktree scratchpad/wt-u2bf; `pgwt_cov_trace_window` in src/coverage_trace.c), with rows.
+
+## New measurement (EL8 4.18, that commit; /private/tmp/u2b-r17-evidence/report.txt, the paragraph "All preset measured on EL8", and the all-preset* files beside it)
+A capture ran about 22.7 s (boot start S to last observation). Loss began about 3 s in and lasted to shutdown: 19 gaps; the watermark stalled at S + 3.0 s. The default window is therefore [S, S+3.0 s). The UI's "All" shows those 3 seconds (13:23:59-13:24:02) and withholds their numbers with "capture loss" and "not captured"; the other 19.7 s of the run are outside "All", and nothing on the page says the capture continued or that the rest was lost (the UI does not read info's gap list). On master (before this branch) info advertises the data bounds, so "All" spans the whole run and shows numbers with no loss label at all.
+In ordinary captures the watermark trails the last observation by a tick or two, so the hidden tail is about a second; here it is unbounded.
+
+## Questions
+1. Is this a defect this branch introduces under the tag criteria of CLAUDE.md (criterion (b): a real UX path is wrong, misleading or contradictory), or acceptable?
+2. Choose the rule for the advertised range and "All", and say what each choice does in these five cases: a clean sealed capture; a capture still being written (live); a capture that crashed (unclean end) shortly after its last watermark; loss from mid-capture to shutdown (the measured case); loss in the middle that later recovers. Candidates: (i) the certified range (today); (ii) the observed extent [S, last observation) once the boot has ended, the certified range while it is live; (iii) the certified range plus a separately named observed end in info, with one sentence in the UI when the two differ by more than a tick ("capture continues to T; the last N s are not covered: capture loss"); (iv) something better.
+3. For your choice: the smallest change (which function, which fields, which UI element if any), the reader/server rows and the UI case it needs, and whether it can be done without a new visual element.
+4. If your choice needs UI work that should not ride on this branch: say whether the branch may merge with rule (i) and a tag-blocker follow-up, and cite the rule of CLAUDE.md that allows or forbids that.

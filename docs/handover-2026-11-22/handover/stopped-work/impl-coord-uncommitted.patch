@@ -1,0 +1,112 @@
+diff --git a/tests/discovery_integration_host.c b/tests/discovery_integration_host.c
+index 44e22982..1feb33de 100644
+--- a/tests/discovery_integration_host.c
++++ b/tests/discovery_integration_host.c
+@@ -977,6 +977,8 @@ int main(int argc,char **argv)
+             printf("oracle_%s\n",integration_oracle_ids[n]);
+         for(size_t n=0;n<sizeof(integration_u_rows)/sizeof(*integration_u_rows);++n)
+             printf("oracle_%s\n",integration_u_rows[n]);
++        for(size_t n=0;n<sizeof(integration_p_rows)/sizeof(*integration_p_rows);++n)
++            printf("oracle_%s\n",integration_p_rows[n]);
+         return 0;
+     }
+     size_t ran=0;
+@@ -1009,5 +1011,12 @@ int main(int argc,char **argv)
+         printf("REACHED integration %s\n",di_case);fflush(stdout);
+         integration_u_row(integration_u_rows[n]);++ran;++oracle_count;
+     }
++    for(size_t n=0;n<sizeof(integration_p_rows)/sizeof(*integration_p_rows);++n) {
++        char name[64];snprintf(name,sizeof(name),"oracle_%s",integration_p_rows[n]);
++        if(argc>1 && strcmp(argv[1],name))continue;
++        di_case=name;discovery_case=integration_p_rows[n];
++        printf("REACHED integration %s\n",di_case);fflush(stdout);
++        integration_p_row(integration_p_rows[n]);++ran;++oracle_count;
++    }
+     CHECK(ran,"named case reached");printf("discovery integration: %zu named cases PASS; %zu frozen oracle rows through coordinator\n",ran,oracle_count);return 0;
+ }
+diff --git a/tests/discovery_integration_i2.h b/tests/discovery_integration_i2.h
+index 44458707..358686dc 100644
+--- a/tests/discovery_integration_i2.h
++++ b/tests/discovery_integration_i2.h
+@@ -560,3 +560,30 @@ static void integration_u_row(const char *id)
+         "the coordinator finalises exactly when the frozen row allows it");
+     printf("SECOND_AMENDMENT %s through coordinator PASS\n",id);cleanup(s);
+ }
++
++/* P rows ([D3] variant b presentation) driven through the coordinator and
++ * asserted by the consumer fixture's own r9_expect. */
++static const char *const integration_p_rows[]={"P1","P2","P3"};
++static void integration_p_row(const char *id)
++{
++    struct ih *s=isetup(16);struct dh *h=s->h;discovery_case=id;
++    h->capture->config.coverage_gap=r9_ordinary;
++    s->checkpoint.reconciliation_ns=DB+30;s->checkpoint.reconciliation_count=3;
++    struct pgwt_discovery_attempt reg[2]={valid_record(PGWT_DH_INVENTORY),valid_record(PGWT_DH_INSTALLED)};
++    o_send(s,reg,2);
++    struct pgwt_discovery_attempt nw=valid_record(PGWT_DH_NO_WORD);nw.no_wait_word=true;nw.pointer_fence_ns=DB+7;o_send(s,&nw,1);
++    CHECK(issued(s,PGWT_DISC_CONFIRM_NO_WAIT_WORD)==1,"route c confirmed without role-support publication");
++    r9_complete(h,6);r9_complete(h,8);
++    if(!strcmp(id,"P2")) {
++        struct pgwt_discovery_attempt p=valid_record(PGWT_DH_POINTER);p.pointer_continuous=(fact){true,false};o_send(s,&p,1);
++        r9_complete(h,14);
++    }
++    if(!strcmp(id,"P3")) {
++        struct pgwt_discovery_attempt p=valid_record(PGWT_DH_POINTER);p.pointer_nonnull=0;o_send(s,&p,1);
++        o_terminal(s,30,DG,12);r9_exit(h,12);r9_complete(h,13);
++    }
++    if(!strcmp(id,"P2")) r9_expect(h,"F5[C0] F7[C0] VOID20[C0,unknown_evidence]",-1,-1,-1,1,false,1,0);
++    else r9_expect(h,!strcmp(id,"P3")?"F5[C0] F7[C0] EXIT_D12 F12[C0]":"F5[C0] F7[C0]",6,-1,6,0,true,0,0);
++    DC(!pgwt_capture_a2_observed_births(h->capture,DB,DB+100),"P no backend population contribution");
++    printf("P_ROW %s through coordinator PASS\n",id);cleanup(s);
++}
+diff --git a/tests/test_discovery_integration.py b/tests/test_discovery_integration.py
+index 4e04f553..0168ae36 100644
+--- a/tests/test_discovery_integration.py
++++ b/tests/test_discovery_integration.py
+@@ -138,7 +138,7 @@ MUTANTS += [
+     ('stage_borrows_payload', 'memcpy(d->payload,e->bytes,e->size);d->wire.envelope.bytes=d->payload;',
+      'd->wire.envelope.bytes=e->bytes;', 'receipt_staging', 'staged payload survives caller reuse'),
+     ('post_publication_gate_removed', 'if(nw && !acceptance_gate(i,l)) return;',
+-     'if(false && nw && !acceptance_gate(i,l)) return;', 'publication_checkpoint', 'post-publication checkpoint gates confirmation'),
++     'if(false && nw && !acceptance_gate(i,l)) return;', 'publication_checkpoint', 'post-admission checkpoint gates confirmation'),
+     ('unknown_inactivity_as_false', 's==PGWT_DISC_UNKNOWN?unknown():yesno(s==PGWT_DISC_INACTIVE)',
+      'yesno(s==PGWT_DISC_INACTIVE)', 'unknown_observations', 'unknown inactivity is not a false observation'),
+     ('unqualified_observation_compared', 'return valid?yesno(a==b):unknown();',
+@@ -408,6 +408,7 @@ def main():
+             file = tree / 'src/discovery_integration.c'
+             original = file.read_text()
+             selected = [m for m in MUTANTS if args.mutants or m[0] in args.mutant]
++            failed = []
+             for name, before, after, case, assertion in selected:
+                 patches = [(before, after)] if isinstance(before, str) else before
+                 mutated = original
+@@ -415,14 +416,21 @@ def main():
+                     assert mutated.count(old) == 1, (name, mutated.count(old))
+                     mutated = mutated.replace(old, new)
+                 file.write_text(mutated)
+-                result = run([str(build(tree)), case], tree, False)
+-                assert f'REACHED integration {case}' in result.stdout, (name, result.stdout)
+-                assert result.returncode == 1 and f'ASSERT integration {case}: {assertion} (line ' in result.stderr, (
+-                    name, result.returncode, result.stdout, result.stderr)
+-                assert not any(x in result.stderr for x in ['AddressSanitizer', 'runtime error:']), result.stderr
+-                print(f'MUTANT {name}: built, reached {case}, RED ({assertion})', flush=True)
+-                file.write_text(original)
+-            print(f'discovery integration mutants: {len(selected)}/{len(selected)} RED', flush=True)
++                try:
++                    result = run([str(build(tree)), case], tree, False)
++                    assert f'REACHED integration {case}' in result.stdout, (name, result.stdout[-400:])
++                    assert result.returncode == 1 and f'ASSERT integration {case}: {assertion} (line ' in result.stderr, (
++                        name, result.returncode, result.stderr[-600:])
++                    assert not any(x in result.stderr for x in ['AddressSanitizer', 'runtime error:']), result.stderr
++                    print(f'MUTANT {name}: built, reached {case}, RED ({assertion})', flush=True)
++                except AssertionError as error:
++                    failed.append(name)
++                    print(f'MUTANT {name}: NOT RED {error}', flush=True)
++                finally:
++                    file.write_text(original)
++            print(f'discovery integration mutants: {len(selected) - len(failed)}/{len(selected)} RED', flush=True)
++            if failed:
++                raise SystemExit('mutants not red: ' + ' '.join(failed))
+ 
+ 
+ if __name__ == '__main__':

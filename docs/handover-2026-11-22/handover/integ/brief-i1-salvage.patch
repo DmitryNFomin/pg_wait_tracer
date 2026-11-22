@@ -1,0 +1,326 @@
+diff --git a/src/discovery_admission.h b/src/discovery_admission.h
+new file mode 100644
+index 00000000..1a0af0e1
+--- /dev/null
++++ b/src/discovery_admission.h
+@@ -0,0 +1,201 @@
++/* Producer handoff for merge-v1 decisions 31-40. No numerical admission here.
++ * All facts default to unknown; a consumer must require known && value. */
++#ifndef PGWT_DISCOVERY_ADMISSION_H
++#define PGWT_DISCOVERY_ADMISSION_H
++#include "pg_wait_tracer.h"
++
++#define PGWT_DISCOVERY_CAPACITY 65536
++#define PGWT_DISCOVERY_ATTEMPTS 4 /* three quiet brackets plus fresh fallback */
++#define PGWT_DISCOVERY_GENERATIONS (MAX_BACKENDS * PGWT_DISCOVERY_ATTEMPTS)
++#define PGWT_DISCOVERY_FIRST (1ULL << 63)
++struct pgwt_discovery_identity { u64 cookie, start_ticks; }; /* cookie=0: tombstone */
++struct pgwt_discovery_key { u32 tid, reserved; u64 start_ns; };
++struct pgwt_discovery_life {
++    u32 tgid, parent;
++    u64 leader_start_ns, start_boot_ns, fork_ns, exit_ns, exec_ns, terminal_cookie;
++    u64 fork_cookie, pointer_fault;
++    u64 terminal_seq;
++    u32 terminal_cpu, terminal_dest;
++    u64 terminal_transport_known;
++};
++/* Userspace owns the separate u64 configuration: 0 waits for initialization,
++ * 1 is permanent NULL, any other value is the qualified wait address.
++ * Producer-owned observations are never replaced after publication. */
++#define PGWT_DISC_PTR_PENDING 0ULL
++#define PGWT_DISC_PTR_NONE 1ULL
++struct pgwt_discovery_pointer {
++    u64 fires, nonnull, contradicted;
++    u64 relocated, old_word, local_word, exit_in_progress, local_fires, null_seen;
++};
++struct pgwt_discovery_local { u64 address, exit_flag_address; };
++struct pgwt_discovery_progress { u64 entered, completed; };
++struct pgwt_discovery_cpu { u64 total, on_cpu_ts; };
++/* A pinned helper records this only after all preceding producers on its
++ * CPU completed. Attempts include silent/discarded/failed publications. */
++struct pgwt_discovery_ack { u64 request, stamp, attempts[3]; };
++
++#ifndef __BPF__
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include "counter_vector.h"
++struct pgwt_producer_fact { bool known, value; };
++enum pgwt_discovery_inactive {
++    PGWT_DISC_UNKNOWN, PGWT_DISC_INACTIVE, PGWT_PRODUCER_RUNNING,
++    PGWT_PRODUCER_DENIED, PGWT_PRODUCER_MALFORMED
++};
++struct pgwt_discovery_status {
++    uint64_t voluntary, start_ticks;
++    uint32_t threads, parent, tgid;
++    bool known, terminal;
++};
++enum pgwt_discovery_resolution { PGWT_DISC_NUM_PENDING, PGWT_DISC_NUM_J, PGWT_DISC_NUM_R, PGWT_DISC_NUM_G };
++enum pgwt_discovery_handoff_kind {
++    PGWT_DH_INVALID=0, PGWT_DH_CENSUS=1, PGWT_DH_INVENTORY=2,
++    PGWT_DH_INSTALLED=3, PGWT_DH_NUMERIC=4, PGWT_DH_RESOLUTION=5,
++    PGWT_DH_ATTEMPT=6, PGWT_DH_NO_WORD=7, PGWT_DH_POINTER=8,
++    PGWT_DH_TERMINAL=9, PGWT_DH_END=10, PGWT_DH_FAULT=11
++};
++enum pgwt_discovery_reconciliation {
++    PGWT_DREC_PENDING=0, PGWT_DREC_COMPLETE=1, PGWT_DREC_PERMANENT_FAILURE=2
++};
++struct pgwt_discovery_attempt {
++    enum pgwt_discovery_handoff_kind kind;
++    uint64_t binding_token;
++    uint64_t failed_open, gone_at, identity_visible_at;
++    uint32_t tid, tgid, parent, postmaster;
++    uint64_t fork_cookie;
++    struct pgwt_producer_fact start_mono_known, namespaces, retained_binding;
++    struct pgwt_producer_fact history_complete, producers_complete, journal_complete;
++    struct pgwt_producer_fact journal_eligible, gone_esrch;
++    uint64_t reconciliation_ns, reconciliation_count;
++    enum pgwt_discovery_reconciliation reconciliation;
++    uint64_t accumulator, on_cpu_ts;
++    bool seed_valid;
++    struct pgwt_producer_fact install_before_enable, failure_accounting, voluntary_no_wrap;
++    bool attempts_ended;
++    bool claims_completed_coherence, claims_completed_no_word;
++    bool pointer_snapshot_valid;
++    uint64_t kernel_evidence_count, user_evidence_count;
++    bool evidence_counts_known;
++    bool handoff_complete;
++    /* A census_record has pid/cookie zero and carries global completeness,
++     * the population size and both helper cuts, including for a real empty
++     * census. An absent record never establishes census completion. */
++    bool census_record;
++    uint32_t inventory_count;
++    /* Physical producer obligations. Integration derives its authoritative
++     * pending diagnostics from committed bounds/discharges, never these. */
++    uint32_t numeric_pending, lifetime_pending, total_pending;
++    bool numeric_record, evidence_fault, no_wait_word, no_wait_valid;
++    enum pgwt_discovery_resolution numeric_resolution;
++    uint32_t pid, attempt, maximum_attempts;
++    uint64_t cookie, attachment_generation, boot_lower_ns, start_upper_ns, census_cut_ns;
++    uint64_t opened_ns, begin_ns, end_ns, e, t, armed_addr, resolved_addr;
++    uint64_t terminal_ns, terminal_start_ns, terminal_cookie;
++    uint64_t terminal_seq;
++    uint32_t terminal_cpu, terminal_dest;
++    bool terminal_transport_known;
++    struct pgwt_producer_fact terminal_match;
++    uint64_t generation_published_ns, producers_fenced_ns;
++    uint64_t f0_ns, lifetime_start_ns, start_ticks;
++    uint64_t pointer_enabled_ns, pointer_read_ns, pointer_fence_ns;
++    uint64_t pointer_fires_before, pointer_fires_after, pointer_nonnull;
++    uint64_t local_address, local_enabled_ns;
++    struct pgwt_producer_fact local_continuous;
++    uint32_t permanent_role, role_major;
++    struct pgwt_producer_fact permanent_role_proved, pointer_null, pointer_continuous;
++    struct pgwt_producer_fact counters_unchanged;
++    /* Native authentication timer qualification is not supplied by this
++     * producer. Unknown never becomes a deadline inferred from task age. */
++    struct pgwt_producer_fact authentication_phase;
++    bool auth_deadline_known;
++    uint64_t auth_deadline_ns;
++    struct pgwt_counter_vector counters_before, counters_after;
++    uint32_t cpu_count, cpu_ids[MAX_CPUS];
++    struct pgwt_discovery_ack producers_before[MAX_CPUS], producers_after[MAX_CPUS];
++    uint32_t X;
++    uint64_t v0, v1, cpu_base;
++    uint32_t threads0, threads1;
++    enum pgwt_discovery_inactive S0, S1;
++    bool v0_valid, v1_valid, terminal0, terminal1, cpu_base_valid;
++    bool quiet_valid, final_attachment, admitted;
++    /* Explicit known/true proof bits, rather than an aggregate "proof OK". */
++    struct pgwt_producer_fact enumeration, lifecycle_active, census_fenced;
++    struct pgwt_producer_fact inventory_bound, clock_bound, predates_boot;
++    struct pgwt_producer_fact fd_bound, memory_bound, postmaster_member;
++    struct pgwt_producer_fact lifecycle_fenced, no_observed_fork;
++    struct pgwt_producer_fact fork_allocator_partitioned, discovery_allocator_serialized;
++    struct pgwt_producer_fact cookie_partitioned, cookie_burned, allocation_no_wrap;
++    struct pgwt_producer_fact identity_immutable, identity_visible;
++    struct pgwt_producer_fact generations_fenced, producer_owned;
++    struct pgwt_producer_fact address_qualified, address_compared;
++    struct pgwt_producer_fact stable_address_phase, relocation_observed;
++    struct pgwt_producer_fact no_foreign_writer, single_thread_history;
++    struct pgwt_producer_fact cpu_enrolled, inactivity_interface;
++    struct pgwt_producer_fact enable_confirmed;
++    int error;
++};
++/* Generation entries are immutable, indexed by cpu_ids, and retained until close. */
++struct pgwt_discovery_pre_enable {
++    uint64_t attachment_generation;
++    uint32_t cpu_count, cpu_ids[MAX_CPUS];
++    struct pgwt_discovery_ack pre_enable[MAX_CPUS];
++    uint64_t pre_enable_completed_ns;
++    bool pre_enable_valid;
++};
++struct pgwt_discovery_binding_snapshot {
++    struct pgwt_discovery_attempt inventory;
++    const struct pgwt_discovery_pre_enable *generations;
++    size_t generation_count;
++};
++struct pgwt_discovery_checkpoint {
++    uint64_t reconciliation_ns, reconciliation_count;
++    uint64_t kernel_evidence_count, user_evidence_count;
++    enum pgwt_discovery_reconciliation reconciliation;
++    bool evidence_counts_known, handoff_complete, attempts_stopped;
++    int error;
++};
++/* Engine operations are injected by the daemon and the host schedule shim.
++ * seed creates a NEW generation, initialized before active publication. fence
++ * covers lifecycle and every producer writer, never just watchpoint output. */
++struct pgwt_discovery_ops {
++    void *ctx;
++    int (*disable)(void *);
++    int (*fence)(void *, struct pgwt_discovery_attempt *);
++    int (*status)(void *, struct pgwt_discovery_status *);
++    enum pgwt_discovery_inactive (*inactive)(void *);
++    int (*resolve)(void *, uint64_t *);
++    int (*word)(void *, uint64_t, uint32_t *);
++    uint64_t (*now)(void *);
++    int (*seed)(void *, struct pgwt_discovery_attempt *, bool);
++    int (*enable)(void *);
++    void (*yield)(void *, const struct pgwt_discovery_attempt *);
++};
++uint64_t pgwt_discovery_allocate(uint64_t *next, bool *exhausted);
++bool pgwt_discovery_before_boot(uint64_t ticks, uint64_t hz,
++                                uint64_t boot_lower, uint64_t *upper);
++bool pgwt_discovery_quiet(const struct pgwt_discovery_attempt *);
++int pgwt_discovery_brackets(struct pgwt_discovery_attempt *,
++                            const struct pgwt_discovery_ops *);
++
++struct pgwt_daemon;
++struct pgwt_backend;
++struct pgwt_discovery;
++/* The daemon calls this to consume the census witness, then retained attempts. Cursor is caller-owned;
++ * no records or generations are removed, including failed/pending attempts. */
++bool pgwt_discovery_next(struct pgwt_daemon *, size_t *cursor,
++                         struct pgwt_discovery_attempt *);
++int pgwt_discovery_start(struct pgwt_daemon *);
++int pgwt_discovery_scan(struct pgwt_daemon *);
++int pgwt_discovery_attach(struct pgwt_daemon *, struct pgwt_backend *);
++struct pgwt_discovery_checkpoint pgwt_discovery_refresh_until(struct pgwt_daemon *, uint64_t deadline_ns);
++void pgwt_discovery_checkpoint(struct pgwt_daemon *, struct pgwt_discovery_checkpoint *);
++bool pgwt_discovery_binding(struct pgwt_daemon *, uint64_t binding_token,
++                            struct pgwt_discovery_binding_snapshot *);
++void pgwt_discovery_stop_attempts(struct pgwt_daemon *);
++void pgwt_discovery_refresh(struct pgwt_daemon *);
++void pgwt_discovery_note_exit(struct pgwt_daemon *, uint32_t);
++void pgwt_discovery_close(struct pgwt_daemon *);
++#endif
++#endif
+diff --git a/tests/discovery_headers_host.c b/tests/discovery_headers_host.c
+new file mode 100644
+index 00000000..c0e7f75e
+--- /dev/null
++++ b/tests/discovery_headers_host.c
+@@ -0,0 +1,70 @@
++/* Frozen section A must coexist with the consumer's tags and typedefs. */
++#ifdef PGWT_HEADERS_MERGE_FIRST
++#include "core/pgwt_discovery.h"
++#include "discovery_admission.h"
++#else
++#include "discovery_admission.h"
++#include "core/pgwt_discovery.h"
++#endif
++#include <assert.h>
++#include <stdio.h>
++
++#define TYPE(member, type) _Static_assert( \
++    _Generic(((struct pgwt_discovery_attempt *)0)->member, type: 1, default: 0), #member)
++#define U64(member) TYPE(member, uint64_t)
++#define U32(member) TYPE(member, uint32_t)
++#define FACT(member) TYPE(member, struct pgwt_producer_fact)
++#define BOOL(member) TYPE(member, bool)
++TYPE(kind, enum pgwt_discovery_handoff_kind);
++U64(binding_token); U64(failed_open); U64(gone_at); U64(identity_visible_at);
++U32(tid); U32(tgid); U32(parent); U32(postmaster); U64(fork_cookie);
++FACT(start_mono_known); FACT(namespaces); FACT(retained_binding);
++FACT(history_complete); FACT(producers_complete); FACT(journal_complete);
++FACT(journal_eligible); FACT(gone_esrch);
++U64(reconciliation_ns); U64(reconciliation_count);
++TYPE(reconciliation, enum pgwt_discovery_reconciliation);
++U64(accumulator); U64(on_cpu_ts); BOOL(seed_valid);
++FACT(install_before_enable); FACT(failure_accounting); FACT(voluntary_no_wrap);
++BOOL(attempts_ended); BOOL(claims_completed_coherence); BOOL(claims_completed_no_word);
++BOOL(pointer_snapshot_valid); U64(kernel_evidence_count); U64(user_evidence_count);
++BOOL(evidence_counts_known); BOOL(handoff_complete);
++
++#define SIGNATURE(name, type) _Static_assert(_Generic(&name, type: 1, default: 0), #name)
++SIGNATURE(pgwt_discovery_refresh_until, struct pgwt_discovery_checkpoint (*)(struct pgwt_daemon *, uint64_t));
++SIGNATURE(pgwt_discovery_checkpoint, void (*)(struct pgwt_daemon *, struct pgwt_discovery_checkpoint *));
++SIGNATURE(pgwt_discovery_binding, bool (*)(struct pgwt_daemon *, uint64_t, struct pgwt_discovery_binding_snapshot *));
++SIGNATURE(pgwt_discovery_stop_attempts, void (*)(struct pgwt_daemon *));
++SIGNATURE(pgwt_discovery_refresh, void (*)(struct pgwt_daemon *));
++SIGNATURE(pgwt_discovery_next, bool (*)(struct pgwt_daemon *, size_t *, struct pgwt_discovery_attempt *));
++
++_Static_assert(PGWT_PRODUCER_RUNNING == 2 && PGWT_PRODUCER_DENIED == 3 &&
++               PGWT_PRODUCER_MALFORMED == 4, "producer inactivity values preserved");
++_Static_assert(PGWT_DISC_RUNNING == 2 && PGWT_DISC_DENIED == 3 &&
++               PGWT_DISC_MALFORMED == 6, "consumer inactivity values preserved");
++_Static_assert(PGWT_DH_INVALID == 0 && PGWT_DH_CENSUS == 1 && PGWT_DH_INVENTORY == 2 &&
++               PGWT_DH_INSTALLED == 3 && PGWT_DH_NUMERIC == 4 && PGWT_DH_RESOLUTION == 5 &&
++               PGWT_DH_ATTEMPT == 6 && PGWT_DH_NO_WORD == 7 && PGWT_DH_POINTER == 8 &&
++               PGWT_DH_TERMINAL == 9 && PGWT_DH_END == 10 && PGWT_DH_FAULT == 11,
++               "frozen discriminator values");
++_Static_assert(PGWT_DREC_PENDING == 0 && PGWT_DREC_COMPLETE == 1 &&
++               PGWT_DREC_PERMANENT_FAILURE == 2, "frozen reconciliation values");
++_Static_assert(sizeof(((struct pgwt_discovery_pre_enable *)0)->cpu_ids) / sizeof(uint32_t) == MAX_CPUS,
++               "complete CPU set storage");
++_Static_assert(sizeof(((struct pgwt_discovery_pre_enable *)0)->pre_enable) /
++               sizeof(struct pgwt_discovery_ack) == MAX_CPUS, "complete immutable B storage");
++
++int main(void)
++{
++    struct pgwt_discovery_attempt producer = {0};
++    pgwt_discovery_attempt consumer = {0};
++    struct pgwt_discovery_checkpoint checkpoint = {0};
++    struct pgwt_discovery_binding_snapshot binding = {0};
++    struct pgwt_discovery_pre_enable generation = {0};
++    assert(producer.kind == PGWT_DH_INVALID && !producer.retained_binding.known);
++    assert(!checkpoint.reconciliation_ns && !checkpoint.evidence_counts_known);
++    assert(!binding.generations && !binding.generation_count);
++    assert(!generation.pre_enable_valid && !generation.pre_enable_completed_ns);
++    assert(!consumer.proof.known && !consumer.proof.truth);
++    puts("discovery headers: frozen declarations and zero/unknown defaults PASS");
++    return 0;
++}
+diff --git a/tests/test_discovery_headers.py b/tests/test_discovery_headers.py
+new file mode 100644
+index 00000000..da68a4b8
+--- /dev/null
++++ b/tests/test_discovery_headers.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python3
++"""Compile the exact producer/merge header pair in both inclusion orders."""
++import os
++from pathlib import Path
++import shlex
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def main():
++    with tempfile.TemporaryDirectory(prefix='pgwt-discovery-headers-') as temporary:
++        for merge_first in (False, True):
++            binary = str(Path(temporary) / 'headers')
++            command = shlex.split(os.environ.get('CC', 'cc')) + [
++                '-std=c11', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Isrc',
++                'tests/discovery_headers_host.c', '-o', binary]
++            if merge_first:
++                command.append('-DPGWT_HEADERS_MERGE_FIRST')
++            subprocess.run(command, cwd=ROOT, check=True)
++            subprocess.run([binary], cwd=ROOT, check=True)
++    print('discovery headers: 2/2 inclusion orders PASS')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tests/unit_tests.list b/tests/unit_tests.list
+index 4191301e..941ca196 100644
+--- a/tests/unit_tests.list
++++ b/tests/unit_tests.list
+@@ -1155,3 +1155,5 @@ test_libbpf_positions.py
+ test_exact_perf_coverage.py
+ # Discovery admission consumer oracle and strict startup-gap endpoint. Refs #988.
+ test_discovery_admission.py
++# Frozen discovery producer declarations coexist with the merge header. Refs #988.
++test_discovery_headers.py

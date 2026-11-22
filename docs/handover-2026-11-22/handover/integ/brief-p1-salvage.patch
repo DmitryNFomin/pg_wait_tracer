@@ -1,0 +1,3085 @@
+diff --git a/README.md b/README.md
+index ddac2fc1..0dce466a 100644
+--- a/README.md
++++ b/README.md
+@@ -2165,12 +2165,13 @@ for full per-event trace recording.
+ - Root privileges (or CAP_SYS_ADMIN + CAP_SYS_PTRACE)
+ - x86_64 or aarch64
+ 
+-For `--exact-perf-discovery` on PostgreSQL 18 x86_64, the tracer reads the
++For `--exact-perf-discovery` on PostgreSQL 17 and 18 x86_64, the tracer reads the
+ postmaster's pinned wait-word pointer and checks it against the executable's
+ ELF initializer or relocation, writable segment and private mapping (including
+ its loader-created BSS tail), the child's inherited executable mapping, and a
+-reference in the reset function. Qualification is tested on PGDG 18.6 for EL8
+-and Ubuntu 18.6-1.pgdg24.04+2. An unqualified binary produces one startup
++reference in the reset function. The live qualification pins the PGDG binary
++build IDs on EL8 and Ubuntu, including PGDG 18.6 and Ubuntu
++18.6-1.pgdg24.04+2. An unqualified binary produces one startup
+ `DISCOVERY-ADDRESS` line with its reason and binary identity. The daemon keeps
+ running; processes already running at capture start stay unadmitted, so their
+ windows stay unavailable.
+diff --git a/src/discovery_admission.h b/src/discovery_admission.h
+index 62426919..1a0af0e1 100644
+--- a/src/discovery_admission.h
++++ b/src/discovery_admission.h
+@@ -39,10 +39,10 @@ struct pgwt_discovery_ack { u64 request, stamp, attempts[3]; };
+ #include <stddef.h>
+ #include <stdint.h>
+ #include "counter_vector.h"
+-struct pgwt_discovery_fact { bool known, value; };
++struct pgwt_producer_fact { bool known, value; };
+ enum pgwt_discovery_inactive {
+-    PGWT_DISC_UNKNOWN, PGWT_DISC_INACTIVE, PGWT_DISC_RUNNING,
+-    PGWT_DISC_DENIED, PGWT_DISC_MALFORMED
++    PGWT_DISC_UNKNOWN, PGWT_DISC_INACTIVE, PGWT_PRODUCER_RUNNING,
++    PGWT_PRODUCER_DENIED, PGWT_PRODUCER_MALFORMED
+ };
+ struct pgwt_discovery_status {
+     uint64_t voluntary, start_ticks;
+@@ -50,7 +50,35 @@ struct pgwt_discovery_status {
+     bool known, terminal;
+ };
+ enum pgwt_discovery_resolution { PGWT_DISC_NUM_PENDING, PGWT_DISC_NUM_J, PGWT_DISC_NUM_R, PGWT_DISC_NUM_G };
++enum pgwt_discovery_handoff_kind {
++    PGWT_DH_INVALID=0, PGWT_DH_CENSUS=1, PGWT_DH_INVENTORY=2,
++    PGWT_DH_INSTALLED=3, PGWT_DH_NUMERIC=4, PGWT_DH_RESOLUTION=5,
++    PGWT_DH_ATTEMPT=6, PGWT_DH_NO_WORD=7, PGWT_DH_POINTER=8,
++    PGWT_DH_TERMINAL=9, PGWT_DH_END=10, PGWT_DH_FAULT=11
++};
++enum pgwt_discovery_reconciliation {
++    PGWT_DREC_PENDING=0, PGWT_DREC_COMPLETE=1, PGWT_DREC_PERMANENT_FAILURE=2
++};
+ struct pgwt_discovery_attempt {
++    enum pgwt_discovery_handoff_kind kind;
++    uint64_t binding_token;
++    uint64_t failed_open, gone_at, identity_visible_at;
++    uint32_t tid, tgid, parent, postmaster;
++    uint64_t fork_cookie;
++    struct pgwt_producer_fact start_mono_known, namespaces, retained_binding;
++    struct pgwt_producer_fact history_complete, producers_complete, journal_complete;
++    struct pgwt_producer_fact journal_eligible, gone_esrch;
++    uint64_t reconciliation_ns, reconciliation_count;
++    enum pgwt_discovery_reconciliation reconciliation;
++    uint64_t accumulator, on_cpu_ts;
++    bool seed_valid;
++    struct pgwt_producer_fact install_before_enable, failure_accounting, voluntary_no_wrap;
++    bool attempts_ended;
++    bool claims_completed_coherence, claims_completed_no_word;
++    bool pointer_snapshot_valid;
++    uint64_t kernel_evidence_count, user_evidence_count;
++    bool evidence_counts_known;
++    bool handoff_complete;
+     /* A census_record has pid/cookie zero and carries global completeness,
+      * the population size and both helper cuts, including for a real empty
+      * census. An absent record never establishes census completion. */
+@@ -68,19 +96,19 @@ struct pgwt_discovery_attempt {
+     uint64_t terminal_seq;
+     uint32_t terminal_cpu, terminal_dest;
+     bool terminal_transport_known;
+-    struct pgwt_discovery_fact terminal_match;
++    struct pgwt_producer_fact terminal_match;
+     uint64_t generation_published_ns, producers_fenced_ns;
+     uint64_t f0_ns, lifetime_start_ns, start_ticks;
+     uint64_t pointer_enabled_ns, pointer_read_ns, pointer_fence_ns;
+     uint64_t pointer_fires_before, pointer_fires_after, pointer_nonnull;
+     uint64_t local_address, local_enabled_ns;
+-    struct pgwt_discovery_fact local_continuous;
++    struct pgwt_producer_fact local_continuous;
+     uint32_t permanent_role, role_major;
+-    struct pgwt_discovery_fact permanent_role_proved, pointer_null, pointer_continuous;
+-    struct pgwt_discovery_fact counters_unchanged;
++    struct pgwt_producer_fact permanent_role_proved, pointer_null, pointer_continuous;
++    struct pgwt_producer_fact counters_unchanged;
+     /* Native authentication timer qualification is not supplied by this
+      * producer. Unknown never becomes a deadline inferred from task age. */
+-    struct pgwt_discovery_fact authentication_phase;
++    struct pgwt_producer_fact authentication_phase;
+     bool auth_deadline_known;
+     uint64_t auth_deadline_ns;
+     struct pgwt_counter_vector counters_before, counters_after;
+@@ -93,19 +121,39 @@ struct pgwt_discovery_attempt {
+     bool v0_valid, v1_valid, terminal0, terminal1, cpu_base_valid;
+     bool quiet_valid, final_attachment, admitted;
+     /* Explicit known/true proof bits, rather than an aggregate "proof OK". */
+-    struct pgwt_discovery_fact enumeration, lifecycle_active, census_fenced;
+-    struct pgwt_discovery_fact inventory_bound, clock_bound, predates_boot;
+-    struct pgwt_discovery_fact fd_bound, memory_bound, postmaster_member;
+-    struct pgwt_discovery_fact lifecycle_fenced, no_observed_fork;
+-    struct pgwt_discovery_fact fork_allocator_partitioned, discovery_allocator_serialized;
+-    struct pgwt_discovery_fact cookie_partitioned, cookie_burned, allocation_no_wrap;
+-    struct pgwt_discovery_fact identity_immutable, identity_visible;
+-    struct pgwt_discovery_fact generations_fenced, producer_owned;
+-    struct pgwt_discovery_fact address_qualified, address_compared;
+-    struct pgwt_discovery_fact stable_address_phase, relocation_observed;
+-    struct pgwt_discovery_fact no_foreign_writer, single_thread_history;
+-    struct pgwt_discovery_fact cpu_enrolled, inactivity_interface;
+-    struct pgwt_discovery_fact enable_confirmed;
++    struct pgwt_producer_fact enumeration, lifecycle_active, census_fenced;
++    struct pgwt_producer_fact inventory_bound, clock_bound, predates_boot;
++    struct pgwt_producer_fact fd_bound, memory_bound, postmaster_member;
++    struct pgwt_producer_fact lifecycle_fenced, no_observed_fork;
++    struct pgwt_producer_fact fork_allocator_partitioned, discovery_allocator_serialized;
++    struct pgwt_producer_fact cookie_partitioned, cookie_burned, allocation_no_wrap;
++    struct pgwt_producer_fact identity_immutable, identity_visible;
++    struct pgwt_producer_fact generations_fenced, producer_owned;
++    struct pgwt_producer_fact address_qualified, address_compared;
++    struct pgwt_producer_fact stable_address_phase, relocation_observed;
++    struct pgwt_producer_fact no_foreign_writer, single_thread_history;
++    struct pgwt_producer_fact cpu_enrolled, inactivity_interface;
++    struct pgwt_producer_fact enable_confirmed;
++    int error;
++};
++/* Generation entries are immutable, indexed by cpu_ids, and retained until close. */
++struct pgwt_discovery_pre_enable {
++    uint64_t attachment_generation;
++    uint32_t cpu_count, cpu_ids[MAX_CPUS];
++    struct pgwt_discovery_ack pre_enable[MAX_CPUS];
++    uint64_t pre_enable_completed_ns;
++    bool pre_enable_valid;
++};
++struct pgwt_discovery_binding_snapshot {
++    struct pgwt_discovery_attempt inventory;
++    const struct pgwt_discovery_pre_enable *generations;
++    size_t generation_count;
++};
++struct pgwt_discovery_checkpoint {
++    uint64_t reconciliation_ns, reconciliation_count;
++    uint64_t kernel_evidence_count, user_evidence_count;
++    enum pgwt_discovery_reconciliation reconciliation;
++    bool evidence_counts_known, handoff_complete, attempts_stopped;
+     int error;
+ };
+ /* Engine operations are injected by the daemon and the host schedule shim.
+@@ -134,12 +182,6 @@ int pgwt_discovery_brackets(struct pgwt_discovery_attempt *,
+ struct pgwt_daemon;
+ struct pgwt_backend;
+ struct pgwt_discovery;
+-struct pgwt_discovery_address_verdict {
+-    bool known, qualified;
+-    const char *reason;
+-    uint64_t address;
+-};
+-struct pgwt_discovery_address_verdict pgwt_discovery_address_verdict(const struct pgwt_daemon *);
+ /* The daemon calls this to consume the census witness, then retained attempts. Cursor is caller-owned;
+  * no records or generations are removed, including failed/pending attempts. */
+ bool pgwt_discovery_next(struct pgwt_daemon *, size_t *cursor,
+@@ -147,6 +189,11 @@ bool pgwt_discovery_next(struct pgwt_daemon *, size_t *cursor,
+ int pgwt_discovery_start(struct pgwt_daemon *);
+ int pgwt_discovery_scan(struct pgwt_daemon *);
+ int pgwt_discovery_attach(struct pgwt_daemon *, struct pgwt_backend *);
++struct pgwt_discovery_checkpoint pgwt_discovery_refresh_until(struct pgwt_daemon *, uint64_t deadline_ns);
++void pgwt_discovery_checkpoint(struct pgwt_daemon *, struct pgwt_discovery_checkpoint *);
++bool pgwt_discovery_binding(struct pgwt_daemon *, uint64_t binding_token,
++                            struct pgwt_discovery_binding_snapshot *);
++void pgwt_discovery_stop_attempts(struct pgwt_daemon *);
+ void pgwt_discovery_refresh(struct pgwt_daemon *);
+ void pgwt_discovery_note_exit(struct pgwt_daemon *, uint32_t);
+ void pgwt_discovery_close(struct pgwt_daemon *);
+diff --git a/src/discovery_attempt.c b/src/discovery_attempt.c
+index 1091b652..8e870e7c 100644
+--- a/src/discovery_attempt.c
++++ b/src/discovery_attempt.c
+@@ -22,13 +22,17 @@ bool pgwt_discovery_before_boot(uint64_t ticks, uint64_t hz,
+     return *upper < boot_lower;
+ }
+ 
+-static bool yes(struct pgwt_discovery_fact f) { return f.known && f.value; }
++static bool yes(struct pgwt_producer_fact f) { return f.known && f.value; }
+ bool pgwt_discovery_quiet(const struct pgwt_discovery_attempt *a)
+ {
+     return a->S0 == PGWT_DISC_INACTIVE && a->S1 == PGWT_DISC_INACTIVE &&
+         a->v0_valid && a->v1_valid && a->v0 == a->v1 &&
+         a->threads0 == 1 && a->threads1 == 1 && !a->terminal0 && !a->terminal1 &&
+-        a->t && a->e >= a->t && a->cpu_base_valid &&
++        a->t && a->e >= a->t && a->cpu_base_valid && a->seed_valid &&
++        a->accumulator == a->cpu_base && !a->on_cpu_ts &&
++        yes(a->voluntary_no_wrap) && yes(a->install_before_enable) &&
++        yes(a->failure_accounting) && yes(a->counters_unchanged) &&
++        a->binding_token && yes(a->retained_binding) && yes(a->namespaces) &&
+         yes(a->address_compared) && yes(a->lifecycle_fenced) &&
+         yes(a->generations_fenced) && yes(a->producer_owned) &&
+         yes(a->single_thread_history) && yes(a->cpu_enrolled) &&
+@@ -47,13 +51,17 @@ int pgwt_discovery_brackets(struct pgwt_discovery_attempt *a,
+     if (!a->maximum_attempts || a->maximum_attempts > PGWT_DISCOVERY_ATTEMPTS)
+         return -EINVAL;
+     for (uint32_t n = 1; n < a->maximum_attempts; ++n) {
+-        a->attempt = n; a->quiet_valid = false;
++        a->kind = PGWT_DH_ATTEMPT;
++        a->attempt = n; a->quiet_valid = false; a->error = 0;
++        a->attempts_ended = a->claims_completed_coherence = a->seed_valid = false;
++        a->accumulator = a->on_cpu_ts = 0;
++        a->install_before_enable = a->voluntary_no_wrap = (struct pgwt_producer_fact){0};
+         a->v0_valid = a->v1_valid = a->cpu_base_valid = false;
+         a->S0 = a->S1 = PGWT_DISC_UNKNOWN;
+         a->t = a->e = a->attachment_generation = 0;
+         a->address_compared = a->enable_confirmed = a->producer_owned =
+             a->generations_fenced = a->lifecycle_fenced = a->single_thread_history =
+-            (struct pgwt_discovery_fact){0};
++            (struct pgwt_producer_fact){0};
+         a->generation_published_ns = a->producers_fenced_ns = 0;
+         a->threads0 = a->threads1 = 0;
+         a->begin_ns = o->now(o->ctx);
+@@ -66,7 +74,7 @@ int pgwt_discovery_brackets(struct pgwt_discovery_attempt *a,
+         a->S0 = o->inactive(o->ctx);
+         if (a->S0 != PGWT_DISC_INACTIVE || s.threads != 1 || s.terminal) goto failed;
+         if (o->resolve(o->ctx, &a->resolved_addr)) goto failed;
+-        a->address_compared = (struct pgwt_discovery_fact){true,
++        a->address_compared = (struct pgwt_producer_fact){true,
+             a->resolved_addr != 0 && a->resolved_addr == a->armed_addr};
+         if (!a->address_compared.value) goto failed;
+         if (o->word(o->ctx, a->resolved_addr, &a->X)) goto failed;
+@@ -75,7 +83,7 @@ int pgwt_discovery_brackets(struct pgwt_discovery_attempt *a,
+         if (o->seed(o->ctx, a, true) || o->enable(o->ctx)) goto failed;
+         a->e = o->now(o->ctx);
+         if (!a->e || a->e < a->t) goto failed;
+-        a->enable_confirmed = (struct pgwt_discovery_fact){true, true};
++        a->enable_confirmed = (struct pgwt_producer_fact){true, true};
+         a->S1 = o->inactive(o->ctx);
+         if (o->status(o->ctx, &s) || !s.known) goto failed;
+         a->v1 = s.voluntary; a->v1_valid = true;
+@@ -83,6 +91,8 @@ int pgwt_discovery_brackets(struct pgwt_discovery_attempt *a,
+         if (o->fence(o->ctx, a)) goto failed;
+         a->quiet_valid = pgwt_discovery_quiet(a);
+         if (a->quiet_valid) {
++            a->claims_completed_coherence = true;
++            a->attempts_ended = true;
+             a->final_attachment = true; a->end_ns = o->now(o->ctx);
+             o->yield(o->ctx, a); return 0;
+         }
+@@ -92,15 +102,22 @@ failed:
+     }
+     /* Independently attach a fresh-record generation. No failed numerical
+      * seed becomes the final baseline. It stays pending until real DATA. */
+-    a->attempt = a->maximum_attempts; a->quiet_valid = false;
++    a->kind = PGWT_DH_ATTEMPT;
++    a->attempt = a->maximum_attempts; a->quiet_valid = false; a->error = 0;
++    a->attempts_ended = true; a->claims_completed_coherence = false;
++    a->seed_valid = false; a->accumulator = a->on_cpu_ts = 0;
++    a->address_compared = a->install_before_enable = a->voluntary_no_wrap = (struct pgwt_producer_fact){0};
+     a->attachment_generation = a->t = a->e = 0;
+     a->v0_valid = a->v1_valid = a->cpu_base_valid = false;
+     a->S0 = a->S1 = PGWT_DISC_UNKNOWN;
+-    a->enable_confirmed = (struct pgwt_discovery_fact){0};
++    a->enable_confirmed = (struct pgwt_producer_fact){0};
+     a->begin_ns = o->now(o->ctx);
+     if (o->disable(o->ctx) || o->fence(o->ctx, a) ||
+-        o->resolve(o->ctx, &a->resolved_addr) ||
+-        a->resolved_addr != a->armed_addr ||
++        o->resolve(o->ctx, &a->resolved_addr)) {
++        a->end_ns = o->now(o->ctx); o->yield(o->ctx, a); return -EAGAIN;
++    }
++    a->address_compared = (struct pgwt_producer_fact){true, a->armed_addr && a->resolved_addr == a->armed_addr};
++    if (!a->armed_addr || a->resolved_addr != a->armed_addr ||
+         o->seed(o->ctx, a, false) || o->enable(o->ctx)) {
+         a->end_ns = o->now(o->ctx); o->yield(o->ctx, a); return -EAGAIN;
+     }
+@@ -108,7 +125,7 @@ failed:
+     if (!a->e) {
+         a->end_ns = o->now(o->ctx); o->yield(o->ctx, a); return -EAGAIN;
+     }
+-    a->enable_confirmed = (struct pgwt_discovery_fact){true, true};
++    a->enable_confirmed = (struct pgwt_producer_fact){true, true};
+     if (o->fence(o->ctx, a)) {
+         a->end_ns = o->now(o->ctx); o->yield(o->ctx, a); return -EAGAIN;
+     }
+diff --git a/src/discovery_producer.c b/src/discovery_producer.c
+index 6ccdf753..b3b7eca5 100644
+--- a/src/discovery_producer.c
++++ b/src/discovery_producer.c
+@@ -4,6 +4,7 @@
+ #define _GNU_SOURCE
+ #endif
+ #include "discovery_admission.h"
++#include "discovery_qualification.h"
+ #include "daemon.h"
+ #include "discovery.h"
+ #include "discovery_binary.h"
+@@ -33,10 +34,17 @@ struct disc_mapping { uint64_t start, end, inode; unsigned major, minor; };
+ struct disc_entry {
+     uint32_t pid;
+     uint64_t ticks, kernel_start, cookie, bound_ns;
+-    int proc, mem, pointer_fd, local_fd;
++    uint64_t binding_token, identity_visible_at, pointer_baseline;
++    struct pgwt_discovery_attempt inventory;
++    struct pgwt_discovery_pre_enable *generations;
++    size_t generation_count;
++    bool inventory_reported, pointer_baseline_valid, pointer_broken, pointer_observed;
++    struct pgwt_discovery_pointer last_pointer;
++    struct pgwt_counter_vector pointer_counters_before;
++    int proc, mem, pointer_fd, local_fd, memory_error;
+     bool attempted, excluded, installed, terminal_reported, kernel_only, status_known;
+     bool pointer_installed, pointer_enabled, no_wait_word, final_attachment, fork_route;
+-    bool pending_reported;
++    bool pending_reported, attempts_ended;
+     const char *address_refusal;
+     unsigned setup_tries;
+     uint64_t pointer_enabled_ns, pointer_generation;
+@@ -60,8 +68,12 @@ struct pgwt_discovery {
+     struct pgwt_discovery_progress *last_progress;
+     bool progress_cached, lifecycle_baseline_valid, exit_noted, census_reconciled;
+     struct pgwt_counter_value lifecycle_baseline[4];
++    struct pgwt_counter_vector activation_counters;
+     uint64_t next_cookie, next_generation, boot_lower, census_cut, last_request, backend_type_addr;
+     uint64_t f0_ns, unknown_seen;
++    uint64_t next_binding_token, reconciliation_ns, reconciliation_count;
++    uint64_t user_evidence_count, kernel_high_water;
++    bool evidence_counts_unknown, handoff_lost, attempts_stopped;
+     uint64_t reset_storage_addr, exit_flag_addr, local_bss_start;
+     struct pgwt_discovery_address_verdict address_verdict;
+     struct disc_mapping executable;
+@@ -79,8 +91,17 @@ struct disc_context {
+     struct pgwt_discovery_attempt *attempt;
+ };
+ static void report_evidence_fault(struct pgwt_daemon *, uint32_t, uint64_t);
+-static struct pgwt_discovery_fact fact(bool value)
+-{ return (struct pgwt_discovery_fact){true, value}; }
++static void disc_yield(void *, const struct pgwt_discovery_attempt *);
++static void publish_inventory(struct pgwt_daemon *, struct disc_entry *,
++                              const struct pgwt_discovery_status *);
++static void pointer_break(struct pgwt_daemon *, struct disc_entry *);
++static void user_evidence(struct pgwt_discovery *s)
++{
++    if (s->user_evidence_count == UINT64_MAX) s->evidence_counts_unknown = true;
++    else ++s->user_evidence_count;
++}
++static struct pgwt_producer_fact fact(bool value)
++{ return (struct pgwt_producer_fact){true, value}; }
+ static uint64_t clock_ns(clockid_t clock)
+ {
+     struct timespec t;
+@@ -161,8 +182,8 @@ static enum pgwt_discovery_inactive disc_inactive(void *ctx)
+     struct disc_context *c = ctx;
+     char text[2048];
+     if (!c->d->discovery_admission->interface) return PGWT_DISC_UNKNOWN;
+-    if (read_at(c->entry->proc, "syscall", text, sizeof(text))) return PGWT_DISC_DENIED;
+-    if (!strcmp(text, "running\n")) return PGWT_DISC_RUNNING;
++    if (read_at(c->entry->proc, "syscall", text, sizeof(text))) return PGWT_PRODUCER_DENIED;
++    if (!strcmp(text, "running\n")) return PGWT_PRODUCER_RUNNING;
+     /* Qualified proc_pid_syscall prints either -1 + SP/IP, or a syscall
+      * number + 6 args + SP/IP. Reject partial, malformed and extra text. */
+     unsigned long long values[9];
+@@ -173,14 +194,14 @@ static enum pgwt_discovery_inactive disc_inactive(void *ctx)
+         errno = 0;
+         if (n == 0) { syscall_nr = strtoll(p, &end, 0); }
+         else values[n] = strtoull(p, &end, 0);
+-        if (errno || end == p) return PGWT_DISC_MALFORMED;
++        if (errno || end == p) return PGWT_PRODUCER_MALFORMED;
+         ++n; p = end; while (*p == ' ' || *p == '\t') ++p;
+     }
+     (void)values;
+     if ((n != 3 && n != 9) || (*p != '\n' && *p != 0) ||
+-        (*p == '\n' && p[1] != 0)) return PGWT_DISC_MALFORMED;
++        (*p == '\n' && p[1] != 0)) return PGWT_PRODUCER_MALFORMED;
+     if ((n == 3 && syscall_nr != -1) ||
+-        (n == 9 && (syscall_nr < 0 || syscall_nr > INT_MAX))) return PGWT_DISC_MALFORMED;
++        (n == 9 && (syscall_nr < 0 || syscall_nr > INT_MAX))) return PGWT_PRODUCER_MALFORMED;
+     return PGWT_DISC_INACTIVE;
+ }
+ static int mem_read(struct disc_entry *entry, uint64_t address, void *out, size_t n)
+@@ -303,7 +324,7 @@ static void qualify_binary(struct pgwt_daemon *d)
+ {
+     struct pgwt_discovery *s = d->discovery_admission;
+     s->address_verdict.reason = "not-qualified-for-major";
+-    if (d->pg_major_version != 18) return;
++    if (d->pg_major_version != 17 && d->pg_major_version != 18) return;
+     char path[64]; snprintf(path, sizeof(path), "/proc/%d", d->postmaster_pid);
+     struct disc_entry pm = {.proc = -1, .mem = -1};
+     int exe = -1;
+@@ -353,7 +374,14 @@ static int disc_resolve(void *ctx, uint64_t *address)
+     struct disc_context *c = ctx;
+     uint64_t ptr = 0;
+     if (mem_read(c->entry, c->d->my_wait_ptr_addr, &ptr, sizeof(ptr))) {
+-        c->d->counters.discovery_read_fail_total++; return -1;
++        if (c->attempt) c->attempt->error = errno > 0 ? errno : EIO;
++        struct pgwt_discovery_status st;
++        if (!disc_status(c, &st) && !st.terminal && st.tgid == c->entry->pid)
++        {
++            c->d->counters.discovery_read_fail_total++;
++            user_evidence(c->d->discovery_admission);
++        }
++        return -1;
+     }
+     if (ptr && c->d->use_myproc) {
+         if (ptr > UINT64_MAX - c->d->pgproc_wait_offset) return -1;
+@@ -366,10 +394,18 @@ static int disc_word(void *ctx, uint64_t address, uint32_t *word)
+ {
+     struct disc_context *c = ctx;
+     if (mem_read(c->entry, address, word, sizeof(*word))) {
+-        c->d->counters.discovery_read_fail_total++; return -1;
++        if (c->attempt) c->attempt->error = errno > 0 ? errno : EIO;
++        struct pgwt_discovery_status st;
++        if (!disc_status(c, &st) && !st.terminal && st.tgid == c->entry->pid)
++        {
++            c->d->counters.discovery_read_fail_total++;
++            user_evidence(c->d->discovery_admission);
++        }
++        return -1;
+     }
+     int cls = pgwt_classify_wei(*word);
+     if (cls == PGWT_WEI_GARBAGE) {
++        if (c->attempt) c->attempt->error = EILSEQ;
+         c->d->counters.invalid_wait_reads_total++; return -1;
+     }
+     if (cls == PGWT_WEI_VALID_NONZERO) c->d->wait_offset_validated = true;
+@@ -383,7 +419,13 @@ static int disc_disable(void *ctx)
+ static int disc_enable(void *ctx)
+ {
+     struct disc_context *c = ctx;
+-    return pgwt_watchpoint_enable(c->be->wp_fd);
++    int result = pgwt_watchpoint_enable(c->be->wp_fd);
++    if (result) {
++        c->attempt->error = errno ? errno : EIO;
++        c->d->counters.wp_attach_failures_total++;
++        user_evidence(c->d->discovery_admission);
++    }
++    return result;
+ }
+ static const unsigned lifecycle_components[4] = {
+     PGWT_C_LIFECYCLE_FORK_DROP, PGWT_C_LIFECYCLE_INIT_DROP,
+@@ -423,6 +465,9 @@ static bool retain_life(struct pgwt_discovery *s, const struct disc_life *e)
+     if (!s->census_reconciled) return true; /* initial enumeration/fork history */
+     if (e->key.start_ns && e->key.start_ns < s->f0_ns)
+         return true; /* J witnesses AND pre-F0 fork provenance survive reuse */
++    for (size_t i = 0; i < s->number_count; ++i)
++        if (s->numbers[i].resolution == PGWT_DISC_NUM_PENDING &&
++            (s->numbers[i].pid == e->key.tid || s->numbers[i].pid == e->life.tgid)) return true;
+     for (size_t i = 0; i < s->count; ++i)
+         if (!s->entries[i].fork_route && s->entries[i].pid == e->life.tgid &&
+             (!e->life.leader_start_ns || e->life.leader_start_ns < s->f0_ns) &&
+@@ -565,24 +610,59 @@ static int producer_fence(struct disc_context *c, struct pgwt_discovery_attempt
+     free(acks);
+     return result;
+ }
++static bool counters_equal(struct pgwt_counter_vector, struct pgwt_counter_vector);
++static void completed_cut(struct pgwt_daemon *d, struct pgwt_discovery_attempt *a)
++{
++    struct pgwt_discovery *s = d->discovery_admission;
++    a->counters_after = pgwt_daemon_counter_vector(d);
++    a->counters_unchanged = fact(counters_equal(a->counters_before, a->counters_after));
++    a->failure_accounting = fact(a->counters_after.valid && a->counters_before.valid);
++    if (!history_known(d)) return;
++    if (s->reconciliation_count == UINT64_MAX) {
++        s->fault = true; user_evidence(s); return;
++    }
++    uint64_t completed = clock_ns(CLOCK_MONOTONIC);
++    if (!completed) return;
++    s->reconciliation_ns = completed; ++s->reconciliation_count;
++    a->reconciliation_ns = completed; a->reconciliation_count = s->reconciliation_count;
++    a->reconciliation = PGWT_DREC_COMPLETE;
++    a->producers_complete = fact(true);
++    a->history_complete = a->journal_complete = fact(history_known(d));
++}
++static int incomplete_cut(struct disc_context *c, struct pgwt_discovery_attempt *a)
++{
++    /* Preserve readable numbers from the rejected operation. They do not
++     * manufacture a completed fence or upgrade the retained successful cut. */
++    a->counters_after = pgwt_daemon_counter_vector(c->d);
++    a->counters_unchanged = fact(counters_equal(a->counters_before, a->counters_after));
++    a->failure_accounting = (struct pgwt_producer_fact){0};
++    a->reconciliation = PGWT_DREC_PENDING;
++    a->history_complete = a->producers_complete = a->journal_complete = (struct pgwt_producer_fact){0};
++    return -1;
++}
+ static int disc_fence(void *ctx, struct pgwt_discovery_attempt *a)
+ {
+     struct disc_context *c = ctx;
+     struct pgwt_discovery *s = c->d->discovery_admission;
+     struct pgwt_counter_value wait_fault = pgwt_read_bpf_fail_counter(c->d, PGWT_BPF_FAIL_WAIT_READ);
+     if (!wait_fault.valid || wait_fault.value) {
+-        a->address_qualified = fact(false); return -1;
++        a->address_qualified = fact(false); return incomplete_cut(c, a);
+     }
+     a->lifecycle_fenced = fact(false);
+     a->single_thread_history = fact(false);
+     a->generations_fenced = fact(false);
+-    if (producer_fence(c, a, a->attachment_generation != 0) || history(c->d)) return -1;
++    if (!a->attachment_generation) a->counters_before = pgwt_daemon_counter_vector(c->d);
++    if (producer_fence(c, a, a->attachment_generation != 0) || history(c->d)) return incomplete_cut(c, a);
++    completed_cut(c->d, a);
+     bool same = true, threads = true, nofork = true;
+     for (size_t i = 0; i < s->life_count; ++i) {
+         struct disc_life *e = &s->lives[i];
+         if (e->key.tid == a->pid) {
+             if (e->life.start_boot_ns && boot_ticks(s, e->life.start_boot_ns) == c->entry->ticks) {
+-                c->entry->kernel_start = e->key.start_ns;
++                if (!e->life.exit_ns && !e->life.exec_ns && e->key.start_ns &&
++                    e->life.tgid == a->pid && e->life.parent == (uint32_t)c->d->postmaster_pid &&
++                    e->life.leader_start_ns == e->key.start_ns)
++                    c->entry->kernel_start = e->key.start_ns;
+                 if (e->life.fork_ns) nofork = false;
+                 if (e->life.exit_ns || e->life.exec_ns) same = false;
+             } else if (e->life.fork_ns >= a->opened_ns || e->life.exit_ns >= a->opened_ns)
+@@ -600,6 +680,17 @@ static int disc_fence(void *ctx, struct pgwt_discovery_attempt *a)
+     struct pgwt_discovery_status st;
+     if (disc_status(c, &st) || st.terminal) same = false;
+     else if (st.threads != 1) threads = false;
++    a->lifetime_start_ns = c->entry->kernel_start;
++    a->start_mono_known = c->entry->kernel_start ? fact(true) : (struct pgwt_producer_fact){0};
++    a->binding_token = c->entry->binding_token;
++    a->retained_binding = fact(same && c->entry->binding_token != 0);
++    a->tid = c->entry->pid; a->tgid = same ? st.tgid : 0;
++    a->parent = same ? st.parent : 0; a->postmaster = (uint32_t)c->d->postmaster_pid;
++    a->namespaces = c->entry->inventory.namespaces;
++    if (s->interface && sizeof(unsigned long) == 8 && a->v0_valid && a->v1_valid &&
++        a->v1 >= a->v0 && a->begin_ns && a->producers_fenced_ns >= a->begin_ns &&
++        a->producers_fenced_ns - a->begin_ns < 1000000000ULL && same && nofork)
++        a->voluntary_no_wrap = fact(true);
+     a->no_observed_fork = fact(nofork);
+     a->lifecycle_fenced = fact(same && nofork);
+     a->single_thread_history = fact(threads);
+@@ -656,45 +747,105 @@ static int disc_seed(void *ctx, struct pgwt_discovery_attempt *a, bool quiet)
+     seed.last_cpu_ns = cpu.total;
+     seed.cpu_base_valid = quiet;
+     a->cpu_base = seed.last_cpu_ns; a->cpu_base_valid = quiet;
+-    if (s->next_generation == UINT64_MAX) goto fault;
++    a->accumulator = seed.cpu_ns_total; a->on_cpu_ts = seed.on_cpu_ts;
++    if (!c->entry->generations) {
++        c->entry->generations = calloc(PGWT_DISCOVERY_ATTEMPTS + 1, sizeof(*c->entry->generations));
++        if (!c->entry->generations) goto fault;
++    }
++    if (c->entry->generation_count == PGWT_DISCOVERY_ATTEMPTS + 1 || s->next_generation == UINT64_MAX) goto fault;
+     a->attachment_generation = ++s->next_generation;
++    struct pgwt_discovery_pre_enable *b = &c->entry->generations[c->entry->generation_count++];
++    b->attachment_generation = a->attachment_generation;
+     if (bpf_map_update_elem(states, &a->attachment_generation, &seed, BPF_NOEXIST) ||
+         bpf_map_update_elem(active, &pid, &a->attachment_generation, BPF_ANY)) goto fault;
++    a->seed_valid = true;
+     a->generation_published_ns = disc_now(c);
+     if (producer_fence(c, a, true)) return -1;
++    b->cpu_count = a->cpu_count;
++    memcpy(b->cpu_ids, a->cpu_ids, a->cpu_count * sizeof(*b->cpu_ids));
++    memcpy(b->pre_enable, a->producers_after, a->cpu_count * sizeof(*b->pre_enable));
++    b->pre_enable_completed_ns = a->producers_fenced_ns;
++    b->pre_enable_valid = a->generation_published_ns &&
++        b->pre_enable_completed_ns >= a->generation_published_ns;
++    if (!b->pre_enable_valid) return -1;
++    a->install_before_enable = fact(c->entry->installed && c->entry->identity_visible_at &&
++        c->entry->identity_visible_at <= a->generation_published_ns);
+     a->generations_fenced = fact(true);
+     a->producer_owned = fact(true);
+     return 0;
+ fault:
++    a->error = errno > 0 ? errno : ENOSPC;
+     s->fault = true; c->d->counters.state_map_full_total++; return -1;
+ }
+ static void disc_yield(void *ctx, const struct pgwt_discovery_attempt *a)
+ {
+     struct disc_context *c = ctx;
+     struct pgwt_discovery *s = c->d->discovery_admission;
++    if (a->kind <= PGWT_DH_INVALID || a->kind > PGWT_DH_FAULT ||
++        (a->census_record && a->kind != PGWT_DH_CENSUS) ||
++        (a->numeric_record && a->kind != PGWT_DH_NUMERIC && a->kind != PGWT_DH_RESOLUTION) ||
++        (a->evidence_fault && a->kind != PGWT_DH_FAULT) ||
++        (a->no_wait_word && a->kind != PGWT_DH_NO_WORD && a->kind != PGWT_DH_FAULT)) {
++        s->fault = true; s->handoff_lost = true; user_evidence(s); return;
++    }
++    struct pgwt_discovery_attempt record = *a;
++    if ((a->error || s->fault) && a->kind != PGWT_DH_INVENTORY) {
++        record.counters_after = pgwt_daemon_counter_vector(c->d);
++        record.counters_unchanged = fact(counters_equal(record.counters_before, record.counters_after));
++        record.failure_accounting = fact(false);
++    }
++    if (c->entry) {
++        record.cookie = c->entry->cookie;
++        record.binding_token = c->entry->binding_token;
++        record.identity_visible_at = c->entry->identity_visible_at;
++        record.attempts_ended |= c->entry->attempts_ended;
++        if (c->entry->pointer_broken) record.pointer_continuous = fact(false);
++    }
++    uint64_t kernel = c->d->skel->bss->discovery_unknown_evidence;
++    if (kernel < s->kernel_high_water || kernel == UINT64_MAX) s->evidence_counts_unknown = true;
++    if (kernel > s->kernel_high_water) s->kernel_high_water = kernel;
++    record.kernel_evidence_count = s->kernel_high_water;
++    record.user_evidence_count = s->user_evidence_count;
++    record.evidence_counts_known = !s->evidence_counts_unknown;
++    record.handoff_complete = !s->handoff_lost;
+     if (s->record_count == s->record_capacity) {
+         size_t cap = s->record_capacity ? s->record_capacity * 2 : 128;
+         if (cap > PGWT_DISCOVERY_CAPACITY * 5U) cap = PGWT_DISCOVERY_CAPACITY * 5U;
+-        if (cap <= s->record_count) { s->fault = true; c->d->counters.writer_push_fail_total++; return; }
++        if (cap <= s->record_count) { s->fault = true; s->handoff_lost = true; user_evidence(s); c->d->counters.writer_push_fail_total++; return; }
+         void *records = realloc(s->records, cap * sizeof(*s->records));
+-        if (!records) { s->fault = true; c->d->counters.writer_push_fail_total++; return; }
++        if (!records) { s->fault = true; s->handoff_lost = true; user_evidence(s); c->d->counters.writer_push_fail_total++; return; }
+         s->records = records; s->record_capacity = cap;
+     }
+-    s->records[s->record_count++] = *a;
+-    fprintf(stderr, "DISCOVERY-ATTEMPT pid=%u cookie=%"PRIu64" generation=%"PRIu64
++    s->records[s->record_count++] = record;
++    if (c->entry) {
++        if (record.kind == PGWT_DH_INVENTORY) c->entry->inventory = record;
++        if (record.kind == PGWT_DH_INSTALLED) {
++            c->entry->inventory.identity_visible_at = record.identity_visible_at;
++            c->entry->inventory.identity_visible = record.identity_visible;
++            c->entry->inventory.identity_immutable = record.identity_immutable;
++        }
++        c->entry->attempts_ended |= record.attempts_ended;
++        c->entry->inventory.attempts_ended |= record.attempts_ended;
++        if (record.pointer_continuous.known) c->entry->inventory.pointer_continuous = record.pointer_continuous;
++    }
++    const char *label = record.kind == PGWT_DH_INVENTORY ? "DISCOVERY-INVENTORY" :
++        record.kind == PGWT_DH_INSTALLED ? "DISCOVERY-INSTALLED" :
++        record.kind == PGWT_DH_NUMERIC ? "DISCOVERY-NUMERIC" :
++        record.kind == PGWT_DH_RESOLUTION ? "DISCOVERY-RESOLUTION" : "DISCOVERY-ATTEMPT";
++    fprintf(stderr, "%s pid=%u cookie=%"PRIu64" generation=%"PRIu64
+         " attempt=%u max=%u quiet=%d final=%d S0=%d S1=%d v0=%"PRIu64" v1=%"PRIu64
+-        " threads0=%u threads1=%u bracket_ns=%"PRIu64" error=%d no_word=%d no_word_valid=%d role=%u numeric=%d resolution=%u fault=%d\n", a->pid, a->cookie,
++        " threads0=%u threads1=%u bracket_ns=%"PRIu64" error=%d no_word=%d no_word_valid=%d role=%u numeric=%d resolution=%u fault=%d kind=%u\n", label, record.pid, record.cookie,
+         a->attachment_generation, a->attempt, a->maximum_attempts, a->quiet_valid,
+         a->final_attachment, a->S0, a->S1, a->v0, a->v1, a->threads0, a->threads1,
+         a->end_ns >= a->begin_ns ? a->end_ns - a->begin_ns : 0, a->error, a->no_wait_word, a->no_wait_valid, a->permanent_role,
+-        a->numeric_record, a->numeric_resolution, a->evidence_fault);
++        a->numeric_record, a->numeric_resolution, a->evidence_fault, record.kind);
+ }
+ static void report_evidence_fault(struct pgwt_daemon *d, uint32_t pid, uint64_t cookie)
+ {
+     struct pgwt_discovery *s = d->discovery_admission;
+     s->evidence_fault = true; s->census = false; s->exit_noted = true;
+     s->census_proof.census_fenced = fact(false);
+-    struct pgwt_discovery_attempt a = {.pid = pid, .cookie = cookie, .evidence_fault = true};
++    struct pgwt_discovery_attempt a = {.kind = PGWT_DH_FAULT, .pid = pid, .cookie = cookie, .evidence_fault = true};
+     struct disc_context c = {.d = d}; disc_yield(&c, &a);
+ }
+ static struct disc_entry *new_inventory(struct pgwt_discovery *s, uint32_t pid, uint64_t ticks)
+@@ -709,6 +860,8 @@ static struct disc_entry *new_inventory(struct pgwt_discovery *s, uint32_t pid,
+     }
+     struct disc_entry *e = &s->entries[s->count++];
+     *e = (struct disc_entry){.pid = pid, .ticks = ticks, .proc = -1, .mem = -1, .pointer_fd = -1, .local_fd = -1};
++    e->cookie = pgwt_discovery_allocate(&s->next_cookie, &s->exhausted);
++    if (!e->cookie) s->fault = true;
+     return e;
+ }
+ static struct disc_entry *inventory(struct pgwt_discovery *s, uint32_t pid, uint64_t ticks)
+@@ -718,6 +871,73 @@ static struct disc_entry *inventory(struct pgwt_discovery *s, uint32_t pid, uint
+             return &s->entries[i];
+     return new_inventory(s, pid, ticks);
+ }
++/* The initial PID namespace is the qualified BPF identifier domain on the
++ * supported kernels. Other namespaces remain unknown rather than translated. */
++static struct pgwt_producer_fact namespace_fact(struct disc_entry *entry)
++{
++    char self[64], target[64];
++    ssize_t a = readlink("/proc/self/ns/pid", self, sizeof(self) - 1);
++    ssize_t b;
++    if (entry) b = readlinkat(entry->proc, "ns/pid", target, sizeof(target) - 1);
++    else { b = a; if (a >= 0 && a < (ssize_t)sizeof(self)) memcpy(target, self, (size_t)a); }
++    if (a < 0 || b < 0 || a >= (ssize_t)sizeof(self) - 1 || b >= (ssize_t)sizeof(target) - 1)
++        return (struct pgwt_producer_fact){0};
++    self[a] = target[b] = 0;
++    if (strcmp(self, target)) return fact(false);
++    if (strcmp(self, "pid:[4026531836]")) return (struct pgwt_producer_fact){0};
++    return fact(true);
++}
++static void publish_inventory(struct pgwt_daemon *d, struct disc_entry *entry,
++                              const struct pgwt_discovery_status *st)
++{
++    struct pgwt_discovery *s = d->discovery_admission;
++    if (entry->inventory_reported) return;
++    if (!entry->kernel_only && !entry->binding_token) {
++        if (s->next_binding_token == UINT64_MAX) {
++            s->fault = true; user_evidence(s); d->counters.state_map_full_total++;
++        } else entry->binding_token = ++s->next_binding_token;
++    }
++    struct pgwt_discovery_attempt a = {.kind = PGWT_DH_INVENTORY, .pid = entry->pid,
++        .cookie = entry->cookie, .binding_token = entry->binding_token,
++        .f0_ns = s->f0_ns, .boot_lower_ns = s->boot_lower, .start_ticks = entry->ticks,
++        .lifetime_start_ns = entry->kernel_start, .opened_ns = entry->bound_ns,
++        .postmaster = (uint32_t)d->postmaster_pid};
++    if (entry->kernel_start) a.start_mono_known = fact(true);
++    a.cookie_burned = fact(entry->cookie != 0);
++    a.cookie_partitioned = fact(entry->cookie >= PGWT_DISCOVERY_FIRST);
++    a.allocation_no_wrap = fact(!s->exhausted || entry->cookie == UINT64_MAX);
++    a.fork_allocator_partitioned = fact(d->exact_perf && d->exact_perf_discovery);
++    a.discovery_allocator_serialized = fact(true);
++    if (entry->status_known) {
++        a.clock_bound = fact(s->hz > 0 && s->boot_lower != 0);
++        a.predates_boot = fact(pgwt_discovery_before_boot(entry->ticks, s->hz,
++                                                        s->boot_lower, &a.start_upper_ns));
++    }
++    if (entry->kernel_only && entry->kernel_start) {
++        a.tid = a.tgid = entry->pid; a.parent = (uint32_t)d->postmaster_pid;
++        a.namespaces = namespace_fact(NULL); a.inventory_bound = fact(true);
++    }
++    if (st && st->known) {
++        a.tid = entry->pid; a.tgid = st->tgid; a.parent = st->parent;
++        a.fd_bound = a.inventory_bound = a.retained_binding = fact(entry->binding_token != 0);
++        a.memory_bound = fact(entry->mem >= 0);
++        a.postmaster_member = fact(st->parent == (uint32_t)d->postmaster_pid && st->tgid == entry->pid);
++        a.namespaces = namespace_fact(entry);
++    }
++    a.identity_visible = fact(entry->installed);
++    struct disc_context c = {.d = d, .entry = entry};
++    disc_yield(&c, &a);
++    entry->inventory_reported = true;
++}
++static void pointer_break(struct pgwt_daemon *d, struct disc_entry *entry)
++{
++    struct pgwt_discovery *s = d->discovery_admission;
++    if (entry->pointer_broken) return;
++    entry->pointer_broken = true; user_evidence(s);
++    struct pgwt_discovery_attempt a = {.kind = PGWT_DH_POINTER, .pid = entry->pid,
++        .cookie = entry->cookie, .pointer_continuous = {true, false}};
++    struct disc_context c = {.d = d, .entry = entry}; disc_yield(&c, &a);
++}
+ /* Address phase: PGPROC is assigned once by InitProcess until exit. Only a
+  * process-shared target qualifies here. PG18's logger is the one permanent
+  * local dummy: REL_18_STABLE src/include/miscadmin.h BackendType defines
+@@ -734,11 +954,12 @@ static bool qualified_address(struct disc_context *c, uint64_t address)
+             address >= lo && address <= hi - sizeof(uint32_t)) {
+             if (permissions[0] != 'r' || permissions[1] != 'w') return false;
+             if (permissions[3] == 's') return true;
+-            if (!c->d->use_myproc && c->d->pg_major_version == 18) {
++            if (!c->d->use_myproc &&
++                (c->d->pg_major_version == 17 || c->d->pg_major_version == 18)) {
+                 uint32_t role = 0;
+                 uint64_t role_addr = c->d->discovery_admission->backend_type_addr;
+                 if (role_addr && !mem_read(c->entry, role_addr, &role, sizeof(role)) &&
+-                    role == 17) return true; /* PG18 B_LOGGER */
++                    role == (c->d->pg_major_version == 17 ? 15U : 17U)) return true; /* B_LOGGER */
+             }
+             return false;
+         }
+@@ -749,15 +970,25 @@ static bool qualified_address(struct disc_context *c, uint64_t address)
+ int pgwt_discovery_start(struct pgwt_daemon *d)
+ {
+     if (!d->exact_perf_discovery) return 0;
++    if (d->discovery_admission) return -EALREADY;
+     struct pgwt_discovery *s = calloc(1, sizeof(*s));
+     if (!s) return -1;
+     d->discovery_admission = s;
+     s->hz = sysconf(_SC_CLK_TCK); s->possible = libbpf_num_possible_cpus();
+     s->next_cookie = PGWT_DISCOVERY_FIRST;
+-    if ((d->pg_major_version == 13 || d->pg_major_version == 18) && d->pg_binary_saved)
++    s->census_proof.reconciliation_ns = s->reconciliation_ns;
++    s->census_proof.reconciliation_count = s->reconciliation_count;
++    s->census_proof.reconciliation = s->census_reconciled ? PGWT_DREC_COMPLETE : PGWT_DREC_PENDING;
++    s->census_proof.handoff_complete = !s->handoff_lost;
++    s->census_proof.kernel_evidence_count = s->kernel_high_water;
++    s->census_proof.user_evidence_count = s->user_evidence_count;
++    s->census_proof.evidence_counts_known = !s->evidence_counts_unknown;
++    s->census_proof.kind = PGWT_DH_CENSUS; s->census_proof.census_record = true;
++    s->census_proof.handoff_complete = true;
++    if ((d->pg_major_version == 13 || d->pg_major_version == 17 || d->pg_major_version == 18) && d->pg_binary_saved)
+         s->backend_type_addr = pgwt_resolve_symbol(d->pg_binary_saved,
+                                                   "MyBackendType", d->postmaster_pid);
+-    if (d->pg_major_version == 18 && d->pg_binary_saved) {
++    if ((d->pg_major_version == 17 || d->pg_major_version == 18) && d->pg_binary_saved) {
+         s->reset_storage_addr = pgwt_resolve_symbol(d->pg_binary_saved,
+             "pgstat_reset_wait_event_storage", d->postmaster_pid);
+         s->exit_flag_addr = pgwt_resolve_symbol(d->pg_binary_saved,
+@@ -782,6 +1013,7 @@ int pgwt_discovery_start(struct pgwt_daemon *d)
+     struct pgwt_discovery_attempt activated = {0};
+     if (producer_fence(&context, &activated, false)) { s->active = false; return -1; }
+     struct pgwt_counter_vector baseline = pgwt_daemon_counter_vector(d);
++    s->activation_counters = baseline;
+     s->lifecycle_baseline_valid = true;
+     for (unsigned i = 0; i < 4; ++i) {
+         s->lifecycle_baseline[i] = baseline.components[lifecycle_components[i]];
+@@ -793,6 +1025,8 @@ int pgwt_discovery_start(struct pgwt_daemon *d)
+     s->f0_ns = clock_ns(CLOCK_MONOTONIC);
+     d->skel->bss->discovery_f0_ns = s->f0_ns;
+     s->unknown_seen = d->skel->bss->discovery_unknown_evidence;
++    s->kernel_high_water = s->unknown_seen;
++    s->evidence_counts_unknown = s->unknown_seen == UINT64_MAX;
+     fprintf(stderr, "DISCOVERY-RESOURCES identities=%u lifetimes=%u generations=%u attempts=%u active=%d\n",
+         PGWT_DISCOVERY_CAPACITY, PGWT_DISCOVERY_CAPACITY, PGWT_DISCOVERY_GENERATIONS,
+         PGWT_DISCOVERY_ATTEMPTS, s->active);
+@@ -827,11 +1061,50 @@ static int pointer_snapshot(struct disc_context *c, struct pgwt_discovery_pointe
+     if (c->entry->terminal_reported || disc_status(c, &st) || st.terminal ||
+         st.tgid != c->entry->pid) return -1;
+     uint32_t pid = c->entry->pid;
++    uint64_t count_before = 0, count_after = 0;
++    bool count_failed = false;
++    struct pgwt_discovery_attempt fence = {0};
++    if (c->entry->pointer_enabled) {
++        count_failed = read(c->entry->pointer_fd, &count_before, sizeof(count_before)) != sizeof(count_before);
++        fence.counters_before = pgwt_daemon_counter_vector(c->d);
++        if (!count_failed && producer_fence(c, &fence, true)) return -1;
++    }
+     struct pgwt_discovery_pointer observed;
+     int result = bpf_map_lookup_elem(bpf_map__fd(c->d->skel->maps.discovery_pointer_state), &pid, &observed);
++    if (c->entry->pointer_enabled && !count_failed)
++        count_failed = read(c->entry->pointer_fd, &count_after, sizeof(count_after)) != sizeof(count_after);
+     if (disc_status(c, &st) || st.terminal || st.tgid != pid) return -1;
+-    if (result) {
+-        c->d->counters.discovery_read_fail_total++; return -1;
++    if (result || count_failed) {
++        if (c->attempt) c->attempt->error = errno > 0 ? errno : EIO;
++        c->d->counters.discovery_read_fail_total++;
++        user_evidence(c->d->discovery_admission);
++        report_evidence_fault(c->d, c->entry->pid, c->entry->cookie);
++        return -1;
++    }
++    /* Stable perf counts bracket a completed producer fence. A kernel event
++     * that did not reach the observer cannot disappear as a zero-fire proof. */
++    if (c->entry->pointer_enabled) {
++        if (count_before != count_after) return -1; /* changed cut, retry later */
++        if (count_after == UINT64_MAX || observed.fires != count_after || observed.nonnull == UINT64_MAX) {
++            pointer_break(c->d, c->entry); return -1;
++        }
++    }
++    if (observed.contradicted) pointer_break(c->d, c->entry);
++    if (c->entry->pointer_enabled && (!c->entry->pointer_observed ||
++        memcmp(&c->entry->last_pointer, &observed, sizeof(observed)))) {
++        struct pgwt_discovery_attempt a = {.kind = PGWT_DH_POINTER, .pid = pid,
++            .attachment_generation = c->entry->pointer_generation,
++            .pointer_enabled_ns = c->entry->pointer_enabled_ns,
++            .pointer_fires_before = c->entry->pointer_baseline,
++            .pointer_fires_after = observed.fires, .pointer_nonnull = observed.nonnull,
++            .pointer_snapshot_valid = true, .pointer_fence_ns = fence.producers_fenced_ns,
++            .pointer_continuous = {true, !c->entry->pointer_broken},
++            .counters_before = fence.counters_before};
++        a.counters_after = pgwt_daemon_counter_vector(c->d);
++        a.counters_unchanged = fact(counters_equal(a.counters_before, a.counters_after));
++        a.failure_accounting = fact(a.counters_before.valid && a.counters_after.valid);
++        disc_yield(c, &a);
++        c->entry->last_pointer = observed; c->entry->pointer_observed = true;
+     }
+     *p = observed;
+     return 0;
+@@ -842,12 +1115,19 @@ static int prepare_local_watch(struct disc_context *c, struct pgwt_discovery_att
+ {
+     struct pgwt_discovery *s = c->d->discovery_admission;
+     struct disc_entry *entry = c->entry;
+-    if (c->d->pg_major_version != 18) return 0;
++    if (c->d->pg_major_version != 17 && c->d->pg_major_version != 18) return 0;
+     uint32_t role = 0;
+-    if (!s->backend_type_addr || mem_read(entry, s->backend_type_addr, &role, sizeof(role))) {
+-        a->error = errno; c->d->counters.discovery_read_fail_total++; return -1;
++    if (!s->backend_type_addr) {
++        a->error = ENOTSUP; entry->attempts_ended = true; return -1;
++    }
++    if (mem_read(entry, s->backend_type_addr, &role, sizeof(role))) {
++        a->error = errno > 0 ? errno : EIO;
++        struct pgwt_discovery_status st;
++        if (!disc_status(c, &st) && !st.terminal && st.tgid == entry->pid)
++            c->d->counters.discovery_read_fail_total++;
++        return -1;
+     }
+-    if (role == 17) return 0; /* logger's already qualified permanent target */
++    if (role == (c->d->pg_major_version == 17 ? 15U : 17U)) return 0; /* B_LOGGER */
+     if (!entry->local_address) {
+         uint64_t local = s->address_verdict.address;
+         if (entry->local_fd < 0) {
+@@ -870,12 +1150,16 @@ static int prepare_local_watch(struct disc_context *c, struct pgwt_discovery_att
+     a->local_continuous = fact(entry->local_enabled_ns != 0);
+     return 0;
+ }
+-/* A permanent refusal has no cookie, attempt, loss, or repeated setup. The
++/* A permanent refusal retains its inventory reservation, with no word attempt,
++ * manufactured loss, or repeated physical setup. The
+  * ordinary census still owns the unresolved lifetime and terminal discharge. */
+ static int address_pending(struct disc_context *c, const char *reason)
+ {
+     struct disc_entry *entry = c->entry;
+     entry->address_refusal = reason;
++    entry->attempts_ended = true;
++    c->attempt->attempts_ended = true;
++    c->attempt->kind = PGWT_DH_END;
+     fprintf(stderr, "DISCOVERY-PENDING pid=%u reason=\"address unqualified\" qualification_reason=%s\n", entry->pid, reason);
+     c->attempt->end_ns = disc_now(c);
+     disc_yield(c, c->attempt);
+@@ -885,7 +1169,7 @@ static int address_pending(struct disc_context *c, const char *reason)
+ static int candidate_address(struct disc_context *c)
+ {
+     struct pgwt_discovery *s = c->d->discovery_admission;
+-    if (c->d->pg_major_version != 18) return 0;
++    if (c->d->pg_major_version != 17 && c->d->pg_major_version != 18) return 0;
+     if (!s->address_verdict.qualified) return address_pending(c, s->address_verdict.reason);
+     char maps[262144]; struct disc_mapping first;
+     if (read_at(c->entry->proc, "maps", maps, sizeof(maps))) return -1;
+@@ -897,13 +1181,24 @@ static int candidate_address(struct disc_context *c)
+         return address_pending(c, "candidate-not-private-executable");
+     return 0;
+ }
++static void detach_pointer(struct pgwt_daemon *d, struct disc_entry *entry)
++{
++    if (entry->pointer_fd < 0) return;
++    if (entry->pointer_enabled) pointer_break(d, entry);
++    pgwt_close_watchpoint(entry->pointer_fd); entry->pointer_fd = -1;
++    entry->pointer_enabled = false;
++}
+ static int attach_entry(struct pgwt_daemon *d, struct pgwt_backend *be, struct disc_entry *entry)
+ {
+     struct pgwt_discovery *s = d->discovery_admission;
++    if (s->attempts_stopped) return -EPERM;
++    if (!entry->inventory_reported) {
++        struct pgwt_discovery_status st;
++        if (!entry_status(entry, &st)) publish_inventory(d, entry, &st);
++    }
+     if (entry->final_attachment) return 0; /* never retry after final attachment */
+-    if (entry->attempted || entry->address_refusal ||
+-        (d->pg_major_version == 18 && entry->setup_tries >= PGWT_DISCOVERY_ATTEMPTS)) return -1;
+-    struct pgwt_discovery_attempt a = {.pid = be->pid, .maximum_attempts = PGWT_DISCOVERY_ATTEMPTS,
++    if (entry->attempted || entry->address_refusal || entry->attempts_ended) return -1;
++    struct pgwt_discovery_attempt a = {.kind = PGWT_DH_POINTER, .pid = be->pid, .maximum_attempts = PGWT_DISCOVERY_ATTEMPTS,
+         .boot_lower_ns = s->boot_lower, .f0_ns = s->f0_ns, .start_ticks = entry->ticks};
+     struct disc_context c = {.d = d, .entry = entry, .be = be, .attempt = &a};
+     a.census_cut_ns = s->census_cut;
+@@ -920,7 +1215,7 @@ static int attach_entry(struct pgwt_daemon *d, struct pgwt_backend *be, struct d
+     a.begin_ns = disc_now(&c); a.opened_ns = a.begin_ns;
+     if (candidate_address(&c)) {
+         if (!entry->address_refusal) {
+-            ++entry->setup_tries; ++s->qualification_transient;
++            ++s->qualification_transient;
+             a.error = errno ? errno : EIO;
+             a.cookie = entry->cookie;
+             if (!entry->pending_reported)
+@@ -929,17 +1224,20 @@ static int attach_entry(struct pgwt_daemon *d, struct pgwt_backend *be, struct d
+         }
+         return -1;
+     }
+-    if (d->pg_major_version == 18) ++entry->setup_tries;
+     int result = -1;
+     uint32_t enrolled_pid = be->pid;
+     struct pgwt_discovery_status st;
++    if (entry->proc >= 0 && entry->mem < 0) {
++        a.error = entry->memory_error ? entry->memory_error : EACCES;
++        entry->attempts_ended = true; goto pending;
++    }
+     if (!a.predates_boot.known || !a.predates_boot.value || entry->proc < 0 || entry->mem < 0 ||
+         disc_status(&c, &st) || st.terminal || st.tgid != enrolled_pid) goto pending;
+     /* Opening the pointer watch also requires fresh post-open binding. It
+      * remains continuously enabled across initialization and word attempts.
+      * PG18 setup retries reuse its open descriptor; other majors retain
+      * their existing path in this round. */
+-    if (!entry->pointer_installed && (d->pg_major_version != 18 || entry->pointer_fd < 0)) {
++    if (!entry->pointer_installed && ((d->pg_major_version != 17 && d->pg_major_version != 18) || entry->pointer_fd < 0)) {
+         entry->pointer_fd = pgwt_open_watchpoint_disabled(be->pid, d->my_wait_ptr_addr,
+                                             bpf_program__fd(d->skel->progs.on_discovery_pointer));
+         if (entry->pointer_fd < 0) { a.error = errno; d->counters.wp_attach_failures_total++; goto pending; }
+@@ -947,8 +1245,7 @@ static int attach_entry(struct pgwt_daemon *d, struct pgwt_backend *be, struct d
+     if (disc_status(&c, &st) || st.terminal || disc_fence(&c, &a)) goto pending;
+     a.fd_bound = a.memory_bound = a.postmaster_member = a.inventory_bound = fact(true);
+     a.identity_immutable = fact(true);
+-    if (!entry->cookie) {
+-        entry->cookie = pgwt_discovery_allocate(&s->next_cookie, &s->exhausted);
++    if (!entry->installed) {
+         a.cookie_burned = fact(entry->cookie != 0);
+         a.cookie_partitioned = fact(entry->cookie >= PGWT_DISCOVERY_FIRST);
+         if (!entry->cookie) { s->fault = true; d->counters.state_map_full_total++; goto pending; }
+@@ -959,14 +1256,25 @@ static int attach_entry(struct pgwt_daemon *d, struct pgwt_backend *be, struct d
+             a.cookie = entry->cookie; goto pending;
+         }
+         entry->installed = true;
++        entry->identity_visible_at = disc_now(&c);
++        struct pgwt_discovery_attempt installed = entry->inventory;
++        installed.kind = PGWT_DH_INSTALLED;
++        installed.identity_immutable = installed.identity_visible = fact(true);
++        installed.identity_visible_at = entry->identity_visible_at;
++        disc_yield(&c, &installed);
+     }
+     a.cookie_burned = fact(entry->cookie != 0);
+     a.cookie_partitioned = fact(entry->cookie >= PGWT_DISCOVERY_FIRST);
+     a.cookie = entry->cookie; a.identity_visible = fact(entry->installed);
++    a.binding_token = entry->binding_token; a.identity_visible_at = entry->identity_visible_at;
+     if (disc_fence(&c, &a)) goto pending;
+     if (prepare_local_watch(&c, &a)) goto pending;
+     struct pgwt_counter_vector before = pgwt_daemon_counter_vector(d);
+     a.counters_before = before;
++    if (!entry->generations) {
++        entry->generations = calloc(PGWT_DISCOVERY_ATTEMPTS + 1, sizeof(*entry->generations));
++        if (!entry->generations) { s->fault = true; user_evidence(s); d->counters.state_map_full_total++; goto pending; }
++    }
+     if (!entry->pointer_installed) {
+         uint64_t config = PGWT_DISC_PTR_PENDING;
+         struct pgwt_discovery_pointer observed = {0};
+@@ -977,39 +1285,53 @@ static int attach_entry(struct pgwt_daemon *d, struct pgwt_backend *be, struct d
+             s->fault = true; d->counters.state_map_full_total++; goto pending;
+         }
+         entry->pointer_generation = ++s->next_generation;
++        struct pgwt_discovery_pre_enable *b = &entry->generations[entry->generation_count++];
++        b->attachment_generation = entry->pointer_generation;
++        /* No active numerical generation exists for this pointer-only
++         * identity. It must never certify transport membership. */
+         entry->pointer_installed = true;
+     }
+     struct pgwt_discovery_pointer observed;
+     if (pointer_snapshot(&c, &observed)) goto pending;
+-    a.pointer_fires_before = observed.fires;
+     if (!entry->pointer_enabled) {
++        entry->pointer_baseline = observed.fires;
++        entry->pointer_baseline_valid = true;
++        entry->pointer_counters_before = pgwt_daemon_counter_vector(d);
+         if (pgwt_watchpoint_enable(entry->pointer_fd)) {
+-            a.error = errno; d->counters.wp_attach_failures_total++; goto pending;
++            a.error = errno > 0 ? errno : EIO; d->counters.wp_attach_failures_total++;
++            user_evidence(s); a.pointer_continuous = fact(false); goto pending;
+         }
+         entry->pointer_enabled_ns = disc_now(&c);
+         entry->pointer_enabled = true;
+     }
++    a.pointer_fires_before = entry->pointer_baseline;
+     a.pointer_enabled_ns = entry->pointer_enabled_ns;
++    a.install_before_enable = fact(entry->identity_visible_at &&
++        entry->identity_visible_at <= entry->pointer_enabled_ns);
++    a.pointer_continuous = entry->pointer_broken ? fact(false) : (struct pgwt_producer_fact){0};
+     /* This read MUST follow enable, even when the enumerator saw NULL. */
+     uint64_t address = 0;
+     if (disc_resolve(&c, &address)) goto pending;
+     a.pointer_read_ns = disc_now(&c);
+-    if (d->pg_major_version == 18) --entry->setup_tries;
+     if (!address) {
+         /* A NULL observation is never a word-attachment attempt. */
+-        a.no_wait_word = true; a.e = entry->pointer_enabled_ns;
++        before = entry->pointer_counters_before; a.counters_before = before;
++        a.kind = PGWT_DH_NO_WORD; a.no_wait_word = true; a.e = entry->pointer_enabled_ns;
+         a.attachment_generation = entry->pointer_generation;
+         a.pointer_null = fact(true); a.role_major = d->pg_major_version;
+         a.permanent_role_proved = fact(permanent_null_role(&c, &a.permanent_role));
+         if (disc_fence(&c, &a) || pointer_snapshot(&c, &observed)) goto pending;
+         a.pointer_fence_ns = a.producers_fenced_ns;
+         a.pointer_fires_after = observed.fires; a.pointer_nonnull = observed.nonnull;
++        a.pointer_snapshot_valid = entry->pointer_baseline_valid && observed.fires >= entry->pointer_baseline && observed.fires != UINT64_MAX && observed.nonnull != UINT64_MAX;
+         a.counters_after = pgwt_daemon_counter_vector(d);
+         a.counters_unchanged = fact(counters_equal(before, a.counters_after));
+-        a.pointer_continuous = fact(entry->pointer_enabled && a.e &&
+-            a.pointer_read_ns >= a.e && a.pointer_fence_ns >= a.pointer_read_ns &&
++        a.pointer_continuous = fact(!entry->pointer_broken && a.pointer_snapshot_valid && entry->pointer_enabled && a.e &&
++            a.pointer_read_ns > a.e && a.pointer_fence_ns >= a.pointer_read_ns &&
+             !observed.fires && !observed.contradicted);
+         if (a.permanent_role_proved.value && a.pointer_continuous.value && a.counters_unchanged.value) {
++            if (!a.namespaces.known || !a.namespaces.value || !a.retained_binding.value ||
++                !a.install_before_enable.value || !a.failure_accounting.value) goto pending;
+             uint64_t config = PGWT_DISC_PTR_NONE;
+             if (bpf_map_update_elem(bpf_map__fd(d->skel->maps.discovery_armed), &enrolled_pid,
+                                     &config, BPF_EXIST)) {
+@@ -1023,6 +1345,9 @@ static int attach_entry(struct pgwt_daemon *d, struct pgwt_backend *be, struct d
+             a.pointer_fence_ns = a.producers_fenced_ns;
+             a.enable_confirmed = a.relocation_observed = a.producer_owned = fact(true);
+             a.address_qualified = a.no_foreign_writer = fact(true);
++            a.pointer_fires_after = observed.fires; a.pointer_nonnull = observed.nonnull;
++            a.claims_completed_no_word = true;
++            a.attempts_ended = entry->attempts_ended = true;
+             a.no_wait_valid = a.final_attachment = true;
+             entry->no_wait_word = entry->final_attachment = true;
+             be->attach_ts = a.e; be->init_attached = true;
+@@ -1030,12 +1355,14 @@ static int attach_entry(struct pgwt_daemon *d, struct pgwt_backend *be, struct d
+         }
+         goto pending;
+     }
++    if (pointer_snapshot(&c, &observed)) goto pending;
++    if (entry->pointer_broken) { entry->attempts_ended = true; goto pending; }
+     /* A pending NULL lifetime initialized. Its pointer fire is only a wake
+      * for this ordinary attachment; it supplies no seed or lower bound. */
+     a.armed_addr = be->wp_addr = address;
+     if (!qualified_address(&c, address)) goto pending;
+     a.address_qualified = a.no_foreign_writer = fact(true);
+-    entry->attempted = true;
++    a.kind = PGWT_DH_POINTER;
+     be->wp_fd = pgwt_open_watchpoint_disabled(be->pid, address,
+                                               bpf_program__fd(d->skel->progs.on_watchpoint));
+     if (be->wp_fd < 0) { a.error = errno; d->counters.wp_attach_failures_total++; goto pending; }
+@@ -1054,6 +1381,7 @@ static int attach_entry(struct pgwt_daemon *d, struct pgwt_backend *be, struct d
+     struct pgwt_discovery_ops ops = {.ctx = &c, .disable = disc_disable, .fence = disc_fence,
+         .status = disc_status, .inactive = disc_inactive, .resolve = disc_resolve,
+         .word = disc_word, .now = disc_now, .seed = disc_seed, .enable = disc_enable, .yield = disc_yield};
++    entry->attempted = true;
+     result = pgwt_discovery_brackets(&a, &ops);
+     if (!result) {
+         entry->final_attachment = true;
+@@ -1062,6 +1390,15 @@ static int attach_entry(struct pgwt_daemon *d, struct pgwt_backend *be, struct d
+     }
+     goto close_pending;
+ pending:
++    /* Fence-only refusals are not physical setup failures. */
++    if (a.error && !entry->attempted &&
++        (d->pg_major_version == 17 || d->pg_major_version == 18)) {
++        if (++entry->setup_tries >= PGWT_DISCOVERY_ATTEMPTS) entry->attempts_ended = true;
++    }
++    if (s->fault) entry->attempts_ended = true;
++    a.attempts_ended = entry->attempts_ended || entry->attempted;
++    if (a.attempts_ended) { entry->attempts_ended = true; a.kind = PGWT_DH_END; a.no_wait_word = false; }
++    a.start_mono_known = entry->kernel_start ? fact(true) : (struct pgwt_producer_fact){0};
+     a.lifetime_start_ns = entry->kernel_start;
+     a.end_ns = disc_now(&c);
+     /* Rechecking an unchanged pending pointer attachment is not another
+@@ -1079,13 +1416,14 @@ close_pending:
+     /* A pending NULL observer and an installed identity keep their pointer
+      * watch. An uninstalled failed open has no continuous-observation claim. */
+     if (!entry->installed && entry->pointer_fd >= 0) {
+-        pgwt_close_watchpoint(entry->pointer_fd); entry->pointer_fd = -1;
++        detach_pointer(d, entry);
+     }
+     return -1;
+ }
+ int pgwt_discovery_attach(struct pgwt_daemon *d, struct pgwt_backend *be)
+ {
+     struct pgwt_discovery *s = d->discovery_admission;
++    if (!s || s->attempts_stopped) return -EPERM;
+     uint32_t pid = be->pid;
+     uint64_t fork_cookie = 0;
+     /* A newly forked reuse of an inventoried PID owns its kernel cookie.
+@@ -1106,7 +1444,7 @@ static struct disc_number *observe_number(struct pgwt_daemon *d, uint32_t pid)
+ {
+     struct pgwt_discovery *s = d->discovery_admission;
+     for (size_t i = 0; i < s->number_count; ++i)
+-        if (s->numbers[i].pid == pid) return &s->numbers[i];
++        if (s->numbers[i].pid == pid && s->numbers[i].resolution == PGWT_DISC_NUM_PENDING) return &s->numbers[i];
+     if (s->number_count == s->number_capacity) {
+         size_t cap = s->number_capacity ? s->number_capacity * 2 : 128;
+         if (cap > PGWT_DISCOVERY_CAPACITY) cap = PGWT_DISCOVERY_CAPACITY;
+@@ -1116,22 +1454,84 @@ static struct disc_number *observe_number(struct pgwt_daemon *d, uint32_t pid)
+     }
+     struct disc_number *n = &s->numbers[s->number_count++];
+     *n = (struct disc_number){.pid = pid, .failed_ns = clock_ns(CLOCK_MONOTONIC)};
++    struct pgwt_discovery_attempt a = {.kind = PGWT_DH_NUMERIC, .pid = pid,
++        .numeric_record = true, .failed_open = n->failed_ns, .f0_ns = s->f0_ns};
++    struct disc_context c = {.d = d}; disc_yield(&c, &a);
+     return n;
+ }
++/* Resolution evidence is attached to the cut that actually completed it. */
+ static void resolve_number(struct pgwt_daemon *d, struct disc_number *n,
+-                           enum pgwt_discovery_resolution resolution)
++                           enum pgwt_discovery_resolution resolution,
++                           const struct pgwt_discovery_attempt *cut,
++                           struct disc_entry *entry, const struct pgwt_discovery_status *st,
++                           const struct disc_life *journal)
+ {
+     struct pgwt_discovery *s = d->discovery_admission;
+-    struct pgwt_discovery_attempt a = {.pid = n->pid, .numeric_record = true,
+-        .numeric_resolution = resolution, .f0_ns = s->f0_ns};
++    struct pgwt_discovery_attempt a = {.kind = PGWT_DH_RESOLUTION, .pid = n->pid,
++        .numeric_record = true, .numeric_resolution = resolution, .f0_ns = s->f0_ns,
++        .failed_open = n->failed_ns, .postmaster = (uint32_t)d->postmaster_pid};
++    a.counters_before = s->activation_counters;
+     a.counters_after = pgwt_daemon_counter_vector(d);
+-    if (!history_known(d) || !lifecycle_matches(s, a.counters_after)) return;
+-    for (unsigned i = 0; i < 4; ++i) {
+-        unsigned slot = lifecycle_components[i];
+-        a.counters_before.components[slot] = s->lifecycle_baseline[i];
++    if (!cut || cut->reconciliation != PGWT_DREC_COMPLETE ||
++        !history_known(d) || !lifecycle_matches(s, a.counters_after)) return;
++    a.reconciliation_ns = cut->reconciliation_ns; a.reconciliation_count = cut->reconciliation_count;
++    a.reconciliation = cut->reconciliation;
++    a.history_complete = cut->history_complete; a.producers_complete = cut->producers_complete;
++    a.journal_complete = cut->journal_complete;
++    a.counters_unchanged = fact(counters_equal(a.counters_before, a.counters_after));
++    a.failure_accounting = fact(a.counters_before.valid && a.counters_after.valid);
++    a.lifecycle_fenced = fact(true);
++    a.namespaces = entry ? entry->inventory.namespaces : namespace_fact(NULL);
++    a.clock_bound = entry ? entry->inventory.clock_bound : fact(s->f0_ns && cut->reconciliation_ns);
++    a.journal_eligible = fact(journal != NULL);
++    if (entry && st) {
++        a.binding_token = entry->binding_token;
++        a.retained_binding = fact(entry->proc >= 0 && entry->binding_token != 0);
++        a.tid = entry->pid; a.tgid = st->tgid; a.parent = st->parent;
++        /* A current PID map is not fork provenance. Require the retained
++         * journal join and the still-pinned holder on the far side. */
++        for (size_t i = 0; i < s->life_count; ++i) {
++            const struct disc_life *life = &s->lives[i];
++            if (life->key.tid == entry->pid && life->life.tgid == st->tgid &&
++                life->life.parent == st->parent && life->life.start_boot_ns &&
++                boot_ticks(s, life->life.start_boot_ns) == st->start_ticks &&
++                !life->life.exit_ns && life->key.start_ns &&
++                life->life.leader_start_ns == life->key.start_ns && life->life.fork_ns &&
++                life->life.fork_cookie && life->life.fork_cookie < PGWT_DISCOVERY_FIRST) {
++                if (a.fork_cookie) { a.fork_cookie = 0; break; }
++                a.fork_cookie = life->life.fork_cookie;
++            }
++        }
++        struct pgwt_discovery_status current;
++        if (entry_status(entry, &current) || current.terminal || current.start_ticks != st->start_ticks ||
++            current.parent != st->parent || current.tgid != st->tgid) return;
++        if (a.tid == a.tgid && a.parent == a.postmaster && !a.fork_cookie) return;
++    }
++    if (journal) {
++        a.tid = journal->key.tid; a.tgid = journal->life.tgid; a.parent = journal->life.parent;
++        a.lifetime_start_ns = journal->key.start_ns; a.start_mono_known = fact(true);
++        a.terminal_ns = journal->life.exit_ns; a.terminal_start_ns = journal->key.start_ns;
++        a.terminal_cookie = journal->life.terminal_cookie;
++        a.terminal_cpu = journal->life.terminal_cpu; a.terminal_dest = journal->life.terminal_dest;
++        a.terminal_seq = journal->life.terminal_seq;
++        a.terminal_transport_known = journal->life.terminal_transport_known;
++        a.terminal_match = fact(journal->life.terminal_transport_known &&
++            journal->life.terminal_dest == PGWT_WIRE_DEST_L);
++        a.no_observed_fork = fact(!journal->life.fork_ns && !journal->life.fork_cookie);
++        for (size_t i = 0; i < s->count; ++i)
++            if (s->entries[i].pid == n->pid && s->entries[i].kernel_start == journal->key.start_ns) {
++                a.cookie = s->entries[i].cookie; break;
++            }
+     }
++    if (resolution == PGWT_DISC_NUM_G) {
++        a.gone_at = n->gone_ns; a.gone_esrch = fact(true);
++        if (!a.failed_open || a.gone_at <= a.failed_open || a.reconciliation_ns < a.gone_at) return;
++    }
++    if (!a.namespaces.known || !a.namespaces.value || !a.failure_accounting.value ||
++        !a.counters_unchanged.value) return;
++    if (resolution == PGWT_DISC_NUM_R &&
++        (!a.tid || !a.tgid || !a.parent || !a.postmaster || !a.retained_binding.value)) return;
+     n->resolution = resolution;
+-    a.lifecycle_fenced = a.counters_unchanged = fact(true);
+     struct disc_context c = {.d = d}; disc_yield(&c, &a);
+ }
+ static bool journal_candidate(struct pgwt_daemon *d, const struct disc_life *e)
+@@ -1140,13 +1540,13 @@ static bool journal_candidate(struct pgwt_daemon *d, const struct disc_life *e)
+         e->key.start_ns && e->key.start_ns < d->discovery_admission->f0_ns &&
+         !e->life.fork_ns && !e->life.fork_cookie;
+ }
+-static bool eligible_j(struct pgwt_daemon *d, uint32_t pid)
++static const struct disc_life *eligible_j(struct pgwt_daemon *d, uint32_t pid)
+ {
+     struct pgwt_discovery *s = d->discovery_admission;
+     for (size_t i = 0; i < s->life_count; ++i)
+         if (s->lives[i].key.tid == pid && s->lives[i].life.exit_ns &&
+-            journal_candidate(d, &s->lives[i])) return true;
+-    return false;
++            journal_candidate(d, &s->lives[i])) return &s->lives[i];
++    return NULL;
+ }
+ /* Establish exact journal identities independently of the PID's current
+  * map holder. This yields producer witnesses, not terminal dispositions. */
+@@ -1174,15 +1574,26 @@ static void reconcile_journal(struct pgwt_daemon *d)
+             entry->kernel_only = entry->excluded = true;
+         }
+         entry->kernel_start = e->key.start_ns;
++        publish_inventory(d, entry, NULL);
+         if (!e->life.exit_ns || entry->terminal_reported) continue;
+-        struct pgwt_discovery_attempt a = {.pid = entry->pid, .cookie = entry->cookie,
++        struct pgwt_discovery_attempt a = {.kind = PGWT_DH_TERMINAL, .pid = entry->pid, .cookie = entry->cookie,
+             .lifetime_start_ns = e->key.start_ns, .start_ticks = entry->ticks,
+             .terminal_start_ns = e->key.start_ns, .terminal_ns = e->life.exit_ns,
+             .terminal_cookie = e->life.terminal_cookie, .f0_ns = s->f0_ns};
++        a.start_mono_known = fact(true);
++        a.reconciliation_ns = s->reconciliation_ns; a.reconciliation_count = s->reconciliation_count;
++        a.reconciliation = s->reconciliation_count ? PGWT_DREC_COMPLETE : PGWT_DREC_PENDING;
++        a.history_complete = a.journal_complete = a.producers_complete = fact(s->reconciliation_count && history_known(d));
++        a.namespaces = namespace_fact(NULL);
++        a.counters_before = s->activation_counters; a.counters_after = pgwt_daemon_counter_vector(d);
++        a.failure_accounting = fact(a.counters_before.valid && a.counters_after.valid);
++        a.counters_unchanged = fact(counters_equal(a.counters_before, a.counters_after));
++        a.tid = e->key.tid; a.tgid = e->life.tgid; a.parent = e->life.parent;
++        a.postmaster = (uint32_t)d->postmaster_pid; a.fork_cookie = e->life.fork_cookie;
+         a.terminal_cpu = e->life.terminal_cpu; a.terminal_dest = e->life.terminal_dest;
+         a.terminal_seq = e->life.terminal_seq; a.terminal_transport_known = e->life.terminal_transport_known;
+         a.terminal_match = a.lifecycle_fenced = a.inventory_bound =
+-            a.no_observed_fork = a.counters_unchanged = fact(true);
++            a.no_observed_fork = fact(true);
+         a.census_fenced = fact(s->census);
+         struct disc_context c = {.d = d, .entry = entry}; disc_yield(&c, &a);
+         entry->terminal_reported = true;
+@@ -1205,6 +1616,9 @@ static struct disc_entry *bind_inventory(struct pgwt_daemon *d, struct disc_entr
+     entry->proc = temp->proc; temp->proc = -1;
+     entry->bound_ns = clock_ns(CLOCK_MONOTONIC); entry->status_known = true;
+     entry->mem = openat(entry->proc, "mem", O_RDONLY | O_CLOEXEC);
++    if (entry->mem < 0) entry->memory_error = errno > 0 ? errno : EACCES;
++    publish_inventory(d, entry, st);
++    if (!entry->cookie) d->counters.state_map_full_total++;
+     return entry;
+ }
+ static bool fork_provenance(struct pgwt_daemon *d, uint32_t pid, uint64_t ticks)
+@@ -1249,10 +1663,19 @@ static bool enumerate_candidates(struct pgwt_daemon *d)
+ static void resolve_numbers(struct pgwt_daemon *d)
+ {
+     struct pgwt_discovery *s = d->discovery_admission;
++    if (s->attempts_stopped) return;
+     for (size_t i = 0; i < s->number_count; ++i) {
+         struct disc_number *n = &s->numbers[i];
+         if (n->resolution != PGWT_DISC_NUM_PENDING) continue;
+-        if (eligible_j(d, n->pid)) { resolve_number(d, n, PGWT_DISC_NUM_J); continue; }
++        if (eligible_j(d, n->pid)) {
++            struct pgwt_discovery_attempt cut = {0}; struct disc_context c = {.d = d};
++            cut.counters_before = s->activation_counters;
++            if (!producer_fence(&c, &cut, true) && !history(d)) {
++                completed_cut(d, &cut);
++                resolve_number(d, n, PGWT_DISC_NUM_J, &cut, NULL, NULL, eligible_j(d, n->pid));
++            }
++            continue;
++        }
+         /* R uses a NEW pinned handle. Failed-open errno is never G. */
+         DIR *proc = opendir("/proc");
+         if (!proc) continue;
+@@ -1261,7 +1684,7 @@ static void resolve_numbers(struct pgwt_daemon *d)
+             O_PATH | O_DIRECTORY | O_CLOEXEC), .mem = -1};
+         struct pgwt_discovery_status st;
+         bool rebound = !entry_status(&temp, &st) && st.start_ticks;
+-        struct pgwt_discovery_attempt proof = {0};
++        struct pgwt_discovery_attempt proof = {.counters_before = s->activation_counters};
+         struct disc_context c = {.d = d};
+         bool fenced = producer_fence(&c, &proof, true) == 0 && history(d) == 0;
+         if (rebound) {
+@@ -1270,9 +1693,9 @@ static void resolve_numbers(struct pgwt_daemon *d)
+                 current.start_ticks == st.start_ticks && current.parent == st.parent &&
+                 current.tgid == st.tgid;
+         }
+-        if (fenced) reconcile_journal(d);
++        if (fenced) { completed_cut(d, &proof); reconcile_journal(d); }
+         if (fenced && eligible_j(d, n->pid)) {
+-            resolve_number(d, n, PGWT_DISC_NUM_J);
++            resolve_number(d, n, PGWT_DISC_NUM_J, &proof, NULL, NULL, eligible_j(d, n->pid));
+         } else if (fenced && rebound) {
+             uint64_t upper = 0;
+             bool member = st.tgid == n->pid && st.parent == (uint32_t)d->postmaster_pid;
+@@ -1283,8 +1706,32 @@ static void resolve_numbers(struct pgwt_daemon *d)
+                 current.start_ticks == st.start_ticks && current.parent == st.parent && current.tgid == st.tgid;
+             /* A post-F0 target without fork evidence remains an obligation.
+              * It cannot be relabelled non-member by R. */
+-            if (still_bound && (!member || fork || (before && bind_inventory(d, &temp, &st))))
+-                resolve_number(d, n, PGWT_DISC_NUM_R);
++            if (still_bound && (!member || fork || before)) {
++                struct disc_entry *entry = bind_inventory(d, &temp, &st);
++                if (entry && member && !fork && before) {
++                    /* The ordinary inventory route keeps its conservative
++                     * boot-clock bound; it does not invent an exact start. */
++                    struct pgwt_discovery_attempt a = entry->inventory;
++                    a.reconciliation = proof.reconciliation;
++                    a.reconciliation_ns = proof.reconciliation_ns;
++                    a.reconciliation_count = proof.reconciliation_count;
++                    a.lifecycle_fenced = a.no_observed_fork = fact(true);
++                    a.history_complete = proof.history_complete;
++                    a.producers_complete = proof.producers_complete;
++                    a.journal_complete = proof.journal_complete;
++                    a.journal_eligible = fact(false); a.failed_open = n->failed_ns;
++                    a.counters_before = s->activation_counters;
++                    a.counters_after = pgwt_daemon_counter_vector(d);
++                    a.counters_unchanged = fact(counters_equal(a.counters_before, a.counters_after));
++                    a.failure_accounting = fact(a.counters_before.valid && a.counters_after.valid);
++                    struct disc_context bound = {.d = d, .entry = entry}; disc_yield(&bound, &a);
++                    if (a.namespaces.known && a.namespaces.value && a.failure_accounting.value &&
++                        a.counters_unchanged.value) n->resolution = PGWT_DISC_NUM_R;
++                } else if (entry) {
++                    entry->fork_route = entry->excluded = true;
++                    resolve_number(d, n, PGWT_DISC_NUM_R, &proof, entry, &st, NULL);
++                }
++            }
+         } else if (!rebound) {
+             errno = 0;
+             int result = kill((pid_t)n->pid, 0);
+@@ -1295,7 +1742,9 @@ static void resolve_numbers(struct pgwt_daemon *d)
+             if (gone && producer_fence(&c, &proof, true) == 0 && history(d) == 0 &&
+                 lifecycle_unchanged(d)) {
+                 reconcile_journal(d);
+-                resolve_number(d, n, eligible_j(d, n->pid) ? PGWT_DISC_NUM_J : PGWT_DISC_NUM_G);
++                completed_cut(d, &proof);
++                const struct disc_life *j = eligible_j(d, n->pid);
++                resolve_number(d, n, j ? PGWT_DISC_NUM_J : PGWT_DISC_NUM_G, &proof, NULL, NULL, j);
+             }
+         }
+         if (temp.proc >= 0) close(temp.proc);
+@@ -1322,6 +1771,7 @@ static void census_diagnostics(struct pgwt_daemon *d)
+     s->census = s->active && s->enumerated && s->census_reconciled && !s->evidence_fault &&
+         history_known(d) &&
+         !numeric && !s->fault && lifecycle_unchanged(d);
++    s->census_proof.kind = PGWT_DH_CENSUS;
+     s->census_proof.census_record = true;
+     s->census_proof.f0_ns = s->f0_ns;
+     s->census_proof.census_cut_ns = s->census_cut;
+@@ -1338,6 +1788,7 @@ static void census_diagnostics(struct pgwt_daemon *d)
+ int pgwt_discovery_scan(struct pgwt_daemon *d)
+ {
+     struct pgwt_discovery *s = d->discovery_admission;
++    if (!s || s->attempts_stopped) return -EPERM;
+     bool complete = enumerate_candidates(d);
+     s->census_cut = clock_ns(CLOCK_MONOTONIC);
+     struct pgwt_discovery_attempt fence = {0};
+@@ -1349,6 +1800,7 @@ int pgwt_discovery_scan(struct pgwt_daemon *d)
+     /* No success path skips the journal, including a real empty census. */
+     bool reconciled = fenced && history(d) == 0;
+     if (reconciled) {
++        completed_cut(d, &fence);
+         reconcile_journal(d);
+         resolve_numbers(d);
+     }
+@@ -1359,7 +1811,7 @@ int pgwt_discovery_scan(struct pgwt_daemon *d)
+     int attached = 0;
+     for (size_t i = 0; i < s->count; ++i) {
+         struct disc_entry *entry = &s->entries[i];
+-        if (entry->kernel_only || entry->terminal_reported) continue;
++        if (entry->excluded || entry->kernel_only || entry->terminal_reported) continue;
+         struct pgwt_discovery_status st;
+         if (entry_status(entry, &st) || st.terminal) continue;
+         if (fork_provenance(d, entry->pid, entry->ticks)) {
+@@ -1377,7 +1829,7 @@ int pgwt_discovery_scan(struct pgwt_daemon *d)
+             be->wp_fd = be->bootstrap_fd = -1; be->wp_addr_shared = -1;
+         }
+         if (!be) {
+-            struct pgwt_discovery_attempt a = {.pid = entry->pid, .error = ENOSPC};
++            struct pgwt_discovery_attempt a = entry->inventory; a.error = ENOSPC;
+             struct disc_context c = {.d = d, .entry = entry}; disc_yield(&c, &a); continue;
+         }
+         if (!attach_entry(d, be, entry)) ++attached;
+@@ -1400,29 +1852,32 @@ void pgwt_discovery_refresh(struct pgwt_daemon *d)
+         s->evidence_fault = true; s->census = false;
+         s->exit_noted = true;
+         s->census_proof.census_fenced = fact(false);
+-        struct pgwt_discovery_attempt fault_record = {.evidence_fault = true};
++        struct pgwt_discovery_attempt fault_record = {.kind = PGWT_DH_FAULT, .evidence_fault = true};
+         struct disc_context c = {.d = d}; disc_yield(&c, &fault_record);
+     }
+-    if (!s->census_reconciled) {
+-        struct pgwt_discovery_attempt fence = {0};
++    {
++        struct pgwt_discovery_attempt fence = {.counters_before = s->activation_counters};
+         struct disc_context c = {.d = d};
+-        if (producer_fence(&c, &fence, true)) return;
++        if (producer_fence(&c, &fence, true) || history(d)) return;
++        completed_cut(d, &fence);
+     }
+     if (history(d)) return;
+     s->census_reconciled = true;
+     reconcile_journal(d); resolve_numbers(d);
+     for (size_t i = 0; i < s->count; ++i) {
+         struct disc_entry *entry = &s->entries[i];
++        struct disc_context snapshot = {.d = d, .entry = entry};
++        struct pgwt_discovery_pointer observed = {0};
++        bool observed_ok = entry->pointer_enabled && !pointer_snapshot(&snapshot, &observed);
+         if (entry->no_wait_word) {
+             struct disc_context c = {.d = d, .entry = entry};
+-            struct pgwt_discovery_pointer observed = {0};
+-            bool contradicted = !pointer_snapshot(&c, &observed) && observed.contradicted;
++            bool contradicted = observed_ok && observed.contradicted;
+             for (size_t j = 0; j < s->life_count; ++j)
+                 if (s->lives[j].key.tid == entry->pid &&
+                     s->lives[j].life.terminal_cookie == entry->cookie && s->lives[j].life.pointer_fault)
+                     contradicted = true;
+             if (contradicted) {
+-                struct pgwt_discovery_attempt a = {.pid = entry->pid, .cookie = entry->cookie,
++                struct pgwt_discovery_attempt a = {.kind = PGWT_DH_FAULT, .pid = entry->pid, .cookie = entry->cookie,
+                     .evidence_fault = true, .no_wait_word = true};
+                 /* End the physical claim permanently. Integration consumes
+                  * the fault/revocation; no automatic REARM or new bracket. */
+@@ -1432,10 +1887,9 @@ void pgwt_discovery_refresh(struct pgwt_daemon *d)
+                 s->census_proof.census_fenced = fact(false); disc_yield(&c, &a);
+             }
+         }
+-        if (!entry->pointer_enabled || entry->attempted || entry->final_attachment || entry->terminal_reported) continue;
++        if (s->attempts_stopped || !entry->pointer_enabled || entry->attempted || entry->final_attachment || entry->terminal_reported) continue;
+         struct disc_context c = {.d = d, .entry = entry};
+-        struct pgwt_discovery_pointer observed;
+-        if (pointer_snapshot(&c, &observed) || !observed.nonnull) continue;
++        if (!observed_ok || !observed.nonnull) continue;
+         struct pgwt_backend *be = pgwt_find_backend(&d->backends, entry->pid);
+         if (be) (void)attach_entry(d, be, entry);
+     }
+@@ -1447,10 +1901,15 @@ bool pgwt_discovery_next(struct pgwt_daemon *d, size_t *cursor, struct pgwt_disc
+ {
+     struct pgwt_discovery *s = d ? d->discovery_admission : NULL;
+     if (!s || !cursor || !a) return false;
+-    if (s->census_ready && *cursor == 0) {
+-        *a = s->census_proof; ++*cursor; return true;
+-    }
+-    size_t offset = s->census_ready ? 1 : 0;
++    if (*cursor == 0) {
++        *a = s->census_proof;
++        a->handoff_complete = !s->handoff_lost;
++        a->kernel_evidence_count = s->kernel_high_water;
++        a->user_evidence_count = s->user_evidence_count;
++        a->evidence_counts_known = !s->evidence_counts_unknown;
++        ++*cursor; return true;
++    }
++    size_t offset = 1;
+     if (*cursor < offset || *cursor - offset >= s->record_count) return false;
+     *a = s->records[*cursor - offset]; ++*cursor; return true;
+ }
+@@ -1459,6 +1918,7 @@ void pgwt_discovery_close(struct pgwt_daemon *d)
+     struct pgwt_discovery *s = d->discovery_admission;
+     if (!s) return;
+     for (size_t i = 0; i < s->count; ++i) {
++        free(s->entries[i].generations);
+         if (s->entries[i].local_fd >= 0) pgwt_close_watchpoint(s->entries[i].local_fd);
+         if (s->entries[i].pointer_fd >= 0) pgwt_close_watchpoint(s->entries[i].pointer_fd);
+         if (s->entries[i].mem >= 0) close(s->entries[i].mem);
+@@ -1468,3 +1928,30 @@ void pgwt_discovery_close(struct pgwt_daemon *d)
+     free(s->numbers); free(s->last_progress); free(s);
+     d->discovery_admission = NULL;
+ }
++
++/* P1 linkage only. P2 replaces these conservative snapshots. */
++void pgwt_discovery_checkpoint(struct pgwt_daemon *d, struct pgwt_discovery_checkpoint *out)
++{
++    if (!out) return;
++    *out = (struct pgwt_discovery_checkpoint){.reconciliation = PGWT_DREC_PENDING,
++        .attempts_stopped = d && d->discovery_admission && d->discovery_admission->attempts_stopped,
++        .error = ENOSYS};
++}
++struct pgwt_discovery_checkpoint pgwt_discovery_refresh_until(struct pgwt_daemon *d, uint64_t deadline_ns)
++{
++    (void)deadline_ns;
++    struct pgwt_discovery_checkpoint out;
++    pgwt_discovery_checkpoint(d, &out);
++    return out;
++}
++bool pgwt_discovery_binding(struct pgwt_daemon *d, uint64_t token,
++                             struct pgwt_discovery_binding_snapshot *out)
++{
++    (void)d; (void)token;
++    if (out) memset(out, 0, sizeof(*out));
++    return false;
++}
++void pgwt_discovery_stop_attempts(struct pgwt_daemon *d)
++{
++    if (d && d->discovery_admission) d->discovery_admission->attempts_stopped = true;
++}
+diff --git a/src/discovery_qualification.h b/src/discovery_qualification.h
+new file mode 100644
+index 00000000..362c93b2
+--- /dev/null
++++ b/src/discovery_qualification.h
+@@ -0,0 +1,13 @@
++/* Binary address qualification belongs to the physical producer. */
++#ifndef PGWT_DISCOVERY_QUALIFICATION_H
++#define PGWT_DISCOVERY_QUALIFICATION_H
++#include <stdbool.h>
++#include <stdint.h>
++struct pgwt_daemon;
++struct pgwt_discovery_address_verdict {
++    bool known, qualified;
++    const char *reason;
++    uint64_t address;
++};
++struct pgwt_discovery_address_verdict pgwt_discovery_address_verdict(const struct pgwt_daemon *);
++#endif
+diff --git a/tests/core/pgwt_discovery.h b/tests/core/pgwt_discovery.h
+new file mode 100644
+index 00000000..972a4bd9
+--- /dev/null
++++ b/tests/core/pgwt_discovery.h
+@@ -0,0 +1,177 @@
++#ifndef PGWT_DISCOVERY_H
++#define PGWT_DISCOVERY_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++/* Producer -> merge interface, not a wire/storage format. This consumer does
++ * not establish any physical fact. The producer retains the attempt history
++ * and completed producer fences, including silent mutable-state updates.
++ * Every required bit must be both known and true. Unknown never means pass. */
++#define PGWT_DISCOVERY_COOKIE_MIN (UINT64_C(1) << 63)
++enum pgwt_discovery_fact {
++    PGWT_DISC_LIFECYCLE_ACCOUNTING = UINT64_C(1) << 0,
++    PGWT_DISC_PREEXISTING          = UINT64_C(1) << 1,
++    PGWT_DISC_NO_FORK_PROVENANCE   = UINT64_C(1) << 2,
++    PGWT_DISC_COOKIE_AUTHORITY     = UINT64_C(1) << 3,
++    PGWT_DISC_IDENTITY_VISIBLE     = UINT64_C(1) << 4,
++    PGWT_DISC_INSTALL_BEFORE_ENABLE= UINT64_C(1) << 5,
++    PGWT_DISC_PINNED_BINDING       = UINT64_C(1) << 6,
++    PGWT_DISC_ADDRESS_CONTINUOUS   = UINT64_C(1) << 7,
++    PGWT_DISC_PRESERVED_STATE      = UINT64_C(1) << 8,
++    PGWT_DISC_ENABLED              = UINT64_C(1) << 9,
++    PGWT_DISC_EMISSION_IDENTITY    = UINT64_C(1) << 10,
++    PGWT_DISC_FAILURE_ACCOUNTING   = UINT64_C(1) << 11,
++    PGWT_DISC_BRACKET_ORDER        = UINT64_C(1) << 12,
++    PGWT_DISC_THREAD_HISTORY       = UINT64_C(1) << 13,
++    PGWT_DISC_OWNERSHIP            = UINT64_C(1) << 14,
++    PGWT_DISC_CPU_ENROLLED         = UINT64_C(1) << 15,
++    PGWT_DISC_FRESH_COHERENT_SEED   = UINT64_C(1) << 16,
++    PGWT_DISC_RECONCILED           = UINT64_C(1) << 17,
++    PGWT_DISC_COUNTER_NO_WRAP      = UINT64_C(1) << 18,
++    PGWT_DISC_REQUIRED_READS       = UINT64_C(1) << 19,
++    /* Capture-owned facts, resolved from retained inventory and gap state. */
++    PGWT_DISC_INVENTORIED          = UINT64_C(1) << 20,
++    PGWT_DISC_STARTUP_OPEN         = UINT64_C(1) << 21
++};
++#define PGWT_DISC_ADMISSION_FACTS ((UINT64_C(1) << 12) - 1)
++#define PGWT_DISC_QUIET_FACTS ((((UINT64_C(1) << 20) - 1) & \
++    ~(uint64_t)PGWT_DISC_ADMISSION_FACTS) | PGWT_DISC_PINNED_BINDING)
++/* Only INACTIVE_SYSCALL is qualified wait_task_inactive evidence. These
++ * separate values prevent state letters, pcount or schedstat from passing. */
++typedef enum {
++    PGWT_DISC_INACTIVITY_UNKNOWN, PGWT_DISC_INACTIVE_SYSCALL,
++    PGWT_DISC_RUNNING, PGWT_DISC_DENIED, PGWT_DISC_STATE_COUNTER_ONLY,
++    PGWT_DISC_SCHEDSTAT_ONLY, PGWT_DISC_MALFORMED
++} pgwt_discovery_inactivity;
++typedef struct {
++    uint64_t known, truth;
++} pgwt_discovery_facts;
++typedef struct {
++    uint64_t t, e, wait_word, v0, v1, handle0, handle1;
++    uint64_t armed_address, resolved_address, accumulator, cpu_base, on_cpu_ts;
++    uint32_t threads0, threads1;
++    pgwt_discovery_inactivity S0, S1;
++    bool terminal0, terminal1, cpu_base_valid;
++    pgwt_discovery_facts facts;
++    /* Failed optional brackets are ordinary rejection. Claiming completed
++     * coherence/identity/continuity despite contradictory facts is a fault. */
++    bool claims_completed_coherence;
++} pgwt_discovery_witness;
++/* These are retained observations, never source boundaries. Route c uses
++ * the pointer watch rather than a numerical attachment. Role qualification is
++ * lifetime-bound producer evidence, not a whitelist inferred from NULL.
++ * POINTER evidence covers the lifetime from enable and may precede ADMIT.
++ * Retain contradictory observations until a claim arrives; controls cannot
++ * erase a non-NULL fire or a demonstrated continuity break. */
++typedef enum { PGWT_DISC_NUMERICAL, PGWT_DISC_NO_WAIT_WORD } pgwt_discovery_route;
++typedef struct {
++    uint64_t enable, read_at, fence, pointer, fires, handle0, handle1;
++    uint32_t role;
++    bool permanent_role_qualified, visible_before_enable, continuous;
++    bool read_ok, completed, counters_unchanged, ownership, binding;
++    bool claims_completed;
++} pgwt_discovery_no_word;
++/* Shared J/R/G reconciliation facts. Clocks and namespaces must already be
++ * qualified; zero/raw-unknown start times are explicitly marked unknown. */
++typedef struct {
++    uint64_t F0, start, fence, failed_open, gone_at, handle;
++    uint64_t tid, tgid, parent, postmaster;
++    uint64_t exit_time; /* journal witness exit_ns; terminal_time below names
++                         * the lifecycle DATA semantic timestamp. Both must
++                         * agree with the actual named transport record. */
++    /* Raw map observations are not membership or terminal-binding evidence. */
++    uint64_t discovery_map_cookie;
++    bool discovery_map_tombstone;
++    uint64_t fork_cookie; /* validated current-lifetime observed-fork provenance,
++                          * never the PID's current map or mutable-state cookie */
++    bool start_known, clocks_qualified, namespaces, history_complete;
++    bool producers_complete, counters_unchanged, journal_complete;
++    bool journal_eligible, gone_esrch, binding, claims_match;
++    /* Final numeric-only EXIT disposal: a completed history/producer/journal
++     * cut at fence, or established permanent loss with attempts stopped.
++     * Every retained witness must first be consumed; none may name this EXIT. */
++    bool reconciliation_permanently_lost, reconciliation_attempts_stopped;
++    bool retained_journal_consumed, no_matching_journal;
++} pgwt_discovery_resolution;
++typedef enum {
++    PGWT_DISC_EXIT_NONMEMBER, PGWT_DISC_EXIT_FORK,
++    PGWT_DISC_EXIT_PREEXISTING, PGWT_DISC_EXIT_MISSING_FORK,
++    PGWT_DISC_EXIT_UNKNOWN
++} pgwt_discovery_exit_class;
++typedef enum {
++    PGWT_DISC_ADMIT, PGWT_DISC_CONFIRM, PGWT_DISC_TERMINAL, PGWT_DISC_ABANDON,
++    PGWT_DISC_TERMINAL_UNRESOLVED,
++    PGWT_DISC_CONFIRM_NO_WAIT_WORD, PGWT_DISC_TRY_NO_WAIT_WORD,
++    PGWT_DISC_POINTER, PGWT_DISC_WAIT_ATTEMPT, PGWT_DISC_WAIT_LIMIT,
++    PGWT_DISC_JOURNAL, PGWT_DISC_REBIND, PGWT_DISC_GONE,
++    PGWT_DISC_EXIT_OBSERVATION
++} pgwt_discovery_control_kind;
++typedef struct {
++    pgwt_discovery_control_kind kind;
++    uint64_t pid, cookie, attachment_generation, e;
++    pgwt_discovery_facts proof;
++    pgwt_discovery_witness witness;
++    pgwt_discovery_route route;
++    pgwt_discovery_no_word no_word;
++    pgwt_discovery_resolution resolution;
++    uint64_t pointer_value, pointer_time, authentication_deadline;
++    bool pointer_read_ok, pointer_continuous;
++    /* Optional exact transport binding; journal resolutions require it.
++     * Legacy controls name an EXIT by immutable (pid,semantic timestamp). */
++    uint64_t exit_source, exit_position;
++    bool names_exit;
++
++    /* TERMINAL: retained matching kernel/lifecycle proof (not ESRCH).
++     * false is unproved evidence, NOT a final disposition. An explicit
++     * TERMINAL_UNRESOLVED uses the reserved inventory cookie, or cookie zero
++     * and explicit EXIT identity/finality facts for a numeric-only obligation.
++     * Both outcomes are final;
++     * duplicates must agree. Discharge requires a complete successful release. */
++    uint64_t terminal_time;
++    bool terminal_binding_proved;
++} pgwt_discovery_attempt;
++/* A failed route-c bracket can still contain a positively bound pointer read.
++ * Its failure to certify a baseline does not erase that observation. */
++static inline bool pgwt_discovery_nonnull_witness(const pgwt_discovery_attempt *d)
++{
++    return (d->kind == PGWT_DISC_TRY_NO_WAIT_WORD ||
++        d->kind == PGWT_DISC_CONFIRM_NO_WAIT_WORD ||
++        (d->kind == PGWT_DISC_ADMIT && d->route == PGWT_DISC_NO_WAIT_WORD)) &&
++        d->no_word.read_ok && d->no_word.binding && d->no_word.handle0 &&
++        d->no_word.handle0 == d->no_word.handle1 && d->no_word.pointer;
++}
++typedef struct {
++    uint64_t attachment_generation;
++    bool membership_proved, marker, baselines_refreshed;
++    /* Retained producer attribution: metadata belongs only to (pid,cookie).
++     * Shared metadata never sets this flag. */
++    bool exclusive_text;
++} pgwt_discovery_origin;
++typedef struct {
++    bool admitted, confirmed, has_lower_bound, terminal_released, abandoned;
++    /* Capture-lifetime evidence, written on receipt before release or disposal. */
++    bool has_attributable, has_provenance_uncertified, numerical_seen;
++    bool terminal_claimed, terminal_refuted, admission_recorded;
++    uint64_t attributable_through, provenance_uncertified_through;
++    uint64_t claimed_terminal_time, terminal_source, terminal_position;
++    bool terminal_names_exit, has_exit_evidence, exit_conflicting;
++    /* Raw control receipt is distinct from validated admission/confirmation. */
++    pgwt_discovery_control_kind last_control;
++    uint64_t control_observed_at, control_attachment_generation;
++    uint64_t exit_stamp, exit_source, exit_position;
++    bool no_wait_word, pointer_watched, pointer_nonnull, waiting_limit_exceeded;
++    bool pointer_discontinuous; /* retained even before route-c ADMIT */
++    uint64_t wait_word_attempts, pointer_observations, authentication_deadline;
++    pgwt_discovery_no_word no_word_witness;
++    bool has_uncertified;
++    uint64_t uncertified_through; /* greatest validated consumed numerical stamp */
++    uint64_t attachment_generation, lower_bound, terminal_time;
++    uint64_t source, position;
++    pgwt_discovery_witness baseline;
++} pgwt_discovery_state;
++
++static inline bool pgwt_discovery_has(pgwt_discovery_facts f, uint64_t required)
++{ return (f.known & f.truth & required) == required; }
++
++#endif
+diff --git a/tests/discovery_daemon_cases.h b/tests/discovery_daemon_cases.h
+index 8a7f18bd..ae3d6eb2 100644
+--- a/tests/discovery_daemon_cases.h
++++ b/tests/discovery_daemon_cases.h
+@@ -25,13 +25,16 @@ static struct pgwt_daemon *setup(void)
+         .reset_storage_addr=0x5000,.exit_flag_addr=0x6000,
+         .address_verdict={true,true,"qualified",0x7000},.executable={0x1000,0x3000,99,8,1}};
+     for(unsigned i=0;i<4;++i)s->lifecycle_baseline[i].valid=true;
++    s->activation_counters.valid=true;
++    for(unsigned i=0;i<PGWT_COUNTER_COMPONENTS;++i)s->activation_counters.components[i].valid=true;
++    s->census_proof.kind=PGWT_DH_CENSUS;s->census_proof.census_record=true;
+     s->lives=calloc(PGWT_DISCOVERY_CAPACITY,sizeof(*s->lives));CHECK("allocate journal copy",s->lives);
+     struct disc_entry *entry=inventory(s,42,10);CHECK("inventory candidate",entry);
+     entry->proc=10;entry->mem=14;entry->status_known=true;
+     d->backends.count=1;d->backends.entries[0]=(struct pgwt_backend){.pid=42,.wp_fd=-1,.bootstrap_fd=-1,.wp_addr=0x4000,.is_alive=true};
+     base_state=(struct pgwt_pid_state){.last_ts=88,.last_query_id=99,.cmd_open=1};
+     identity=(struct pgwt_discovery_identity){0};progress=(struct pgwt_discovery_progress){0};
+-    withhold_helper=false;fake_ncpu=1;counter_wait_baseline=0;counter_wait_known=true;
++    withhold_helper=false;fake_ncpu=1;counter_wait_baseline=kernel_wait_fault=0;counter_wait_known=true;
+     pointer_value=0x4000;pointer_config=0;pointer_enabled=initial_open_fail=pointer_initialized_on_enable=false;
+     pointer_state=(struct pgwt_discovery_pointer){0};wait_value=0;kill_error=0;lifecycle_changed_slot=-1;
+     pointer_read_before_enable=false;open_failures_remaining=0;status_parent=1;status_tgid=42;status_ticks=10;
+@@ -39,7 +42,10 @@ static struct pgwt_daemon *setup(void)
+     bad_reset_return=fail_progress_allocation=false;lifecycle_counter_known=true;
+     fixture_daemon=d;proc_opens=fork_reuse_stage=0;
+     pointer_state_missing=replace_during_snapshot=fail_fence_on_kill=false;
+-    bad_reset_destination=shared_local_mapping=false;
++    bad_reset_destination=shared_local_mapping=exit_during_read=fail_pointer_read=false;
++    perf_count_missing=perf_count_read_fail=pointer_enable_fail=false;
++    no_namespaces=foreign_namespace=generation_alloc_fail=identity_insert_fail=false;
++    pointer_open_fail=word_open_fail=all_helpers=noncontiguous_cpus=constant_clock=false;cpu_consumed=0;late_setup_churn=clock_read_failure=false;
+     pointer_lookups=memory_reads=null_fence_fault=null_fault_kind=0;
+     qualifier_bad_maps=qualifier_bad_memory=qualifier_bad_code=qualifier_bad_open=qualifier_bad_stat=false;
+     candidate_shared=candidate_heap=candidate_readonly=false;
+@@ -64,6 +70,22 @@ static void empty_inventory(struct pgwt_daemon *d)
+     d->discovery_admission->count=d->discovery_admission->capacity=0;
+     d->backends.count=0;
+ }
++/* Existing round cases select physical attempt payloads after the newly
++ * explicit census, inventory and installation records. */
++static bool next_physical(struct pgwt_daemon *d,size_t *cursor,struct pgwt_discovery_attempt *a)
++{
++    while(pgwt_discovery_next(d,cursor,a))
++        if(a->kind!=PGWT_DH_CENSUS && a->kind!=PGWT_DH_INVENTORY && a->kind!=PGWT_DH_INSTALLED &&
++           !(a->kind==PGWT_DH_POINTER && !a->maximum_attempts))
++            return true;
++    return false;
++}
++static size_t physical_count(struct pgwt_daemon *d)
++{
++    size_t cursor=0,count=0;struct pgwt_discovery_attempt a;
++    while(next_physical(d,&cursor,&a))++count;
++    return count;
++}
+ static void qualifier_cases(void)
+ {
+     struct disc_mapping executable={0x1000,0x3000,99,8,1};
+@@ -115,11 +137,11 @@ static void qualifier_cases(void)
+         for(unsigned poll=0;poll<12;++poll) CHECK("unqualified lifetime remains pending",pgwt_discovery_attach(d,&d->backends.entries[0])<0);
+         struct disc_entry *entry=&d->discovery_admission->entries[0];
+         CHECK("unqualified refusal owns exact reason",entry->address_refusal && !strcmp(entry->address_refusal,reasons[test]));
+-        CHECK("unqualified consumes no cookie attempt loss or physical setup",!entry->cookie && !entry->attempted &&
+-            d->discovery_admission->next_cookie==PGWT_DISCOVERY_FIRST && !watch_opens && !seed_count &&
++        CHECK("unqualified preserves reservation without attempt loss or physical setup",entry->cookie==PGWT_DISCOVERY_FIRST && !entry->attempted &&
++            d->discovery_admission->next_cookie==PGWT_DISCOVERY_FIRST+1 && !watch_opens && !seed_count &&
+             !d->counters.wp_attach_failures_total && !d->counters.discovery_read_fail_total &&
+             !d->counters.state_map_full_total && !d->discovery_admission->fault);
+-        CHECK("unqualified attach path retained once",d->discovery_admission->record_count==1);
++        CHECK("unqualified attach path retained once",physical_count(d)==1);
+         fprintf(stderr,"QUALIFIER-CASE end=%u\n",test);teardown(d);
+     }
+     for(unsigned test=0;test<6;++test) {
+@@ -129,20 +151,20 @@ static void qualifier_cases(void)
+         qualify_binary(d);
+         CHECK("transient qualifier bounded separately from permanent refusal",!d->discovery_admission->address_verdict.known &&
+             d->discovery_admission->qualification_transient==PGWT_DISCOVERY_ATTEMPTS && !watch_opens &&
+-            d->discovery_admission->next_cookie==PGWT_DISCOVERY_FIRST && !d->counters.discovery_read_fail_total);
++            d->discovery_admission->next_cookie==PGWT_DISCOVERY_FIRST+1 && !d->counters.discovery_read_fail_total);
+         teardown(d);
+     }
+     struct pgwt_daemon *d=setup();backend_role=1;qualify_binary(d);
+     struct pgwt_counter_vector before_maps=pgwt_daemon_counter_vector(d);
+     candidate_bad_maps=true;
+     for(unsigned poll=0;poll<12;++poll)(void)pgwt_discovery_attach(d,&d->backends.entries[0]);
+-    CHECK("candidate maps retries preserve bounded refusal witnesses",d->discovery_admission->record_count==PGWT_DISCOVERY_ATTEMPTS &&
++    CHECK("candidate maps retries preserve bounded refusal witnesses",physical_count(d)==PGWT_DISCOVERY_ATTEMPTS &&
+         d->discovery_admission->qualification_transient==PGWT_DISCOVERY_ATTEMPTS && !identity_exists && !watch_opens &&
+-        !d->discovery_admission->entries[0].attempted && d->discovery_admission->next_cookie==PGWT_DISCOVERY_FIRST &&
++        !d->discovery_admission->entries[0].attempted && d->discovery_admission->next_cookie==PGWT_DISCOVERY_FIRST+1 &&
+         counters_equal(before_maps,pgwt_daemon_counter_vector(d)));
+     for(size_t record=0;record<d->discovery_admission->record_count;++record)
+-        CHECK("candidate maps error remains explicit",d->discovery_admission->records[record].error==EACCES &&
+-            !d->discovery_admission->records[record].cookie && !d->discovery_admission->records[record].attempt);
++        if(d->discovery_admission->records[record].kind==PGWT_DH_END || d->discovery_admission->records[record].kind==PGWT_DH_POINTER) CHECK("candidate maps error remains explicit",d->discovery_admission->records[record].error==EACCES &&
++            d->discovery_admission->records[record].cookie==PGWT_DISCOVERY_FIRST && !d->discovery_admission->records[record].attempt);
+     teardown(d);
+     d=setup();backend_role=1;qualify_binary(d);
+     struct pgwt_discovery_address_verdict verdict=pgwt_discovery_address_verdict(d);
+@@ -166,7 +188,51 @@ static void qualifier_cases(void)
+     CHECK("unqualified binary cannot fail daemon startup",!pgwt_discovery_start(d) &&
+         !pgwt_discovery_address_verdict(d).qualified && d->discovery_admission->next_cookie==PGWT_DISCOVERY_FIRST);
+     teardown(d);
+-    puts("discovery qualifier: PASS (refusal reasons, startup once, no cookies/loss, data address, mapping identity, bounded transient setup, enable retry, journal contradiction)");
++    puts("discovery qualifier: PASS (refusal reasons, startup once, reservation retained, no invented loss, data address, mapping identity, bounded transient setup, enable retry, journal contradiction)");
++}
++static void p1_defect_cases(void)
++{
++    struct pgwt_daemon *d=setup();backend_role=1;journal_changes=true;
++    for(unsigned poll=0;poll<8;++poll)(void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    CHECK("fence only refusal preserves setup budget",d->discovery_admission->entries[0].setup_tries==0);
++    journal_changes=false;
++    CHECK("fence churn recovery still attaches",!pgwt_discovery_attach(d,&d->backends.entries[0]));
++    teardown(d);
++    d=setup();backend_role=1;late_setup_churn=true;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    CHECK("late setup fence preserves entry gate",!d->discovery_admission->entries[0].attempted &&
++        !d->discovery_admission->entries[0].attempts_ended && !d->discovery_admission->entries[0].setup_tries);
++    late_setup_churn=journal_changes=false;
++    CHECK("late setup fence recovery attaches",!pgwt_discovery_attach(d,&d->backends.entries[0]));
++    teardown(d);
++    d=setup();backend_role=1;local_enable_failures=99;
++    for(unsigned poll=0;poll<8;++poll)(void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    size_t n=d->discovery_admission->record_count;
++    CHECK("setup exhaustion reports finality",n && d->discovery_admission->records[n-1].attempts_ended &&
++        d->discovery_admission->entries[0].attempts_ended && d->counters.wp_attach_failures_total==4);
++    teardown(d);
++    for(unsigned route=0;route<2;++route) {
++        d=setup();struct disc_context c={.d=d,.entry=&d->discovery_admission->entries[0]};
++        uint64_t address=0;uint32_t word=0;exit_during_read=true;
++        CHECK("exiting pinned read refuses",(route?disc_word(&c,0x4000,&word):disc_resolve(&c,&address))<0);
++        CHECK("exiting pinned read is not loss",!d->counters.discovery_read_fail_total);
++        teardown(d);
++        d=setup();c=(struct disc_context){.d=d,.entry=&d->discovery_admission->entries[0]};
++        fail_word=fail_pointer_read=true;
++        CHECK("live pinned read refuses",(route?disc_word(&c,0x4000,&word):disc_resolve(&c,&address))<0);
++        CHECK("live pinned read counts loss",d->counters.discovery_read_fail_total==1);
++        teardown(d);
++    }
++    d=setup();d->pg_major_version=17;backend_role=1;
++    d->discovery_admission->address_verdict=(struct pgwt_discovery_address_verdict){0};qualify_binary(d);
++    CHECK("PG17 local address qualifies",pgwt_discovery_address_verdict(d).qualified);
++    CHECK("PG17 local exit word watched",!pgwt_discovery_attach(d,&d->backends.entries[0]) &&
++        local_watch_enabled && local_config.address==0x7000 && local_config.exit_flag_address==0x6000);
++    teardown(d);
++    d=setup();d->pg_major_version=17;backend_role=15;private_mapping=true;
++    struct disc_context logger={.d=d,.entry=&d->discovery_admission->entries[0]};
++    CHECK("PG17 logger permanent local target qualifies",qualified_address(&logger,0x7000));
++    teardown(d);
+ }
+ static void round2_cases(void)
+ {
+@@ -175,7 +241,7 @@ static void round2_cases(void)
+     d=setup();backend_role=1;
+     CHECK("PG18 ordinary attachment qualifies continuous local target",!pgwt_discovery_attach(d,&d->backends.entries[0]) &&
+         local_watch_enabled && d->discovery_admission->entries[0].local_address==0x7000);
+-    cursor=0;CHECK("local-target proof retained in attempt",pgwt_discovery_next(d,&cursor,&a) &&
++    cursor=0;CHECK("local-target proof retained in attempt",next_physical(d,&cursor,&a) &&
+         a.local_continuous.value && a.local_enabled_ns<=a.pointer_enabled_ns);
+     teardown(d);
+     d=setup();backend_role=1;bad_reset_return=true;qualify_binary(d);
+@@ -186,7 +252,7 @@ static void round2_cases(void)
+         d=setup();d->pg_major_version=13;d->use_myproc=true;pointer_value=0;backend_role=role;
+         CHECK("PG13 permanent NULL role confirmed",!pgwt_discovery_attach(d,&d->backends.entries[0]));
+         cursor=0;
+-        CHECK("NULL route supplies no numerical seed or attempt",pgwt_discovery_next(d,&cursor,&a) &&
++        CHECK("NULL route supplies no numerical seed or attempt",next_physical(d,&cursor,&a) &&
+             a.no_wait_valid && a.final_attachment && !a.attempt && !a.quiet_valid && !seed_count &&
+             !a.cpu_base_valid && !a.t && a.permanent_role==role && pointer_enabled && pointer_config==PGWT_DISC_PTR_NONE);
+         CHECK("pointer NULL read follows enable",!pointer_read_before_enable && a.e && a.pointer_read_ns>=a.e &&
+@@ -200,9 +266,9 @@ static void round2_cases(void)
+         !d->discovery_admission->entries[0].final_attachment && !seed_count && pointer_enabled &&
+         !d->discovery_admission->entries[0].attempted);
+     for(unsigned i=0;i<20;++i) (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
+-    CHECK("pending pointer polling has bounded retained witnesses",d->discovery_admission->record_count==1 &&
++    CHECK("pending pointer polling has bounded retained witnesses",physical_count(d)==1 &&
+         d->discovery_admission->next_cookie==PGWT_DISCOVERY_FIRST+1 && !seed_count);
+-    cursor=0;CHECK("pending NULL consumes no word attempt",pgwt_discovery_next(d,&cursor,&a) &&
++    cursor=0;CHECK("pending NULL consumes no word attempt",next_physical(d,&cursor,&a) &&
+         a.no_wait_word && !a.no_wait_valid && !a.attempt && !a.final_attachment);
+     CHECK("unqualified NULL retains unknown authentication deadline",!a.auth_deadline_known && !a.authentication_phase.known);
+     pointer_value=0x4000;pointer_state.fires=pointer_state.nonnull=1;
+@@ -224,13 +290,13 @@ static void round2_cases(void)
+     d=setup();d->pg_major_version=13;d->use_myproc=true;pointer_value=0;backend_role=13;
+     pointer_initialized_on_enable=true;
+     CHECK("enable-time initialization cannot confirm NULL",!pgwt_discovery_attach(d,&d->backends.entries[0]));
+-    cursor=0;CHECK("post-enable pointer determines route",pgwt_discovery_next(d,&cursor,&a) &&
++    cursor=0;CHECK("post-enable pointer determines route",next_physical(d,&cursor,&a) &&
+         !a.no_wait_word && a.quiet_valid && seed_count==1);
+     teardown(d);
+     d=setup();wait_value=UINT32_MAX;
+     (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
+     cursor=0;bool garbage_quiet=false;
+-    while(pgwt_discovery_next(d,&cursor,&a)) garbage_quiet |= a.quiet_valid;
++    while(next_physical(d,&cursor,&a)) garbage_quiet |= a.quiet_valid;
+     CHECK("garbage wait word cannot confirm quiet",!garbage_quiet && d->counters.invalid_wait_reads_total==3);
+     teardown(d);
+     d=setup();empty_inventory(d);journal_changes=true;empty_proc=true;
+@@ -297,7 +363,7 @@ static void round2_cases(void)
+         d->discovery_admission->life_count==1);
+     CHECK("completed journal pruned after retaining witness",!journal_count);
+     cursor=0;bool exact_transport=false;
+-    while(pgwt_discovery_next(d,&cursor,&a))
++    while(next_physical(d,&cursor,&a))
+         if(a.terminal_match.value)exact_transport=a.terminal_transport_known && a.terminal_dest==2 && a.terminal_seq==7;
+     CHECK("J handoff retains transport identity through pruning",exact_transport);
+     unsigned walks=journal_walks;
+@@ -319,9 +385,12 @@ static void round2_cases(void)
+         d->discovery_admission->entries[0].final_attachment && !kill_calls);
+     teardown(d);
+     d=setup();empty_inventory(d);open_failures_remaining=2;status_ticks=200;observed_fork_cookie=7;
++    journal[0].key=(struct pgwt_discovery_key){.tid=42,.start_ns=2000000000};
++    journal[0].life=(struct pgwt_discovery_life){.tgid=42,.parent=1,.leader_start_ns=2000000000,
++        .start_boot_ns=2000000000,.fork_ns=2000000001,.fork_cookie=7};journal_count=1;
+     (void)pgwt_discovery_scan(d);
+     CHECK("R preserves valid fork route",d->discovery_admission->numbers[0].resolution==PGWT_DISC_NUM_R &&
+-        !d->discovery_admission->count && !d->backends.count && !identity_exists);
++        d->discovery_admission->count==1 && d->discovery_admission->entries[0].fork_route && !d->backends.count && !identity_exists);
+     teardown(d);
+     d=setup();fork_reuse_stage=1;
+     (void)pgwt_discovery_scan(d);
+@@ -336,8 +405,8 @@ static void round2_cases(void)
+     teardown(d);
+     d=setup();empty_inventory(d);open_failures_remaining=2;status_parent=99;
+     (void)pgwt_discovery_scan(d);
+-    CHECK("R classifies nonmember without inventory",d->discovery_admission->numbers[0].resolution==PGWT_DISC_NUM_R &&
+-        !d->discovery_admission->count && !d->backends.count);
++    CHECK("R classifies nonmember without discovery obligation",d->discovery_admission->numbers[0].resolution==PGWT_DISC_NUM_R &&
++        d->discovery_admission->count==1 && d->discovery_admission->entries[0].excluded && !d->backends.count);
+     teardown(d);
+     d=setup();empty_inventory(d);open_failures_remaining=2;status_ticks=200;
+     (void)pgwt_discovery_scan(d);
+@@ -353,6 +422,10 @@ static void round2_cases(void)
+         teardown(d);
+     }
+     d=setup();empty_inventory(d);empty_proc=true;
++    (void)pgwt_discovery_scan(d);lifecycle_counter_known=false;pgwt_discovery_refresh(d);
++    CHECK("unknown lifecycle class invalidates census",!d->discovery_admission->census);
++    teardown(d);
++    d=setup();empty_inventory(d);empty_proc=true;
+     (void)pgwt_discovery_scan(d);counter_wait_baseline=1;pgwt_discovery_refresh(d);
+     CHECK("wait loss alone preserves established census",d->discovery_admission->census);
+     teardown(d);
+@@ -375,7 +448,7 @@ static void terminal_fixture(struct pgwt_daemon *d, bool pointer_fault)
+ static unsigned fault_records(struct pgwt_daemon *d)
+ {
+     size_t cursor=0;struct pgwt_discovery_attempt a;unsigned count=0;
+-    while(pgwt_discovery_next(d,&cursor,&a)) count+=a.evidence_fault;
++    while(next_physical(d,&cursor,&a)) count+=a.evidence_fault;
+     return count;
+ }
+ static void round3_cases(void)
+@@ -525,7 +598,7 @@ int main(void)
+     d->exact_perf_discovery=true;
+     CHECK("actual adapter quiet bracket",pgwt_discovery_attach(d,&d->backends.entries[0])==0);
+     struct pgwt_discovery_attempt a;size_t cursor=0;
+-    CHECK("daemon yields attempt record",pgwt_discovery_next(d,&cursor,&a) && a.quiet_valid && a.cookie==PGWT_DISCOVERY_FIRST);
++    CHECK("daemon yields attempt record",next_physical(d,&cursor,&a) && a.quiet_valid && a.cookie==PGWT_DISCOVERY_FIRST);
+     CHECK("allocation proof facts explicit in handoff", a.fork_allocator_partitioned.known && a.fork_allocator_partitioned.value &&
+         a.discovery_allocator_serialized.known && a.discovery_allocator_serialized.value &&
+         a.cookie_partitioned.known && a.cookie_partitioned.value && a.cookie_burned.known && a.cookie_burned.value &&
+@@ -547,7 +620,7 @@ int main(void)
+     CHECK("daemon NOEXIST respects tombstone",pgwt_discovery_attach(d,&d->backends.entries[0])<0 && !identity.cookie && !seed_count);
+     CHECK("failed installation burns reservation",d->discovery_admission->next_cookie==PGWT_DISCOVERY_FIRST+1);
+     CHECK("identity install failure has reliable fault accounting",d->counters.state_map_full_total==1 && d->discovery_admission->fault);
+-    cursor=0; CHECK("failed installation retains burned-cookie witness",pgwt_discovery_next(d,&cursor,&a) &&
++    cursor=0; CHECK("failed installation retains burned-cookie witness",next_physical(d,&cursor,&a) &&
+         a.cookie_burned.known && a.cookie_burned.value && a.cookie_partitioned.known && a.cookie_partitioned.value &&
+         !a.identity_visible.value);
+     teardown(d);
+@@ -561,18 +634,18 @@ int main(void)
+     CHECK("retain replacement inventory",replacement);
+     replacement->proc=10;replacement->mem=14;replacement->status_known=true;
+     CHECK("each same-PID inventory entry gets its own attempt",!attach_entry(d,&d->backends.entries[0],replacement) &&
+-        replacement->attempted && d->discovery_admission->record_count==2);
++        replacement->attempted && physical_count(d)==2);
+     teardown(d);
+     d=setup();denied_s1=true;
+     CHECK("adapter denied S1 stays fresh pending",!pgwt_discovery_attach(d,&d->backends.entries[0]));
+     cursor=0;unsigned quiet=0,records=0;
+-    while(pgwt_discovery_next(d,&cursor,&a)) { ++records;quiet+=a.quiet_valid; }
++    while(next_physical(d,&cursor,&a)) { ++records;quiet+=a.quiet_valid; }
+     CHECK("adapter bounded denied retries",records==4 && !quiet && seed_count==4);
+     CHECK("failed inactivity witness alone is not a loss",!d->counters.discovery_read_fail_total && !d->counters.init_state_read_fail_total);
+     teardown(d);
+     d=setup();malformed=true;
+     struct disc_context c={.d=d,.entry=&d->discovery_admission->entries[0],.be=&d->backends.entries[0]};
+-    CHECK("malformed inactivity proof refused",disc_inactive(&c)==PGWT_DISC_MALFORMED);
++    CHECK("malformed inactivity proof refused",disc_inactive(&c)==PGWT_PRODUCER_MALFORMED);
+     malformed=false;journal_changes=true;
+     CHECK("changing lifecycle cannot fence census",history(d)<0);
+     journal_changes=false;progress.entered++;
+@@ -595,7 +668,7 @@ int main(void)
+     d=setup();disappear_on_eof=true;
+     CHECK("exit during enumeration retained",pgwt_discovery_scan(d)==0);
+     cursor=0;bool terminal=false;
+-    while(pgwt_discovery_next(d,&cursor,&a)) terminal |= a.terminal_match.known && a.terminal_match.value;
++    while(next_physical(d,&cursor,&a)) terminal |= a.terminal_match.known && a.terminal_match.value;
+     CHECK("kernel terminal discharge matches retained lifetime",terminal);
+     teardown(d);
+     d=setup();
+@@ -616,7 +689,7 @@ int main(void)
+     free(d->discovery_admission->entries);d->discovery_admission->entries=NULL;
+     d->discovery_admission->count=d->discovery_admission->capacity=0;
+     cursor=0;
+-    CHECK("empty registry alone supplies no census witness",!pgwt_discovery_next(d,&cursor,&a));
++    CHECK("empty registry alone supplies no census witness",pgwt_discovery_next(d,&cursor,&a) && a.census_record && !a.census_fenced.value);
+     empty_proc=true;
+     CHECK("qualified empty census completes",pgwt_discovery_scan(d)==0);
+     cursor=0;
+@@ -651,5 +724,6 @@ int main(void)
+     teardown(d);
+     round2_cases();
+     qualifier_cases();
++    p1_defect_cases();
+     puts("discovery daemon schedules: PASS (pinned reads, PID reuse, inventory/census, PG13/18 chains, immutable identity, generations, quiet/fresh attempts)");return 0;
+ }
+diff --git a/tests/discovery_daemon_shim.h b/tests/discovery_daemon_shim.h
+index 50f71298..207c5063 100644
+--- a/tests/discovery_daemon_shim.h
++++ b/tests/discovery_daemon_shim.h
+@@ -3,6 +3,7 @@
+ #define _GNU_SOURCE
+ #endif
+ #include "discovery_admission.h"
++#include "discovery_qualification.h"
+ #include "daemon.h"
+ #include "capture_counters.h"
+ #include "wait_event.h"
+@@ -87,7 +88,19 @@ static unsigned syscall_reads;
+ static bool pointer_state_missing, replace_during_snapshot, fail_fence_on_kill;
+ static unsigned pointer_lookups, memory_reads, null_fence_fault, null_fault_kind;
+ static bool bad_reset_destination, shared_local_mapping;
+-static uint64_t counter_wait_baseline;
++static bool exit_during_read, fail_pointer_read;
++static bool perf_count_missing, perf_count_read_fail, pointer_enable_fail;
++static bool no_namespaces, foreign_namespace, generation_alloc_fail, identity_insert_fail;
++static bool pointer_open_fail, word_open_fail, all_helpers, noncontiguous_cpus;
++static bool constant_clock;
++static uint64_t cpu_consumed;
++static bool late_setup_churn, clock_read_failure;
++
++static int fake_readlink(const char *path,char *out,size_t cap)
++{ (void)path;if(no_namespaces) { errno=EACCES;return -1; }const char *ns="pid:[4026531836]";CHECK("namespace capacity",cap>=strlen(ns));memcpy(out,ns,strlen(ns));return strlen(ns); }
++static int fake_readlinkat(int fd,const char *name,char *out,size_t cap)
++{ (void)fd;if(foreign_namespace) { const char *ns="pid:[4026533000]";memcpy(out,ns,strlen(ns));return strlen(ns); }return fake_readlink(name,out,cap); }
++static uint64_t counter_wait_baseline, kernel_wait_fault;
+ static bool counter_wait_known=true;
+ static bool withhold_helper;
+ static size_t fake_ncpu=1;
+@@ -95,7 +108,7 @@ static uint64_t requested_fence;
+ static struct pgwt_discovery_cpu enrolled_cpu;
+ static struct pgwt_discovery_ack helper_ack;
+ size_t pgwt_percpu_transport_cpu_count(const struct pgwt_daemon *d) { (void)d;return fake_ncpu; }
+-uint32_t pgwt_percpu_transport_cpu_id(const struct pgwt_daemon *d,size_t i) { (void)d;return (uint32_t)i; }
++uint32_t pgwt_percpu_transport_cpu_id(const struct pgwt_daemon *d,size_t i) { (void)d;return noncontiguous_cpus?(uint32_t)(2*i+1):(uint32_t)i; }
+ int pgwt_percpu_transport_helpers_valid(struct pgwt_daemon *d) { (void)d;return 1; }
+ int pgwt_percpu_transport_wake_helpers(struct pgwt_daemon *d)
+ { (void)d;if(withhold_helper)return 0;helper_ack=(struct pgwt_discovery_ack){.request=requested_fence,.stamp=requested_fence+1};return 0; }
+@@ -103,8 +116,17 @@ static int bpf_map_lookup_elem(int map,const void *key,void *out)
+ {
+     switch(map) {
+     case 1: *(struct pgwt_discovery_progress *)out=progress; return 0;
+-    case 10: *(struct pgwt_discovery_ack *)out=helper_ack; return 0;
+-    case 11: *(struct pgwt_discovery_cpu *)out=enrolled_cpu; return 0;
++    case 10:
++        if(all_helpers) {
++            struct pgwt_discovery_ack *acks=out;
++            for(size_t i=0;i<fake_ncpu;++i) {
++                unsigned cpu=noncontiguous_cpus?2*i+1:i;
++                acks[cpu]=(struct pgwt_discovery_ack){.request=requested_fence,.stamp=requested_fence+1,
++                    .attempts={100+cpu,200+cpu,300+cpu}};
++            }
++        } else *(struct pgwt_discovery_ack *)out=helper_ack;
++        return 0;
++    case 11: enrolled_cpu.total+=cpu_consumed;cpu_consumed=0;*(struct pgwt_discovery_cpu *)out=enrolled_cpu; return 0;
+     case 13:
+         ++pointer_lookups;
+         if (replace_during_snapshot) replaced=true;
+@@ -145,6 +167,7 @@ static int bpf_map_update_elem(int map,const void *key,const void *value,uint64_
+     }
+     if (map==11) { enrolled_cpu=*(const struct pgwt_discovery_cpu *)value;return 0; }
+     if (map==6) {
++        if(identity_insert_fail) { errno=ENOSPC;return -1; }
+         if (flags==BPF_NOEXIST && identity_exists) { errno=EEXIST; return -1; }
+         identity=*(const struct pgwt_discovery_identity *)value; identity_exists=true; return 0;
+     }
+@@ -175,7 +198,7 @@ static int bpf_map_delete_elem(int map,const void *key)
+     errno=ENOENT;return -1;
+ }
+ struct pgwt_counter_value pgwt_read_bpf_fail_counter(struct pgwt_daemon *d,uint32_t slot)
+-{ (void)d; (void)slot; return (struct pgwt_counter_value){0,true}; }
++{ (void)d; (void)slot; return (struct pgwt_counter_value){kernel_wait_fault,true}; }
+ struct pgwt_counter_value pgwt_read_percpu_counter(int fd,uint32_t slot,int n,pgwt_counter_lookup_fn lookup)
+ { (void)fd;(void)slot;(void)n;(void)lookup;return (struct pgwt_counter_value){0,true}; }
+ struct pgwt_counter_vector pgwt_read_counter_vector(const struct pgwt_counter_sources *s,pgwt_counter_lookup_fn lookup)
+@@ -189,11 +212,12 @@ struct pgwt_counter_vector pgwt_read_counter_vector(const struct pgwt_counter_so
+     return result;
+ }
+ static int pgwt_open_watchpoint_disabled(pid_t pid,uint64_t addr,int prog)
+-{ (void)pid;(void)prog; ++watch_opens;if(addr==0x7000)++local_opens; if (replace_on_open) replaced=true; if(addr==0x7000)local_watch_required=true;return addr==0x2000?91:addr==0x7000?92:90; }
++{ (void)pid;(void)prog; if(addr==0x4000 && late_setup_churn) { ++progress.entered;++progress.completed;journal_changes=true; } if((addr==0x2000 && pointer_open_fail) || (addr==0x4000 && word_open_fail)) { errno=EMFILE;return -1; } ++watch_opens;if(addr==0x7000)++local_opens; if (replace_on_open) replaced=true; if(addr==0x7000)local_watch_required=true;return addr==0x2000?91:addr==0x7000?92:90; }
+ static int pgwt_watchpoint_disable(int fd) { (void)fd;return 0; }
+ static int pgwt_watchpoint_enable(int fd) {
+     if(fd==92) { if(local_enable_failures) { --local_enable_failures;errno=EIO;return -1; } local_watch_enabled=true; }
+     if(fd==91) {
++        if(pointer_enable_fail) { errno=EIO;return -1; }
+         CHECK("local word enabled before pointer",!local_watch_required || local_watch_enabled);
+         pointer_enabled=true;if(pointer_initialized_on_enable) { pointer_value=0x4000;++pointer_state.fires;++pointer_state.nonnull; }
+     }
+@@ -205,7 +229,7 @@ struct pgwt_backend *pgwt_find_backend(struct pgwt_backend_table *bt,pid_t pid)
+ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,struct pgwt_backend *be)
+ { (void)d;(void)be;return 0; }
+ static int fake_clock_gettime(clockid_t id,struct timespec *t)
+-{ (void)id; now_value+=1000000; t->tv_sec=1;t->tv_nsec=now_value;return 0; }
++{ (void)id; if(clock_read_failure) { errno=EIO;return -1; } if(!constant_clock)now_value+=1000000; t->tv_sec=1;t->tv_nsec=now_value;return 0; }
+ static int fake_openat(int dir,const char *name,int flags,...)
+ {
+     (void)flags;
+@@ -232,6 +256,16 @@ static int fake_openat(int dir,const char *name,int flags,...)
+ static bool already_read[32];
+ static ssize_t fake_read(int fd,void *out,size_t cap)
+ {
++    if (fd==91) {
++        if(pointer_enabled && null_fence_fault && pointer_config==(null_fence_fault==1?PGWT_DISC_PTR_PENDING:PGWT_DISC_PTR_NONE)) {
++            if(null_fault_kind==1)pointer_state.fires=1;
++            if(null_fault_kind==2)counter_wait_baseline=1;
++            if(null_fault_kind==3)counter_wait_known=false;
++        }
++        if (perf_count_read_fail) { errno=EIO;return -1; }
++        CHECK("perf count capacity",cap==8);
++        *(uint64_t *)out=pointer_state.fires+(perf_count_missing?1:0);return 8;
++    }
+     if (already_read[fd]) return 0;
+     already_read[fd]=true;
+     char text[4096]; text[0]=0;
+@@ -270,7 +304,9 @@ static ssize_t fake_pread(int fd,void *out,size_t n,off_t addr)
+         *(uint64_t *)out=postmaster_word;return 8;
+     }
+     if(fd==24 && qualifier_bad_code && n==32) { errno=EIO;return -1; }
++    if(exit_during_read)replaced=true;
+     if(replaced)return -1;
++    if(fail_pointer_read && n==8 && addr==0x2000) { errno=EIO;return -1; }
+     if(n==8 && addr==0x2000) {
+         ++pointer_reads;if(!pointer_enabled)pointer_read_before_enable=true;
+         *(uint64_t *)out=pointer_value;return 8;
+@@ -308,11 +344,13 @@ static int fake_closedir(DIR *dir) { (void)dir;return 0; }
+ static int fake_kill(pid_t pid,int sig)
+ { CHECK("numeric gone check uses observed PID",pid==42 && sig==0);++kill_calls;if(fail_fence_on_kill)withhold_helper=true;if(change_counter_on_kill)lifecycle_changed_slot=PGWT_C_LIFECYCLE_EXIT_DROP;errno=kill_error;return kill_error?-1:0; }
+ static void *fake_calloc(size_t n,size_t size)
+-{ if(fail_progress_allocation && n==1 && size==sizeof(struct pgwt_discovery_progress)) { errno=ENOMEM;return NULL; } return calloc(n,size); }
++{ if(generation_alloc_fail && n==PGWT_DISCOVERY_ATTEMPTS+1 && size==sizeof(struct pgwt_discovery_pre_enable)) { errno=ENOMEM;return NULL; } if(fail_progress_allocation && n==1 && size==sizeof(struct pgwt_discovery_progress)) { errno=ENOMEM;return NULL; } return calloc(n,size); }
+ static int fake_open(const char *path,int flags,...)
+ { (void)flags;if(!strcmp(path,"/postgres"))return 25;CHECK("pin postmaster directory",!strcmp(path,"/proc/1"));if(qualifier_bad_open) { errno=EACCES;return -1; }return 20; }
+ static int fake_fstat(int fd,struct stat *st)
+ { CHECK("stat pinned executable",fd==25);if(qualifier_bad_stat) { errno=EIO;return -1; }memset(st,0,sizeof(*st));st->st_dev=makedev(8,1);st->st_ino=99;return 0; }
++#define readlink fake_readlink
++#define readlinkat fake_readlinkat
+ #define open fake_open
+ #define fstat fake_fstat
+ #define calloc fake_calloc
+diff --git a/tests/discovery_handoff_cases.h b/tests/discovery_handoff_cases.h
+new file mode 100644
+index 00000000..49a2f4ab
+--- /dev/null
++++ b/tests/discovery_handoff_cases.h
+@@ -0,0 +1,352 @@
++/* P1 physical facts, independently scheduled from the legacy regression main. */
++static struct pgwt_discovery_attempt handoff(struct pgwt_daemon *d, enum pgwt_discovery_handoff_kind kind)
++{
++    if(kind==PGWT_DH_POINTER)
++        for(size_t i=d->discovery_admission->record_count;i>0;--i)
++            if(d->discovery_admission->records[i-1].kind==kind)return d->discovery_admission->records[i-1];
++    for(size_t i=0;i<d->discovery_admission->record_count;++i)
++        if(d->discovery_admission->records[i].kind==kind)return d->discovery_admission->records[i];
++    CHECK("P1 required record kind",false);
++    return (struct pgwt_discovery_attempt){0};
++}
++#define FTRUE(a, member) CHECK("P1 " #member,(a).member.known && (a).member.value)
++#define UNKNOWN(a, member) CHECK("P1 unknown " #member,!(a).member.known && !(a).member.value)
++#define NONZERO(a, member) CHECK("P1 " #member,(a).member!=0)
++static void unknown_facts(void)
++{
++    struct pgwt_daemon *d=setup();withhold_helper=true;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    struct pgwt_discovery_attempt a=handoff(d,PGWT_DH_POINTER);
++    UNKNOWN(a,start_mono_known);UNKNOWN(a,namespaces);UNKNOWN(a,retained_binding);
++    UNKNOWN(a,history_complete);UNKNOWN(a,producers_complete);UNKNOWN(a,journal_complete);
++    UNKNOWN(a,journal_eligible);UNKNOWN(a,gone_esrch);
++    UNKNOWN(a,install_before_enable);UNKNOWN(a,failure_accounting);UNKNOWN(a,voluntary_no_wrap);
++    CHECK("P1 unknown task identifiers",!a.tid && !a.tgid && !a.parent && !a.postmaster && !a.fork_cookie);
++    CHECK("P1 unknown operation times",!a.failed_open && !a.gone_at && !a.identity_visible_at);
++    CHECK("P1 unknown reconciliation",a.reconciliation==PGWT_DREC_PENDING && !a.reconciliation_ns && !a.reconciliation_count);
++    CHECK("P1 unknown seed",!a.seed_valid && !a.accumulator && !a.on_cpu_ts && !a.cpu_base_valid);
++    CHECK("P1 unknown finality",!a.attempts_ended);
++    CHECK("P1 unknown completed claims",!a.claims_completed_coherence && !a.claims_completed_no_word);
++    CHECK("P1 unknown pointer counts",!a.pointer_snapshot_valid && !a.pointer_fires_before && !a.pointer_fires_after && !a.pointer_nonnull);
++    CHECK("P1 unknown accounting",!a.failure_accounting.known && a.counters_after.valid);
++    teardown(d);
++    d=setup();kernel_wait_fault=counter_wait_baseline=1;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);a=handoff(d,PGWT_DH_POINTER);
++    CHECK("P1 rejected fence retains numeric totals",a.counters_after.valid &&
++        a.counters_after.components[PGWT_C_WAIT_READ_FAIL].value==1 && !a.failure_accounting.known &&
++        a.reconciliation==PGWT_DREC_PENDING);
++    teardown(d);
++    d=setup();clock_read_failure=true;
++    (void)observe_number(d,42);a=handoff(d,PGWT_DH_NUMERIC);
++    CHECK("P1 unknown failed-open time",!a.failed_open && !a.cookie && !a.binding_token);
++    teardown(d);
++}
++static void installed_facts(void)
++{
++    struct pgwt_daemon *d=setup();
++    CHECK("P1 cookie reserved at bind",d->discovery_admission->entries[0].cookie==PGWT_DISCOVERY_FIRST && d->discovery_admission->next_cookie==PGWT_DISCOVERY_FIRST+1);
++    CHECK("P1 attach completes",!pgwt_discovery_attach(d,&d->backends.entries[0]));
++    struct pgwt_discovery_attempt i=handoff(d,PGWT_DH_INVENTORY);
++    struct pgwt_discovery_attempt v=handoff(d,PGWT_DH_INSTALLED);
++    struct pgwt_discovery_attempt a=handoff(d,PGWT_DH_ATTEMPT);
++    CHECK("P1 authoritative kind",i.kind==PGWT_DH_INVENTORY && v.kind==PGWT_DH_INSTALLED && a.kind==PGWT_DH_ATTEMPT);
++    CHECK("P1 reservation",i.cookie==PGWT_DISCOVERY_FIRST && v.cookie==i.cookie && a.cookie==i.cookie);
++    CHECK("P1 binding_token",i.binding_token && v.binding_token==i.binding_token && a.binding_token==i.binding_token);
++    CHECK("P1 identity_visible_at",v.identity_visible_at && a.identity_visible_at==v.identity_visible_at &&
++        v.identity_visible_at<=a.generation_published_ns);
++    CHECK("P1 installation ordering",!i.identity_visible.value && v.identity_visible.value &&
++        d->discovery_admission->records[0].kind==PGWT_DH_INVENTORY &&
++        d->discovery_admission->records[1].kind==PGWT_DH_INSTALLED);
++    CHECK("P1 task identifiers",a.tid==42 && a.tgid==42 && a.parent==1 && a.postmaster==1);
++    UNKNOWN(i,start_mono_known);CHECK("P1 tick start is not exact",!i.lifetime_start_ns && i.start_upper_ns==110000000);
++    FTRUE(a,namespaces);FTRUE(a,retained_binding);
++    FTRUE(a,history_complete);FTRUE(a,producers_complete);FTRUE(a,journal_complete);
++    NONZERO(a,reconciliation_ns);NONZERO(a,reconciliation_count);
++    CHECK("P1 reconciliation",a.reconciliation==PGWT_DREC_COMPLETE && a.reconciliation_ns>=a.producers_fenced_ns);
++    CHECK("P1 accumulator",a.accumulator==a.cpu_base && a.accumulator==0);
++    CHECK("P1 on_cpu_ts",a.on_cpu_ts==0);
++    CHECK("P1 seed_valid",a.seed_valid && a.cpu_base_valid);
++    FTRUE(a,install_before_enable);FTRUE(a,failure_accounting);FTRUE(a,voluntary_no_wrap);
++    CHECK("P1 attempts_ended",a.attempts_ended && d->discovery_admission->entries[0].attempts_ended);
++    CHECK("P1 claims_completed_coherence",a.claims_completed_coherence && a.quiet_valid);
++    CHECK("P1 no false no-word claim",!a.claims_completed_no_word);
++    CHECK("P1 evidence_counts_known",a.evidence_counts_known);
++    CHECK("P1 kernel_evidence_count zero",a.kernel_evidence_count==0);
++    CHECK("P1 user_evidence_count zero",a.user_evidence_count==0);
++    CHECK("P1 handoff_complete",a.handoff_complete);
++    CHECK("P1 record-local counters",a.counters_before.valid && a.counters_after.valid && a.counters_unchanged.value);
++    struct pgwt_discovery_attempt saved=a;
++    d->counters.discovery_read_fail_total=9;
++    a=handoff(d,PGWT_DH_ATTEMPT);
++    CHECK("P1 historical accounting immutable",!memcmp(&saved,&a,sizeof(saved)));
++    teardown(d);
++    d=setup();cpu_consumed=37;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);a=handoff(d,PGWT_DH_ATTEMPT);
++    CHECK("P1 measured seed accumulator",a.accumulator==37 && a.cpu_base==37 && a.seed_valid && !a.on_cpu_ts);
++    teardown(d);
++}
++static void binding_and_inventory_facts(void)
++{
++    struct pgwt_daemon *d=setup();pointer_open_fail=true;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    struct pgwt_discovery_attempt a=handoff(d,PGWT_DH_INVENTORY);
++    CHECK("P1 reservation before failure",a.cookie && a.binding_token && !a.identity_visible.value && !identity_exists);
++    uint64_t cookie=a.cookie,token=a.binding_token;
++    struct disc_entry *next=new_inventory(d->discovery_admission,42,10);
++    next->proc=10;next->mem=14;next->status_known=true;
++    struct pgwt_discovery_status status={.known=true,.start_ticks=10,.parent=1,.tgid=42};
++    publish_inventory(d,next,&status);
++    CHECK("P1 token reuse prevention",next->binding_token>token && next->cookie>cookie);
++    teardown(d);
++    d=setup();d->discovery_admission->entries[0].mem=-1;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    a=handoff(d,PGWT_DH_END);
++    CHECK("P1 unreadable memory ends setup",a.attempts_ended && a.error==EACCES && !identity_exists && !d->counters.discovery_read_fail_total);
++    teardown(d);
++    d=setup();d->discovery_admission->next_binding_token=UINT64_MAX;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    a=handoff(d,PGWT_DH_INVENTORY);
++    CHECK("P1 binding token no wrap",!a.binding_token && d->discovery_admission->next_binding_token==UINT64_MAX &&
++        d->discovery_admission->user_evidence_count && !identity_exists);
++    teardown(d);
++    d=setup();identity_insert_fail=true;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    CHECK("P1 failed installation stays inventory",handoff(d,PGWT_DH_INVENTORY).cookie && !identity_exists);
++    for(size_t j=0;j<d->discovery_admission->record_count;++j)
++        CHECK("P1 failed installation cannot publish installed",d->discovery_admission->records[j].kind!=PGWT_DH_INSTALLED);
++    teardown(d);
++    d=setup();empty_inventory(d);d->backends.count=MAX_BACKENDS;d->backends.entries[0].pid=0;
++    (void)pgwt_discovery_scan(d);
++    a=handoff(d,PGWT_DH_INVENTORY);
++    CHECK("P1 no-slot inventory",a.cookie && a.binding_token && !a.identity_visible.value && !identity_exists);
++    teardown(d);
++    d=setup();empty_inventory(d);d->discovery_admission->next_cookie=UINT64_MAX;
++    next=new_inventory(d->discovery_admission,42,10);
++    CHECK("P1 last reservation",next && next->cookie==UINT64_MAX);
++    next=new_inventory(d->discovery_admission,42,11);
++    CHECK("P1 exhaustion retains obligation",next && !next->cookie && d->discovery_admission->count==2 && d->discovery_admission->fault);
++    teardown(d);
++    for(unsigned mode=0;mode<2;++mode) {
++        d=setup();no_namespaces=mode==0;foreign_namespace=mode==1;
++        (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++        a=handoff(d,PGWT_DH_INVENTORY);
++        CHECK("P1 namespace uncertainty cannot confirm",!a.namespaces.value);
++        CHECK("P1 namespace states",a.namespaces.known==(mode==1));
++        for(size_t j=0;j<d->discovery_admission->record_count;++j)
++            CHECK("P1 unknown namespace is no completed proof",!d->discovery_admission->records[j].claims_completed_coherence);
++        teardown(d);
++    }
++}
++static void numeric_facts(void)
++{
++    struct pgwt_daemon *d=setup();empty_inventory(d);initial_open_fail=true;kill_error=ESRCH;
++    (void)pgwt_discovery_scan(d);
++    struct pgwt_discovery_attempt n=handoff(d,PGWT_DH_NUMERIC),a=handoff(d,PGWT_DH_RESOLUTION);
++    UNKNOWN(n,gone_esrch);UNKNOWN(n,journal_eligible);
++    CHECK("P1 G has no invented task identity",!a.tid && !a.tgid && !a.parent && !a.fork_cookie);
++    CHECK("P1 numeric cookie absent",!n.cookie && !n.binding_token && n.numeric_record);
++    NONZERO(n,failed_open);
++    CHECK("P1 gone_at",a.gone_at>a.failed_open && a.reconciliation_ns>=a.gone_at);
++    FTRUE(a,gone_esrch);
++    CHECK("P1 G journal ineligibility",a.journal_eligible.known && !a.journal_eligible.value && !a.cookie);
++    CHECK("P1 numeric resolution",a.numeric_resolution==PGWT_DISC_NUM_G && a.numeric_record);
++    FTRUE(a,history_complete);FTRUE(a,producers_complete);FTRUE(a,journal_complete);FTRUE(a,namespaces);
++    FTRUE(a,failure_accounting);FTRUE(a,counters_unchanged);
++    teardown(d);
++    d=setup();empty_inventory(d);initial_open_fail=true;kill_error=EPERM;
++    (void)pgwt_discovery_scan(d);
++    CHECK("P1 diagnostic error is not gone",d->discovery_admission->numbers[0].resolution==PGWT_DISC_NUM_PENDING);
++    teardown(d);
++    d=setup();empty_inventory(d);open_failures_remaining=2;
++    (void)pgwt_discovery_scan(d);
++    bool ordinary=false;
++    for(size_t j=0;j<d->discovery_admission->record_count;++j) {
++        a=d->discovery_admission->records[j];
++        if(a.kind==PGWT_DH_INVENTORY && a.failed_open) {
++            CHECK("P1 pre-existing R ordinary inventory",a.cookie && a.binding_token && a.predates_boot.value && a.start_upper_ns);
++            CHECK("P1 pre-existing R exact start unknown",!a.lifetime_start_ns && !a.start_mono_known.known);
++            FTRUE(a,lifecycle_fenced);FTRUE(a,no_observed_fork);
++            CHECK("P1 pre-existing R eligible after fence",a.reconciliation==PGWT_DREC_COMPLETE &&
++                a.journal_eligible.known && !a.journal_eligible.value);
++            ordinary=true;
++        }
++        CHECK("P1 pre-existing R is never REBIND",!(a.kind==PGWT_DH_RESOLUTION && a.numeric_resolution==PGWT_DISC_NUM_R));
++    }
++    CHECK("P1 pre-existing R delivered",ordinary);teardown(d);
++    d=setup();empty_inventory(d);initial_open_fail=true;kill_error=ESRCH;
++    journal[0].key=(struct pgwt_discovery_key){.tid=42,.start_ns=100000000};
++    journal[0].life=(struct pgwt_discovery_life){.tgid=42,.parent=1,.leader_start_ns=100000000,
++        .start_boot_ns=100000000,.exit_ns=1000000100,.terminal_transport_known=1,.terminal_seq=7,.terminal_dest=2};journal_count=1;
++    (void)pgwt_discovery_scan(d);
++    a=handoff(d,PGWT_DH_INVENTORY);
++    CHECK("P1 journal-only inventory",a.cookie && !a.binding_token && a.lifetime_start_ns==100000000);
++    FTRUE(a,start_mono_known);
++    a=handoff(d,PGWT_DH_RESOLUTION);
++    CHECK("P1 J retained identity",a.numeric_resolution==PGWT_DISC_NUM_J && a.cookie && a.lifetime_start_ns==100000000 && a.terminal_seq==7);
++    FTRUE(a,journal_eligible);FTRUE(a,start_mono_known);FTRUE(a,terminal_match);FTRUE(a,no_observed_fork);FTRUE(a,clock_bound);
++    teardown(d);
++    d=setup();empty_inventory(d);open_failures_remaining=2;status_ticks=200;observed_fork_cookie=7;
++    journal[0].key=(struct pgwt_discovery_key){.tid=42,.start_ns=2000000000};
++    journal[0].life=(struct pgwt_discovery_life){.tgid=42,.parent=1,.leader_start_ns=2000000000,
++        .start_boot_ns=2000000000,.fork_ns=2000000001,.fork_cookie=7};journal_count=1;
++    (void)pgwt_discovery_scan(d);
++    a=handoff(d,PGWT_DH_RESOLUTION);
++    CHECK("P1 fork_cookie",a.fork_cookie==7 && a.numeric_resolution==PGWT_DISC_NUM_R);
++    CHECK("P1 REBIND identifiers",a.tid==42 && a.tgid==42 && a.parent==1 && a.postmaster==1 && a.binding_token);
++    FTRUE(a,retained_binding);CHECK("P1 R journal ineligibility",a.journal_eligible.known && !a.journal_eligible.value);
++    teardown(d);
++    d=setup();empty_inventory(d);open_failures_remaining=2;status_parent=0;
++    (void)pgwt_discovery_scan(d);
++    CHECK("P1 unknown R identifiers stay pending",d->discovery_admission->numbers[0].resolution==PGWT_DISC_NUM_PENDING);
++    teardown(d);
++    d=setup();empty_inventory(d);open_failures_remaining=2;status_ticks=200;observed_fork_cookie=7;
++    (void)pgwt_discovery_scan(d);
++    CHECK("P1 current fork map is not retained provenance",d->discovery_admission->numbers[0].resolution==PGWT_DISC_NUM_PENDING);
++    teardown(d);
++}
++static void generation_facts(void)
++{
++    struct pgwt_daemon *d=setup();all_helpers=noncontiguous_cpus=true;fake_ncpu=2;d->discovery_admission->possible=4;
++    CHECK("P1 generation arm",!pgwt_discovery_attach(d,&d->backends.entries[0]));
++    struct disc_entry *entry=&d->discovery_admission->entries[0];
++    CHECK("P1 generation storage",entry->generations && entry->generation_count==2);
++    struct pgwt_discovery_pre_enable b=entry->generations[1];
++    CHECK("P1 attachment_generation",b.attachment_generation==active_gen && b.attachment_generation!=entry->pointer_generation);
++    CHECK("P1 CPU membership",b.cpu_count==2 && b.cpu_ids[0]==1 && b.cpu_ids[1]==3);
++    CHECK("P1 pre_enable",b.pre_enable[0].request && b.pre_enable[0].request==b.pre_enable[1].request &&
++        b.pre_enable[0].stamp>=b.pre_enable[0].request && b.pre_enable[1].attempts[0]==103 && b.pre_enable[0].attempts[2]==301);
++    CHECK("P1 pre_enable_completed_ns",b.pre_enable_completed_ns && b.pre_enable_completed_ns>=handoff(d,PGWT_DH_ATTEMPT).generation_published_ns);
++    CHECK("P1 pre_enable_valid",b.pre_enable_valid);
++    struct pgwt_discovery_attempt later={0};struct disc_context c={.d=d,.entry=entry};
++    CHECK("P1 later fence",!producer_fence(&c,&later,true));
++    CHECK("P1 immutable B",!memcmp(&b,&entry->generations[1],sizeof(b)) && later.producers_after[0].request>b.pre_enable[0].request);
++    CHECK("P1 pointer generation cannot certify transport",!entry->generations[0].pre_enable_valid);
++    teardown(d);
++    d=setup();generation_alloc_fail=true;
++    CHECK("P1 allocation before enable",pgwt_discovery_attach(d,&d->backends.entries[0])<0 && !pointer_enabled && !seed_count &&
++        d->counters.state_map_full_total && d->discovery_admission->user_evidence_count);
++    teardown(d);
++    d=setup();denied_s1=true;
++    CHECK("P1 fresh arm",!pgwt_discovery_attach(d,&d->backends.entries[0]));
++    struct pgwt_discovery_attempt a=d->discovery_admission->records[d->discovery_admission->record_count-1];
++    CHECK("P1 fresh address_compared",a.kind==PGWT_DH_ATTEMPT && a.attempt==4 && a.address_compared.known && a.address_compared.value);
++    CHECK("P1 fresh is not completed coherence",!a.claims_completed_coherence && !a.quiet_valid && !a.cpu_base_valid);
++    CHECK("P1 retain older generations",d->discovery_admission->entries[0].generation_count==5);
++    teardown(d);
++}
++static void no_word_and_accounting_facts(void)
++{
++    struct pgwt_daemon *d=setup();d->pg_major_version=13;d->use_myproc=true;pointer_value=0;backend_role=13;
++    CHECK("P1 no-word completes",!pgwt_discovery_attach(d,&d->backends.entries[0]));
++    struct pgwt_discovery_attempt a=handoff(d,PGWT_DH_NO_WORD);
++    CHECK("P1 claims_completed_no_word",a.claims_completed_no_word && !a.claims_completed_coherence);
++    CHECK("P1 pointer_snapshot_valid",a.pointer_snapshot_valid && !a.pointer_fires_before && !a.pointer_fires_after && !a.pointer_nonnull);
++    CHECK("P1 strict pointer read",a.pointer_read_ns>a.pointer_enabled_ns && a.pointer_fence_ns>=a.pointer_read_ns);
++    FTRUE(a,pointer_continuous);CHECK("P1 no-word has no seed",!a.seed_valid && !a.cpu_base_valid && !a.t);
++    CHECK("P1 final no-word",a.attempts_ended && a.no_wait_valid);
++    pointer_state.fires=2;pgwt_discovery_refresh(d);a=handoff(d,PGWT_DH_POINTER);
++    CHECK("P1 pointer original baseline",a.pointer_fires_before==0 && a.pointer_fires_after==2 && !a.pointer_nonnull && a.pointer_snapshot_valid);
++    CHECK("P1 NULL fires remain observable",a.pointer_continuous.value && !d->counters.discovery_read_fail_total);
++    teardown(d);
++    for(unsigned unknown=0;unknown<2;++unknown) {
++        d=setup();d->pg_major_version=13;d->use_myproc=true;pointer_value=0;backend_role=0;
++        counter_wait_known=unknown==0;
++        CHECK("P1 pending NULL baseline",pgwt_discovery_attach(d,&d->backends.entries[0])<0);
++        counter_wait_known=true;counter_wait_baseline=unknown?0:1;backend_role=13;
++        CHECK("P1 no-word retries retain original accounting",pgwt_discovery_attach(d,&d->backends.entries[0])<0 &&
++            !d->discovery_admission->entries[0].final_attachment && !d->discovery_admission->entries[0].no_wait_word);
++        teardown(d);
++    }
++    d=setup();d->pg_major_version=13;d->use_myproc=true;pointer_value=0;backend_role=13;constant_clock=true;
++    CHECK("P1 equality cannot prove no-word",pgwt_discovery_attach(d,&d->backends.entries[0])<0 && !d->discovery_admission->entries[0].no_wait_word);
++    teardown(d);
++    d=setup();d->skel->bss->discovery_unknown_evidence=3;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);a=handoff(d,PGWT_DH_ATTEMPT);
++    CHECK("P1 kernel_evidence_count",a.kernel_evidence_count==3);
++    d->skel->bss->discovery_unknown_evidence=2;
++    struct pgwt_discovery_attempt event={.kind=PGWT_DH_POINTER};struct disc_context c={.d=d};disc_yield(&c,&event);
++    a=d->discovery_admission->records[d->discovery_admission->record_count-1];
++    CHECK("P1 evidence wrap unknown",!a.evidence_counts_known && a.kernel_evidence_count==3);
++    d->discovery_admission->user_evidence_count=UINT64_MAX;user_evidence(d->discovery_admission);disc_yield(&c,&event);
++    a=d->discovery_admission->records[d->discovery_admission->record_count-1];
++    CHECK("P1 user evidence no wrap",!a.evidence_counts_known && a.user_evidence_count==UINT64_MAX);
++    teardown(d);
++    d=setup();fail_word=true;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    a=handoff(d,PGWT_DH_ATTEMPT);
++    CHECK("P1 record local rejection counters",a.error==EACCES && a.counters_after.valid &&
++        a.counters_before.components[PGWT_C_WAIT_READ_FAIL].valid &&
++        a.counters_before.components[PGWT_C_WAIT_READ_FAIL].value==0 &&
++        a.counters_after.components[PGWT_C_WAIT_READ_FAIL].value==1 &&
++        a.counters_unchanged.known && !a.counters_unchanged.value && !a.failure_accounting.value);
++    teardown(d);
++    d=setup();struct pgwt_discovery_attempt before={0};size_t cursor=0;
++    CHECK("P1 stable cursor reserves census",pgwt_discovery_next(d,&cursor,&before) && before.kind==PGWT_DH_CENSUS && cursor==1);
++    struct pgwt_discovery_attempt event2={.kind=PGWT_DH_POINTER,.pid=42,.error=EIO};c=(struct disc_context){.d=d};
++    disc_yield(&c,&event2);d->discovery_admission->census_ready=true;
++    CHECK("P1 stable cursor after ready",pgwt_discovery_next(d,&cursor,&a) && a.pid==42 && a.error==EIO && cursor==2);
++    CHECK("P1 stable cursor exhaustion",!pgwt_discovery_next(d,&cursor,&a) && cursor==2);
++    teardown(d);
++}
++static void loss_and_stub_facts(void)
++{
++    for(unsigned way=0;way<3;++way) {
++        struct pgwt_daemon *d=setup();d->pg_major_version=13;d->use_myproc=true;pointer_value=0;backend_role=13;
++        CHECK("P1 observation arm",!pgwt_discovery_attach(d,&d->backends.entries[0]));
++        perf_count_missing=way==0;pointer_state_missing=way==1;perf_count_read_fail=way==2;
++        struct pgwt_discovery_pointer p;struct disc_context c={.d=d,.entry=&d->discovery_admission->entries[0]};
++        CHECK("P1 observation loss refuses snapshot",pointer_snapshot(&c,&p)<0);
++        CHECK("P1 missed/read observation carried",d->discovery_admission->user_evidence_count);
++        struct pgwt_discovery_attempt a=handoff(d,way==0?PGWT_DH_POINTER:PGWT_DH_FAULT);
++        if(way==0) CHECK("P1 demonstrated continuity break",c.entry->pointer_broken && a.pointer_continuous.known && !a.pointer_continuous.value);
++        else CHECK("P1 unreadability is not a demonstrated break",!c.entry->pointer_broken && !a.pointer_continuous.known && !a.pointer_snapshot_valid);
++        CHECK("P1 readable user evidence total",a.user_evidence_count>0 && a.evidence_counts_known);
++        teardown(d);
++    }
++    struct pgwt_daemon *d=setup();
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    detach_pointer(d,&d->discovery_admission->entries[0]);
++    CHECK("P1 detach carried",d->discovery_admission->entries[0].pointer_broken && d->discovery_admission->user_evidence_count &&
++        !d->discovery_admission->entries[0].pointer_enabled);
++    teardown(d);
++    d=setup();pointer_enable_fail=true;
++    (void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    CHECK("P1 failed re-arm counted",d->discovery_admission->user_evidence_count && d->counters.wp_attach_failures_total);
++    teardown(d);
++    d=setup();struct pgwt_discovery *s=d->discovery_admission;
++    s->record_count=s->record_capacity=PGWT_DISCOVERY_CAPACITY*5U;
++    struct pgwt_discovery_attempt event={.kind=PGWT_DH_POINTER};struct disc_context c={.d=d};disc_yield(&c,&event);
++    CHECK("P1 full append counted",s->handoff_lost && s->user_evidence_count==1 && d->counters.writer_push_fail_total==1);
++    struct pgwt_discovery_attempt a;size_t cursor=0;
++    CHECK("P1 append integrity independent",pgwt_discovery_next(d,&cursor,&a) && !a.handoff_complete && a.user_evidence_count==1);
++    s->record_count=s->record_capacity=0;disc_yield(&c,&event);
++    a=s->records[0];CHECK("P1 handoff failure sticky",!a.handoff_complete && a.user_evidence_count==1);
++    teardown(d);
++    d=setup();c=(struct disc_context){.d=d};event=(struct pgwt_discovery_attempt){.kind=PGWT_DH_ATTEMPT,.census_record=true};
++    disc_yield(&c,&event);CHECK("P1 contradictory tags rejected",d->discovery_admission->handoff_lost && !d->discovery_admission->record_count);
++    teardown(d);
++    d=setup();(void)pgwt_discovery_attach(d,&d->backends.entries[0]);
++    struct pgwt_discovery_checkpoint cut=pgwt_discovery_refresh_until(d,UINT64_MAX);
++    CHECK("P1 refresh stub PENDING",cut.reconciliation==PGWT_DREC_PENDING && cut.error==ENOSYS);
++    CHECK("P1 stub cannot certify census",!cut.reconciliation_ns && !cut.reconciliation_count && !cut.evidence_counts_known && !cut.handoff_complete);
++    struct pgwt_discovery_binding_snapshot binding;memset(&binding,0xff,sizeof(binding));
++    CHECK("P1 stub cannot certify membership",!pgwt_discovery_binding(d,d->discovery_admission->entries[0].binding_token,&binding));
++    struct pgwt_discovery_binding_snapshot zero={0};CHECK("P1 binding stub zeroes output",!memcmp(&binding,&zero,sizeof(binding)));
++    CHECK("P1 stub cannot certify shutdown",!cut.attempts_stopped);
++    uint64_t enabled=d->discovery_admission->entries[0].pointer_enabled_ns;
++    pgwt_discovery_stop_attempts(d);unsigned opens=watch_opens;
++    CHECK("P1 stop scan gate",pgwt_discovery_scan(d)==-EPERM);
++    CHECK("P1 stop attach gate",pgwt_discovery_attach(d,&d->backends.entries[0])==-EPERM);
++    CHECK("P1 stop internal retry gate",attach_entry(d,&d->backends.entries[0],&d->discovery_admission->entries[0])==-EPERM);
++    pgwt_discovery_refresh(d);pgwt_discovery_checkpoint(d,&cut);
++    CHECK("P1 actual stopped gate",cut.attempts_stopped && !cut.handoff_complete && cut.error==ENOSYS && watch_opens==opens);
++    CHECK("P1 stop leaves watches active",d->discovery_admission->entries[0].pointer_enabled && enabled==d->discovery_admission->entries[0].pointer_enabled_ns);
++    teardown(d);
++}
++int main(void)
++{
++    installed_facts();unknown_facts();binding_and_inventory_facts();numeric_facts();generation_facts();
++    no_word_and_accounting_facts();loss_and_stub_facts();
++    puts("P1 physical handoff: PASS (inventory, installation, resolution, generation, seed, finality, accounting, cursor, conservative stubs)");
++    return 0;
++}
+diff --git a/tests/discovery_headers_host.c b/tests/discovery_headers_host.c
+new file mode 100644
+index 00000000..c0e7f75e
+--- /dev/null
++++ b/tests/discovery_headers_host.c
+@@ -0,0 +1,70 @@
++/* Frozen section A must coexist with the consumer's tags and typedefs. */
++#ifdef PGWT_HEADERS_MERGE_FIRST
++#include "core/pgwt_discovery.h"
++#include "discovery_admission.h"
++#else
++#include "discovery_admission.h"
++#include "core/pgwt_discovery.h"
++#endif
++#include <assert.h>
++#include <stdio.h>
++
++#define TYPE(member, type) _Static_assert( \
++    _Generic(((struct pgwt_discovery_attempt *)0)->member, type: 1, default: 0), #member)
++#define U64(member) TYPE(member, uint64_t)
++#define U32(member) TYPE(member, uint32_t)
++#define FACT(member) TYPE(member, struct pgwt_producer_fact)
++#define BOOL(member) TYPE(member, bool)
++TYPE(kind, enum pgwt_discovery_handoff_kind);
++U64(binding_token); U64(failed_open); U64(gone_at); U64(identity_visible_at);
++U32(tid); U32(tgid); U32(parent); U32(postmaster); U64(fork_cookie);
++FACT(start_mono_known); FACT(namespaces); FACT(retained_binding);
++FACT(history_complete); FACT(producers_complete); FACT(journal_complete);
++FACT(journal_eligible); FACT(gone_esrch);
++U64(reconciliation_ns); U64(reconciliation_count);
++TYPE(reconciliation, enum pgwt_discovery_reconciliation);
++U64(accumulator); U64(on_cpu_ts); BOOL(seed_valid);
++FACT(install_before_enable); FACT(failure_accounting); FACT(voluntary_no_wrap);
++BOOL(attempts_ended); BOOL(claims_completed_coherence); BOOL(claims_completed_no_word);
++BOOL(pointer_snapshot_valid); U64(kernel_evidence_count); U64(user_evidence_count);
++BOOL(evidence_counts_known); BOOL(handoff_complete);
++
++#define SIGNATURE(name, type) _Static_assert(_Generic(&name, type: 1, default: 0), #name)
++SIGNATURE(pgwt_discovery_refresh_until, struct pgwt_discovery_checkpoint (*)(struct pgwt_daemon *, uint64_t));
++SIGNATURE(pgwt_discovery_checkpoint, void (*)(struct pgwt_daemon *, struct pgwt_discovery_checkpoint *));
++SIGNATURE(pgwt_discovery_binding, bool (*)(struct pgwt_daemon *, uint64_t, struct pgwt_discovery_binding_snapshot *));
++SIGNATURE(pgwt_discovery_stop_attempts, void (*)(struct pgwt_daemon *));
++SIGNATURE(pgwt_discovery_refresh, void (*)(struct pgwt_daemon *));
++SIGNATURE(pgwt_discovery_next, bool (*)(struct pgwt_daemon *, size_t *, struct pgwt_discovery_attempt *));
++
++_Static_assert(PGWT_PRODUCER_RUNNING == 2 && PGWT_PRODUCER_DENIED == 3 &&
++               PGWT_PRODUCER_MALFORMED == 4, "producer inactivity values preserved");
++_Static_assert(PGWT_DISC_RUNNING == 2 && PGWT_DISC_DENIED == 3 &&
++               PGWT_DISC_MALFORMED == 6, "consumer inactivity values preserved");
++_Static_assert(PGWT_DH_INVALID == 0 && PGWT_DH_CENSUS == 1 && PGWT_DH_INVENTORY == 2 &&
++               PGWT_DH_INSTALLED == 3 && PGWT_DH_NUMERIC == 4 && PGWT_DH_RESOLUTION == 5 &&
++               PGWT_DH_ATTEMPT == 6 && PGWT_DH_NO_WORD == 7 && PGWT_DH_POINTER == 8 &&
++               PGWT_DH_TERMINAL == 9 && PGWT_DH_END == 10 && PGWT_DH_FAULT == 11,
++               "frozen discriminator values");
++_Static_assert(PGWT_DREC_PENDING == 0 && PGWT_DREC_COMPLETE == 1 &&
++               PGWT_DREC_PERMANENT_FAILURE == 2, "frozen reconciliation values");
++_Static_assert(sizeof(((struct pgwt_discovery_pre_enable *)0)->cpu_ids) / sizeof(uint32_t) == MAX_CPUS,
++               "complete CPU set storage");
++_Static_assert(sizeof(((struct pgwt_discovery_pre_enable *)0)->pre_enable) /
++               sizeof(struct pgwt_discovery_ack) == MAX_CPUS, "complete immutable B storage");
++
++int main(void)
++{
++    struct pgwt_discovery_attempt producer = {0};
++    pgwt_discovery_attempt consumer = {0};
++    struct pgwt_discovery_checkpoint checkpoint = {0};
++    struct pgwt_discovery_binding_snapshot binding = {0};
++    struct pgwt_discovery_pre_enable generation = {0};
++    assert(producer.kind == PGWT_DH_INVALID && !producer.retained_binding.known);
++    assert(!checkpoint.reconciliation_ns && !checkpoint.evidence_counts_known);
++    assert(!binding.generations && !binding.generation_count);
++    assert(!generation.pre_enable_valid && !generation.pre_enable_completed_ns);
++    assert(!consumer.proof.known && !consumer.proof.truth);
++    puts("discovery headers: frozen declarations and zero/unknown defaults PASS");
++    return 0;
++}
+diff --git a/tests/test_discovery_admission.c b/tests/test_discovery_admission.c
+index 25379750..3a8b30ed 100644
+--- a/tests/test_discovery_admission.c
++++ b/tests/test_discovery_admission.c
+@@ -17,9 +17,10 @@ static int disable(void *v) { op(v,'D'); return 0; }
+ static int fence(void *v, struct pgwt_discovery_attempt *a)
+ {
+     struct schedule *s=v; op(s,'F');
+-    a->lifecycle_fenced=(struct pgwt_discovery_fact){true,!s->exit_replace};
+-    a->single_thread_history=(struct pgwt_discovery_fact){true,!s->two_threads};
+-    a->generations_fenced=(struct pgwt_discovery_fact){true,true};
++    a->lifecycle_fenced=(struct pgwt_producer_fact){true,!s->exit_replace};
++    a->single_thread_history=(struct pgwt_producer_fact){true,!s->two_threads};
++    a->generations_fenced=(struct pgwt_producer_fact){true,true};
++    a->failure_accounting=a->counters_unchanged=a->voluntary_no_wrap=(struct pgwt_producer_fact){true,true};
+     return s->exit_replace ? -1 : 0;
+ }
+ static int status(void *v, struct pgwt_discovery_status *st)
+@@ -33,9 +34,9 @@ static enum pgwt_discovery_inactive inactive(void *v)
+ {
+     struct schedule *s=v; op(s,'S');
+     bool second=(s->proofs++%2)==1;
+-    if (second && s->denied) return PGWT_DISC_DENIED;
++    if (second && s->denied) return PGWT_PRODUCER_DENIED;
+     if (second && s->reverse) ++s->voluntary; /* transition and its reverse */
+-    if (s->busy) return PGWT_DISC_RUNNING;
++    if (s->busy) return PGWT_PRODUCER_RUNNING;
+     return PGWT_DISC_INACTIVE;
+ }
+ static int resolve(void *v,uint64_t *a)
+@@ -51,7 +52,9 @@ static int seed(void *v,struct pgwt_discovery_attempt *a,bool quiet)
+     *st=(struct pgwt_pid_state){.last_event=quiet?a->X:0,.last_ts=quiet?a->t:0,
+         .on_cpu_ts=0,.cpu_ns_total=0,.last_cpu_ns=0,.cpu_base_valid=quiet,.wp_live=quiet};
+     a->attachment_generation=s->seeds; a->cpu_base=0; a->cpu_base_valid=quiet;
+-    a->producer_owned=(struct pgwt_discovery_fact){true,true}; return 0;
++    a->seed_valid=true;a->accumulator=0;a->on_cpu_ts=0;
++    a->install_before_enable=(struct pgwt_producer_fact){true,true};
++    a->producer_owned=(struct pgwt_producer_fact){true,true}; return 0;
+ }
+ static int enable(void *v)
+ {
+@@ -68,11 +71,11 @@ static void yield(void *v,const struct pgwt_discovery_attempt *a)
+ static struct pgwt_discovery_attempt initial(void)
+ {
+     struct pgwt_discovery_attempt a={.pid=42,.cookie=PGWT_DISCOVERY_FIRST,
+-        .maximum_attempts=4,.armed_addr=100};
+-    a.fd_bound=a.memory_bound=a.postmaster_member=a.inventory_bound=
++        .maximum_attempts=4,.armed_addr=100,.binding_token=1};
++    a.retained_binding=a.namespaces=a.fd_bound=a.memory_bound=a.postmaster_member=a.inventory_bound=
+         a.no_observed_fork=a.identity_immutable=a.identity_visible=
+         a.address_qualified=a.no_foreign_writer=a.relocation_observed=
+-        a.cpu_enrolled=a.inactivity_interface=(struct pgwt_discovery_fact){true,true};
++        a.cpu_enrolled=a.inactivity_interface=(struct pgwt_producer_fact){true,true};
+     return a;
+ }
+ static int run(struct schedule *s,struct pgwt_discovery_attempt *a)
+diff --git a/tests/test_discovery_handoff.py b/tests/test_discovery_handoff.py
+new file mode 100755
+index 00000000..7362ed6f
+--- /dev/null
++++ b/tests/test_discovery_handoff.py
+@@ -0,0 +1,113 @@
++#!/usr/bin/env python3
++"""P1 physical handoff cases and product mutants at their named assertions."""
++from pathlib import Path
++import tempfile
++from test_discovery_producer import ROOT, compile_run, daemon_source
++from transport_producers_host import replace_once, function
++
++
++def source(adapter):
++    return daemon_source(adapter).replace('#include "discovery_daemon_cases.h"',
++        '#define main legacy_discovery_cases_main\n#include "discovery_daemon_cases.h"\n'
++        '#undef main\n#include "discovery_handoff_cases.h"')
++
++
++def main():
++    engine = (ROOT / 'src/discovery_attempt.c').read_text()
++    adapter = (ROOT / 'src/discovery_producer.c').read_text()
++    with tempfile.TemporaryDirectory(prefix='pgwt-discovery-handoff-') as temp:
++        directory = Path(temp)
++        def run(name, body=adapter, bracket=engine):
++            return compile_run(directory, name, [('engine', bracket), ('daemon', source(body))])
++        result = run('production')
++        assert result.returncode == 0, result.stdout + result.stderr
++        print(result.stdout, end='')
++        mutants = []
++        def emitted(name, assignment, assertion, predicate='true'):
++            mutants.append((name, replace_once(adapter, '    s->records[s->record_count++] = record;',
++                f'    if ({predicate}) {{ {assignment} }}\n    s->records[s->record_count++] = record;'), assertion))
++        emitted('premature-history', 'record.history_complete = (struct pgwt_producer_fact){true,true};', 'P1 unknown history_complete', 'record.kind == PGWT_DH_POINTER && record.maximum_attempts')
++        emitted('premature-finality', 'record.attempts_ended = true;', 'P1 unknown finality', 'record.kind == PGWT_DH_POINTER && record.maximum_attempts')
++        emitted('premature-seed', 'record.seed_valid = true;', 'P1 unknown seed', 'record.kind == PGWT_DH_POINTER && record.maximum_attempts')
++        emitted('premature-coherence', 'record.claims_completed_coherence = true;', 'P1 unknown completed claims', 'record.kind == PGWT_DH_POINTER && record.maximum_attempts')
++        emitted('premature-pointer-snapshot', 'record.pointer_snapshot_valid = true;', 'P1 unknown pointer counts', 'record.kind == PGWT_DH_POINTER && record.maximum_attempts')
++        emitted('counter-vectors-swapped', 'struct pgwt_counter_vector swap=record.counters_before; record.counters_before=record.counters_after; record.counters_after=swap;', 'P1 record local rejection counters', 'record.kind == PGWT_DH_ATTEMPT && record.error')
++        emitted('handoff-restored', 'record.handoff_complete = true;', 'P1 handoff failure sticky')
++        emitted('wrap-known', 'record.evidence_counts_known = true;', 'P1 evidence wrap unknown')
++        emitted('kind', 'record.kind = PGWT_DH_INVALID;', 'P1 required record kind')
++        emitted('binding-token', 'record.binding_token = 0;', 'P1 binding_token')
++        emitted('cookie-reservation', 'record.cookie = 0;', 'P1 reservation')
++        emitted('installation-time', 'record.identity_visible_at = 0;', 'P1 identity_visible_at')
++        for member in ('tid', 'tgid', 'parent', 'postmaster'):
++            emitted(member, f'record.{member} = 0;', 'P1 task identifiers', 'record.kind == PGWT_DH_ATTEMPT')
++        for member in ('namespaces', 'retained_binding', 'history_complete', 'producers_complete',
++                       'journal_complete', 'install_before_enable', 'failure_accounting', 'voluntary_no_wrap'):
++            emitted(member, f'record.{member}.known = false;', 'P1 ' + member)
++        for member in ('reconciliation_ns', 'reconciliation_count'):
++            emitted(member, f'record.{member} = 0;', 'P1 ' + member)
++        emitted('reconciliation-state', 'record.reconciliation = PGWT_DREC_PENDING;', 'P1 reconciliation')
++        emitted('accumulator', 'record.accumulator = 1;', 'P1 accumulator', 'record.kind == PGWT_DH_ATTEMPT && record.quiet_valid')
++        emitted('on-cpu', 'record.on_cpu_ts = 1;', 'P1 on_cpu_ts', 'record.kind == PGWT_DH_ATTEMPT && record.quiet_valid')
++        emitted('seed-valid', 'record.seed_valid = false;', 'P1 seed_valid')
++        emitted('finality', 'record.attempts_ended = false;', 'P1 attempts_ended')
++        emitted('completed-coherence', 'record.claims_completed_coherence = false;', 'P1 claims_completed_coherence')
++        emitted('evidence-validity', 'record.evidence_counts_known = false;', 'P1 evidence_counts_known')
++        emitted('handoff-integrity', 'record.handoff_complete = false;', 'P1 handoff_complete')
++        emitted('failed-open', 'record.failed_open = 0;', 'P1 failed_open')
++        emitted('gone-time', 'record.gone_at = 0;', 'P1 gone_at')
++        emitted('journal-terminal-match', 'record.terminal_match.value = false;', 'P1 terminal_match', 'record.kind == PGWT_DH_RESOLUTION')
++        emitted('gone-esrch', 'record.gone_esrch.value = false;', 'P1 gone_esrch')
++        emitted('journal-eligibility', 'record.journal_eligible.known = false;', 'P1 G journal ineligibility')
++        emitted('exact-start', 'record.start_mono_known.value = false;', 'P1 start_mono_known')
++        emitted('fork-cookie', 'record.fork_cookie = 0;', 'P1 fork_cookie')
++        emitted('pointer-snapshot', 'record.pointer_snapshot_valid = false;', 'P1 pointer_snapshot_valid')
++        emitted('completed-no-word', 'record.claims_completed_no_word = false;', 'P1 claims_completed_no_word')
++        emitted('counters-after', 'record.counters_after = (struct pgwt_counter_vector){0};', 'P1 record-local counters')
++        emitted('invent-tick-start', 'record.lifetime_start_ns = record.start_upper_ns; record.start_mono_known = (struct pgwt_producer_fact){true,true};', 'P1 unknown start_mono_known', 'record.kind == PGWT_DH_INVENTORY')
++        emitted('fresh-comparison', 'record.address_compared.known = false;', 'P1 fresh address_compared', 'record.kind == PGWT_DH_ATTEMPT && record.attempt == 4')
++        for member in ('pointer_fires_before', 'pointer_fires_after', 'pointer_nonnull'):
++            emitted(member, f'record.{member} = 1;', 'P1 pointer_snapshot_valid', 'record.kind == PGWT_DH_NO_WORD')
++        emitted('pointer-original-baseline', 'record.pointer_fires_before = record.pointer_fires_after;', 'P1 pointer original baseline', 'record.kind == PGWT_DH_POINTER')
++        emitted('kernel-evidence', 'record.kernel_evidence_count = 0;', 'P1 kernel_evidence_count')
++        emitted('user-evidence', 'record.user_evidence_count = 0;', 'P1 user evidence no wrap')
++        for name, old, new, assertion in (
++            ('token-overflow', 'if (s->next_binding_token == UINT64_MAX)', 'if (false)', 'P1 binding token no wrap'),
++            ('reserve-before-install', 'e->cookie = pgwt_discovery_allocate(&s->next_cookie, &s->exhausted);', 'e->cookie = 0;', 'P1 cookie reserved at bind'),
++            ('reused-token', 'entry->binding_token = ++s->next_binding_token;', 'entry->binding_token = 1; ++s->next_binding_token;', 'P1 token reuse prevention'),
++            ('journal-reservation', 'entry->kernel_only = entry->excluded = true;', 'entry->kernel_only = entry->excluded = true; entry->cookie = 0;', 'P1 journal-only inventory'),
++            ('seed-measurement', 'seed.cpu_ns_total = cpu.total;', 'seed.cpu_ns_total = 0;', 'P1 measured seed accumulator'),
++            ('immutable-B', '            a->producers_fenced_ns = disc_now(c);', '            a->producers_fenced_ns = disc_now(c);\n            if (c->entry && c->entry->generation_count>1) for(size_t j=0;j<ncpu;++j) c->entry->generations[1].pre_enable[j] = acks[pgwt_percpu_transport_cpu_id(d, j)];', 'P1 immutable B'),
++            ('detach', 'if (entry->pointer_enabled) pointer_break(d, entry);', 'if (false) pointer_break(d, entry);', 'P1 detach carried'),
++            ('cursor', '    size_t offset = 1;', '    size_t offset = 0;', 'P1 stable cursor after ready'),
++            ('stub-error', '.error = ENOSYS};', '.error = 0};', 'P1 refresh stub PENDING'),
++            ('generation-id', 'b->attachment_generation = a->attachment_generation;', 'b->attachment_generation = 1;', 'P1 attachment_generation'),
++            ('cpu-membership', 'b->cpu_count = a->cpu_count;', 'b->cpu_count = 1;', 'P1 CPU membership'),
++            ('cpu-index', 'memcpy(b->cpu_ids, a->cpu_ids, a->cpu_count * sizeof(*b->cpu_ids));', 'memset(b->cpu_ids, 0, sizeof(b->cpu_ids));', 'P1 CPU membership'),
++            ('pre-enable-vector', 'memcpy(b->pre_enable, a->producers_after, a->cpu_count * sizeof(*b->pre_enable));', 'memset(b->pre_enable, 0, sizeof(b->pre_enable));', 'P1 pre_enable'),
++            ('pre-enable-time', '    if (!b->pre_enable_valid) return -1;', '    if (!b->pre_enable_valid) return -1;\n    b->pre_enable_completed_ns = 0;', 'P1 pre_enable_completed_ns'),
++            ('pre-enable-valid', '    if (!b->pre_enable_valid) return -1;', '    if (!b->pre_enable_valid) return -1;\n    b->pre_enable_valid = false;', 'P1 pre_enable_valid'),
++            ('lost-fire', 'count_after == UINT64_MAX || observed.fires != count_after || observed.nonnull == UINT64_MAX', 'false', 'P1 observation loss refuses snapshot'),
++            ('append-total', 's->handoff_lost = true; user_evidence(s); c->d->counters.writer_push_fail_total++; return;', 's->handoff_lost = true; c->d->counters.writer_push_fail_total++; return;', 'P1 full append counted'),
++            ('rejected-fence-totals-dropped', 'a->address_qualified = fact(false); return incomplete_cut(c, a);', 'a->address_qualified = fact(false); return -1;', 'P1 rejected fence retains numeric totals'),
++            ('no-word-rebased-counters', 'before = entry->pointer_counters_before; a.counters_before = before;', 'before = pgwt_daemon_counter_vector(d); a.counters_before = before;', 'P1 no-word retries retain original accounting'),
++            ('strict-after-enable', 'a.pointer_read_ns > a.e &&', 'a.pointer_read_ns >= a.e &&', 'P1 equality cannot prove no-word'),
++            ('stub-pending', '.reconciliation = PGWT_DREC_PENDING,\n        .attempts_stopped', '.reconciliation = PGWT_DREC_COMPLETE,\n        .attempts_stopped', 'P1 refresh stub PENDING'),
++            ('stub-fence', '.error = ENOSYS};', '.reconciliation_ns = 1, .error = ENOSYS};', 'P1 stub cannot certify census'),
++            ('stop-gate', 'd->discovery_admission->attempts_stopped = true;', 'd->discovery_admission->attempts_stopped = false;', 'P1 stop scan gate'),
++        ):
++            # Append has two distinct allocation failure sites with identical accounting.
++            mutant = adapter.replace(old, new) if name == 'append-total' else replace_once(adapter, old, new)
++            mutants.append((name, mutant, assertion))
++        binding = function(adapter, 'pgwt_discovery_binding')
++        mutants.append(('stub-membership', replace_once(adapter, binding, binding.replace('return false;', 'return true;')), 'P1 stub cannot certify membership'))
++        mutants.append(('stub-zero-output', replace_once(adapter, 'if (out) memset(out, 0, sizeof(*out));', '(void)out;'), 'P1 binding stub zeroes output'))
++        mutants.append(('stub-shutdown', replace_once(adapter, '.attempts_stopped = d && d->discovery_admission && d->discovery_admission->attempts_stopped,', '.attempts_stopped = true,'), 'P1 stub cannot certify shutdown'))
++        for name, body, assertion in mutants:
++            result = run(name, body)
++            assert result.returncode and 'FAIL ' + assertion + '\n' in result.stderr, (name, assertion, result.stdout, result.stderr[-5000:])
++            print(f'P1 mutant {name}: RED ({assertion})')
++        print(f'P1 handoff mutants: {len(mutants)}/{len(mutants)} RED at intended assertions')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tests/test_discovery_headers.py b/tests/test_discovery_headers.py
+new file mode 100755
+index 00000000..da68a4b8
+--- /dev/null
++++ b/tests/test_discovery_headers.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python3
++"""Compile the exact producer/merge header pair in both inclusion orders."""
++import os
++from pathlib import Path
++import shlex
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def main():
++    with tempfile.TemporaryDirectory(prefix='pgwt-discovery-headers-') as temporary:
++        for merge_first in (False, True):
++            binary = str(Path(temporary) / 'headers')
++            command = shlex.split(os.environ.get('CC', 'cc')) + [
++                '-std=c11', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Isrc',
++                'tests/discovery_headers_host.c', '-o', binary]
++            if merge_first:
++                command.append('-DPGWT_HEADERS_MERGE_FIRST')
++            subprocess.run(command, cwd=ROOT, check=True)
++            subprocess.run([binary], cwd=ROOT, check=True)
++    print('discovery headers: 2/2 inclusion orders PASS')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tests/test_discovery_producer.py b/tests/test_discovery_producer.py
+index 46f03b01..8b8f991b 100644
+--- a/tests/test_discovery_producer.py
++++ b/tests/test_discovery_producer.py
+@@ -97,14 +97,14 @@ def main():
+             assert output.count('DISCOVERY-PENDING ') == 1, (number, output)
+             assert output.count('DISCOVERY-ATTEMPT ') == 1, (number, output)
+             assert f'qualification_reason={reason}' in output, (number, output)
+-            print(f'qualifier refusal {number}: {reason}: startup=1 pending=1 cookie=0 attempt=0 loss=0 setup=0')
++            print(f'qualifier refusal {number}: {reason}: startup=1 pending=1 cookie=reserved attempt=0 loss=0 setup=0')
+         mutants = []
+         mutants.append(('counter-state-letter-only-witness', replace_once(replace_once(engine,
+-            'a->S0 = o->inactive(o->ctx);', 'a->S0 = o->inactive(o->ctx); if (a->S0 == PGWT_DISC_RUNNING) a->S0 = PGWT_DISC_INACTIVE;'),
+-            'a->S1 = o->inactive(o->ctx);', 'a->S1 = o->inactive(o->ctx); if (a->S1 == PGWT_DISC_RUNNING) a->S1 = PGWT_DISC_INACTIVE;'),
++            'a->S0 = o->inactive(o->ctx);', 'a->S0 = o->inactive(o->ctx); if (a->S0 == PGWT_PRODUCER_RUNNING) a->S0 = PGWT_DISC_INACTIVE;'),
++            'a->S1 = o->inactive(o->ctx);', 'a->S1 = o->inactive(o->ctx); if (a->S1 == PGWT_PRODUCER_RUNNING) a->S1 = PGWT_DISC_INACTIVE;'),
+             'state letter counters alone refuse busy'))
+         mutants.append(('denied-read-passes', replace_once(engine,
+-            'a->S1 = o->inactive(o->ctx);', 'a->S1 = o->inactive(o->ctx); if (a->S1 == PGWT_DISC_DENIED) a->S1 = PGWT_DISC_INACTIVE;'),
++            'a->S1 = o->inactive(o->ctx);', 'a->S1 = o->inactive(o->ctx); if (a->S1 == PGWT_PRODUCER_DENIED) a->S1 = PGWT_DISC_INACTIVE;'),
+             'S1 denied refuses quiet'))
+         mutants.append(('skip-in-bracket-address-compare', replace_once(engine,
+             'a->resolved_addr != 0 && a->resolved_addr == a->armed_addr', 'a->resolved_addr != 0'),
+@@ -152,6 +152,26 @@ def main():
+             '    uint64_t address = 0;\n    if (disc_resolve(&c, &address)) goto pending;\n'
+             '    if (!entry->pointer_enabled) {')
+         adapter_new = [
++            ('P1-late-fence-consumes-entry-gate', replace_once(adapter,
++                '    a.kind = PGWT_DH_POINTER;\n    be->wp_fd',
++                '    entry->attempted = true;\n    a.kind = PGWT_DH_POINTER;\n    be->wp_fd'),
++                'late setup fence preserves entry gate'),
++            ('P1-fence-spends-setup-budget', replace_once(adapter,
++                '    a.attempts_ended = entry->attempts_ended || entry->attempted;',
++                '    if (!a.error) ++entry->setup_tries;\n    a.attempts_ended = entry->attempts_ended || entry->attempted;'),
++                'fence only refusal preserves setup budget'),
++            ('P1-setup-finality-dropped', replace_once(adapter,
++                'record.attempts_ended |= c->entry->attempts_ended;',
++                'record.attempts_ended = false;'), 'setup exhaustion reports finality'),
++            ('P1-pinned-exit-read-counted', adapter.replace(
++                'if (!disc_status(c, &st) && !st.terminal && st.tgid == c->entry->pid)',
++                'if (true)', 1), 'exiting pinned read is not loss'),
++            ('P1-PG17-qualification-skipped', replace_once(adapter,
++                'if (d->pg_major_version != 17 && d->pg_major_version != 18) return;',
++                'if (d->pg_major_version != 18) return;'), 'PG17 local address qualifies'),
++            ('P1-PG17-local-watch-skipped', adapter.replace(
++                'if (c->d->pg_major_version != 17 && c->d->pg_major_version != 18) return 0;',
++                'if (c->d->pg_major_version != 18) return 0;', 1), 'PG17 local exit word watched'),
+             ('A-local-private-check', replace_once(adapter,
+                 'if (!private_executable_word(maps, &s->executable, s->address_verdict.address, s->local_bss_start))',
+                 'if (false)'), 'unqualified lifetime remains pending'),
+@@ -190,7 +210,7 @@ def main():
+                 'ENOENT is not a gone proof'),
+             ('G-with-changed-lifecycle-class', replace_once(adapter,
+                 'now.value != s->lifecycle_baseline[i].value', 'false'),
+-                'G refuses changed lifecycle class'),
++                'each lifecycle class change invalidates census'),
+             ('NULL-role-proof-skipped', replace_once(adapter,
+                 'if (a.permanent_role_proved.value && a.pointer_continuous.value',
+                 'if (true && a.pointer_continuous.value'), 'NULL role proof is mandatory'),
+@@ -205,12 +225,12 @@ def main():
+                 'if (pgwt_watchpoint_enable(entry->local_fd))', 'if (false)'), 'local word enabled before pointer'),
+             ('unreadable-lifecycle-class-accepted', replace_once(adapter,
+                 'if (!now.valid || now.value !=', 'if (false || now.value !='),
+-                'G requires readable lifecycle class'),
++                'unknown lifecycle class invalidates census'),
+             ('J-ignores-fork-provenance', replace_once(adapter,
+                 '!e->life.fork_ns && !e->life.fork_cookie;', 'true;'),
+                 'J reconciles fork provenance first'),
+             ('R-forgets-fork-route', replace_once(adapter,
+-                'if (still_bound && (!member || fork || (before && bind_inventory', 'if (still_bound && (!member || false || (before && bind_inventory'),
++                'if (still_bound && (!member || fork || before))', 'if (still_bound && (!member || false || before))'),
+                 'R preserves valid fork route'),
+             ('history-cache-removed', replace_once(adapter,
+                 'if (s->progress_cached && !memcmp(before, s->last_progress, bytes))',
+diff --git a/tests/test_discovery_producer_live.py b/tests/test_discovery_producer_live.py
+index cd1ca94c..38e8d9d2 100644
+--- a/tests/test_discovery_producer_live.py
++++ b/tests/test_discovery_producer_live.py
+@@ -46,7 +46,8 @@ def connection(directory, port):
+ 
+ def rows(text):
+     return [dict(field.split('=', 1) for field in line.split()[1:])
+-            for line in text.splitlines() if line.startswith('DISCOVERY-ATTEMPT ')]
++            for line in text.splitlines() if line.startswith(
++                ('DISCOVERY-ATTEMPT ', 'DISCOVERY-NUMERIC ', 'DISCOVERY-RESOLUTION '))]
+ 
+ 
+ def wait_until(predicate, deadline, label):
+@@ -129,15 +130,15 @@ def assert_no_faults(log, label):
+ 
+ def unchanged_through_ticks(trace, log, before, label):
+     # The original defect adds one loss on every timer tick. Observe more
+-    # than two full seconds of the daemon's monotonic uptime, without
++    # than two full default five-second display intervals, without
+     # retrying an assertion or forgiving a changed counter.
+     start = ctl(trace)['uptime_s']
+     def observed():
+         after = counter_vector(trace)
+         assert after == before, (label, 'counter vector changed', before, after)
+         assert_no_faults(log, label)
+-        return after if ctl(trace)['uptime_s'] >= start + 3 else None
+-    return wait_until(observed, time.monotonic() + 8, label + ' spans timer ticks')
++        return after if ctl(trace)['uptime_s'] >= start + 11 else None
++    return wait_until(observed, time.monotonic() + 16, label + ' spans timer ticks')
+ 
+ 
+ def fork_exit_arm(proc, log, trace, directory, port, major):
+@@ -183,7 +184,9 @@ def fork_exit_arm(proc, log, trace, directory, port, major):
+         client.close()
+ # Frozen expectations for the provisioned PGDG binaries, independent of the
+ # product's verdict. A refusal on either required build is a test failure.
+-QUALIFIED_PG18 = {
++QUALIFIED_LOCAL_BUILDS = {
++    '0ca08f409ae0811749ed06717a12629d6b3abedc': 'EL8 PGDG 17',
++    'b37412a2a5e298f2517d4732a7bf0761b8fe373d': 'Ubuntu PGDG 17',
+     'b2ad346d6ccd2c3c7ac4fb609fcf73b1e8c9ec13': 'Ubuntu PGDG 18.6-1.pgdg24.04+2',
+     'ad6770023ce995db8b3d84a4e416f0d32398fe82': 'EL8 PGDG 18.6',
+ }
+@@ -195,7 +198,7 @@ def binary_evidence(pm):
+     contents = binary.read_bytes()
+     notes = subprocess.check_output(['readelf', '-n', str(binary)], text=True)
+     build_id = re.search(r'Build ID: ([0-9a-f]+)', notes).group(1)
+-    assert build_id in QUALIFIED_PG18, ('unprovisioned PG18 build needs an explicit expectation', build_id, binary)
++    assert build_id in QUALIFIED_LOCAL_BUILDS, ('unprovisioned local-word build needs an explicit expectation', build_id, binary)
+     symbols = {}
+     for line in subprocess.check_output(['nm', '-D', str(binary)], text=True).splitlines():
+         fields = line.split()
+@@ -254,7 +257,7 @@ def binary_evidence(pm):
+             assert (child_first[0].split('-')[0], child_first[3:5]) == (first[0].split('-')[0], first[3:5])
+         except FileNotFoundError:
+             pass
+-    print(f'PG18 ADDRESS-EVIDENCE binary={binary} build_id={build_id} address=0x{address:x} '
++    print(f'PG{binary.parent.parent.name} ADDRESS-EVIDENCE binary={binary} build_id={build_id} address=0x{address:x} '
+           f'load=0x{load:x} elf_base=0x{elf_base:x} initial=0x{initial:x} postmaster=0x{actual:x} '
+           f'writable_segment={[(hex(bias+p[3]),hex(bias+p[3]+p[6])) for p in writable]} '
+           f'private_mapping={target} first_mapping={first[:5]} reset=0x{reset:x} displacements={references} '
+@@ -273,7 +276,7 @@ def assert_verdict(text, expected):
+ def exercise(major, temporary, interposer):
+     pm = find_postmaster(pg_version=major)
+     assert pm, f'PG{major} postmaster required'
+-    address_expected = binary_evidence(pm) if major == 18 else None
++    address_expected = binary_evidence(pm) if major in (17, 18) else None
+     env = {**os.environ, 'PGPORT': str(5400 + major)}
+     kernel = os.uname().release
+     if not (kernel.startswith('4.18.') and '.el8' in kernel):
+@@ -292,7 +295,7 @@ def exercise(major, temporary, interposer):
+                time.monotonic() + 10, 'busy client executing before bracket')
+     expected = {int(p) for p in Path(f'/proc/{pm}/task/{pm}/children').read_text().split()}
+     loggers = set()
+-    if major == 18:
++    if major in (17, 18):
+         for pid in expected:
+             try:
+                 title = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0', 1)[0].decode().rstrip()
+@@ -334,7 +337,7 @@ def exercise(major, temporary, interposer):
+                        time.monotonic() + 30, 'discovery census finishes')
+             text = log.read_text()
+             assert 'DISCOVERY-CENSUS ' in text, text[-12000:]
+-            if major == 18:
++            if major in (17, 18):
+                 assert_verdict(text, address_expected)
+             attempts = rows(text)
+             assert any(int(row['attempt']) >= 1 for row in attempts), ('physical attempts required', attempts)
+@@ -347,8 +350,8 @@ def exercise(major, temporary, interposer):
+             for pid in loggers:
+                 final = [r for r in attempts if int(r['pid']) == pid and r['final'] == '1']
+                 assert len(final) == 1 and final[0]['quiet'] == '1', ('permanent logger dummy bracket', pid, final, text)
+-            if major == 18:
+-                print(f'PG18 PERMANENT-LOGGER checked={len(loggers)}', flush=True)
++            if major in (17, 18):
++                print(f'PG{major} PERMANENT-LOGGER checked={len(loggers)}', flush=True)
+             for pid in expected - {vanished[1]}:
+                 assert any(int(row['pid']) == pid and row['final'] == '1' for row in attempts), ('every surviving candidate has final attachment', pid, attempts)
+             busy_rows = [r for r in attempts if int(r['pid']) == busy[1]]
+@@ -358,6 +361,9 @@ def exercise(major, temporary, interposer):
+             resolved = [r for r in attempts if int(r['pid']) == vanished[1] and
+                         r.get('numeric') == '1' and r.get('resolution') == '1']
+             assert len(resolved) == 1, ('enumeration exit resolved by exact J witness', vanished[1], attempts)
++            observed_number = [r for r in attempts if int(r['pid']) == vanished[1] and r.get('kind') == '4']
++            assert len(observed_number) == 1 and observed_number[0]['cookie'] == '0', ('numeric observation precedes J', vanished[1], attempts)
++            assert resolved[0]['kind'] == '5', ('J resolution has authoritative tag', resolved)
+             census = [line for line in text.splitlines() if line.startswith('DISCOVERY-CENSUS ')][-1]
+             # The deliberately spinning client takes the fresh-record route;
+             # this producer-only diagnostic leaves it pending until DATA is
+@@ -377,11 +383,11 @@ def exercise(major, temporary, interposer):
+                        time.monotonic() + 10, 'normal disconnect terminal reconciled')
+             after = counter_vector(root / 'trace')
+             assert before == after, ('normal disconnect changed counter vector', before, after)
+-            if major == 18:
++            if major in (17, 18):
+                 observation = {field: map_value('discovery_point', old, field) for field in
+                                ('relocated', 'old_word', 'local_word', 'exit_in_progress')}
+                 assert observation == dict(relocated=1, old_word=0, local_word=0, exit_in_progress=1), observation
+-                print(f'PG18 TEARDOWN-RELOCATION pid={old} {observation}', flush=True)
++                print(f'PG{major} TEARDOWN-RELOCATION pid={old} {observation}', flush=True)
+             assert_no_faults(log, f'PG{major} normal disconnect')
+             print(f'PG{major} NORMAL-DISCONNECT pid={old} counter_vector_before={before} after={after}', flush=True)
+             # Stop the consumer and its helpers. A wrong EXIT filter can then
+@@ -411,11 +417,11 @@ def exercise(major, temporary, interposer):
+             wait_until(lambda: not Path(f'/proc/{old}').exists(), time.monotonic() + 10, 'owned backend exits')
+             wait_until(lambda: f'DISCOVERY-TERMINAL pid={old} ' in log.read_text(),
+                        time.monotonic() + 10, 'kill terminal reconciled')
+-            if major == 18:
++            if major in (17, 18):
+                 observation = {field: map_value('discovery_point', old, field) for field in
+                                ('relocated', 'old_word', 'local_word', 'exit_in_progress')}
+                 assert observation == dict(relocated=1, old_word=0, local_word=0, exit_in_progress=1), observation
+-                print(f'PG18 KILL-RELOCATION pid={old} {observation}', flush=True)
++                print(f'PG{major} KILL-RELOCATION pid={old} {observation}', flush=True)
+             after = counter_vector(root / 'trace')
+             assert before == after, ('kill arm changed counter vector', before, after)
+             assert_no_faults(log, f'PG{major} SIGTERM')
+@@ -441,11 +447,11 @@ def exercise(major, temporary, interposer):
+                        time.monotonic() + 10, 'last admitted client disconnect reconciled')
+             after = counter_vector(root / 'trace')
+             assert before == after, ('last disconnect changed counter vector', before, after)
+-            if major == 18:
++            if major in (17, 18):
+                 observation = {field: map_value('discovery_point', last, field) for field in
+                                ('relocated', 'old_word', 'local_word', 'exit_in_progress')}
+                 assert observation == dict(relocated=1, old_word=0, local_word=0, exit_in_progress=1), observation
+-                print(f'PG18 LAST-DISCONNECT-RELOCATION pid={last} {observation} before={before} after={after}', flush=True)
++                print(f'PG{major} LAST-DISCONNECT-RELOCATION pid={last} {observation} before={before} after={after}', flush=True)
+             final_text = log.read_text()
+             assert all(row['fault'] == '0' for row in rows(final_text)), ('no fault record', final_text)
+             census = [line for line in final_text.splitlines() if line.startswith('DISCOVERY-CENSUS ')][-1]
+@@ -508,7 +514,7 @@ def role_qualification(major, temporary, reuse=False):
+                        stdout=subprocess.DEVNULL, check=True, cwd=base)
+         started = True
+         pm = int((data / 'postmaster.pid').read_text().splitlines()[0])
+-        address_expected = binary_evidence(pm) if major == 18 else None
++        address_expected = binary_evidence(pm) if major in (17, 18) else None
+         binary = str(pg / 'postgres')
+         symbols = {}
+         for line in subprocess.check_output(['nm', '-D', binary], text=True).splitlines():
+@@ -693,6 +699,7 @@ def report_older(major, temporary):
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument('--pid', type=int)  # runner target; both qualified layouts are required
++    parser.add_argument('--major', type=int, choices=(13, 17, 18), help='qualify one major')
+     parser.add_argument('--report-older', action='store_true', help='measure PG16/17 without certifying their behavior')
+     args = parser.parse_args()
+     assert sys.platform == 'linux' and os.geteuid() == 0, 'Linux root live tier required'
+@@ -706,8 +713,10 @@ def main():
+         interposer = temporary / 'enum-schedule.so'
+         subprocess.run(['cc', '-shared', '-fPIC', '-Wall', '-Wextra', '-Werror',
+                         str(ROOT / 'tests/discovery_enum_interpose.c'), '-ldl', '-o', str(interposer)], check=True)
+-        for major in (13, 18):
++        for major in ((args.major,) if args.major else (13, 17, 18)):
+             exercise(major, temporary, interposer)
++        if args.major:
++            return
+         for major in (13, 18):
+             role_qualification(major, temporary)
+         # Each capture starts with fresh discovery lifetimes. A killed role
+diff --git a/tests/unit_tests.list b/tests/unit_tests.list
+index c8bc77e6..39d3831b 100644
+--- a/tests/unit_tests.list
++++ b/tests/unit_tests.list
+@@ -1157,3 +1157,8 @@ test_exact_perf_coverage.py
+ # Discovery producer schedules and built mutants (host only).
+ test_discovery_admission
+ test_discovery_producer.py
++
++# Frozen discovery producer declarations coexist with the merge header. Refs #988.
++test_discovery_headers.py
++# Discovery P1 physical handoff facts, conservative linkage and mutation schedules. Refs #988.
++test_discovery_handoff.py
