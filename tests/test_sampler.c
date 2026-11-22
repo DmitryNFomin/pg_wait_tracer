@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <grp.h>
+#include <pthread.h>
 #include <linux/capability.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -1153,14 +1154,14 @@ static void test_parse_nice(void)
 
 static void test_sched_request_unset(void)
 {
-    printf("--- sched_request: unset leaves scheduling alone ---\n");
-    const char *cases[] = { NULL, "" };
+    printf("--- sched_request: unset applies nice -10 ---\n");
+    const char *cases[] = { NULL };
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         int out = 123;
         CHECK(pgwt_sampler_sched_request(cases[i], &out) ==
-              PGWT_SAMPLER_SCHED_LEAVE_ALONE,
-              "unset override case %u must leave scheduling alone", i);
-        CHECK(out == 123, "unset override must leave output untouched");
+              PGWT_SAMPLER_SCHED_DEFAULT,
+              "unset override case %u must apply default", i);
+        CHECK(out == -10, "unset override must select nice -10");
     }
 }
 
@@ -1188,22 +1189,22 @@ static void test_sched_request_explicit(void)
 
 static void test_sched_request_malformed(void)
 {
-    printf("--- sched_request: malformed override is refused, not defaulted ---\n");
-    CHECK(PGWT_SAMPLER_SCHED_REFUSED != PGWT_SAMPLER_SCHED_LEAVE_ALONE,
+    printf("--- sched_request: malformed override warns and defaults ---\n");
+    CHECK(PGWT_SAMPLER_SCHED_REFUSED != PGWT_SAMPLER_SCHED_DEFAULT,
           "refusal must be distinct from the unset default");
-    const char *cases[] = { "20", "-21", "abc", "-5x", "-", "   " };
+    const char *cases[] = { "", "20", "-21", "abc", "-5x", "-", "   " };
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         int out = 123;
         CHECK(pgwt_sampler_sched_request(cases[i], &out) ==
               PGWT_SAMPLER_SCHED_REFUSED,
               "malformed override \"%s\" must be refused", cases[i]);
-        CHECK(out == 123, "refused override must leave output untouched");
+        CHECK(out == -10, "refused override must select default nice -10");
     }
 }
 
 static void test_apply_sched(void)
 {
-    printf("--- apply_sched: want 0 no-op; want -20 verified or explicit failure ---\n");
+    printf("--- apply_sched: explicit 0; boost verified or explicit failure ---\n");
     /* A successful boost may be irreversible without privilege. Keep it in
      * a child so the runner's scheduling and later tests are unaffected. */
     fflush(stdout);
@@ -1223,6 +1224,19 @@ static void test_apply_sched(void)
         errno = 0;
         int after = getpriority(PRIO_PROCESS, 0);
         CHECK(errno == 0 && after == before, "want 0 preserves actual nice");
+
+        /* Zero must be applied even when a supervisor supplied another nice.
+         * The child contains the scheduling change. Root can restore zero;
+         * unprivileged runs must report denial and the actual readback. */
+        CHECK(setpriority(PRIO_PROCESS, 0, 5) == 0, "inherit positive nice");
+        ok = pgwt_sampler_apply_sched(0, &sched);
+        errno = 0;
+        after = getpriority(PRIO_PROCESS, 0);
+        CHECK(errno == 0 && sched.applied == after,
+              "explicit zero readback matches kernel");
+        CHECK((ok && after == 0 && !sched.err) ||
+              (!ok && after == 5 && (sched.err == EACCES || sched.err == EPERM)),
+              "explicit zero restores inherited nice or reports permission failure");
 
         ok = pgwt_sampler_apply_sched(-20, &sched);
         CHECK(sched.requested == -20 && ok == sched.ok,
@@ -1308,6 +1322,19 @@ static void test_apply_sched(void)
         CHECK(read_err == 0 && after == 0,
               "refused boost must leave actual nice at 0, got %d (errno %d)",
               after, read_err);
+        struct pgwt_sampler_saved_sched saved = {0};
+        struct rlimit no_boost = {0, 0};
+        CHECK(setrlimit(RLIMIT_NICE, &no_boost) == 0,
+              "disable all favorable nice restores for this child");
+        CHECK(pgwt_sampler_save_sched(&saved) && saved.nice == 0,
+              "save nice before unprivileged lower-priority override");
+        CHECK(pgwt_sampler_apply_sched(19, &sched), "unprivileged nice 19 applies");
+        CHECK(!pgwt_sampler_restore_sched(&saved, &sched) &&
+              (sched.err == EACCES || sched.err == EPERM),
+              "restoring favorable nice without permission reports refusal");
+        CHECK(!saved.valid, "failed restore consumes saved state without retry");
+        CHECK(!pgwt_sampler_restore_sched(&saved, &sched) && sched.err == ENOENT,
+              "repeated failed cleanup cannot retry restoration");
 unprivileged_done:
         printf("apply_sched unprivileged child: %d/%d checks passed\n",
                tests_passed, tests_run);
@@ -1320,6 +1347,77 @@ unprivileged_done:
         CHECK(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
               "unprivileged apply_sched child assertions must pass (status %d)",
               status);
+    }
+}
+
+struct thread_nice {
+    int nice;
+    int err;
+};
+
+static void *read_thread_nice(void *context)
+{
+    struct thread_nice *value = context;
+    errno = 0;
+    value->nice = getpriority(PRIO_PROCESS, 0);
+    value->err = errno;
+    return NULL;
+}
+
+static void test_sched_cycles(void)
+{
+    printf("--- sampler scheduling: workers keep original nice across re-init ---\n");
+    fflush(stdout);
+    pid_t child = fork();
+    CHECK(child >= 0, "fork for two-cycle scheduling must succeed");
+    if (child == 0) {
+        tests_run = tests_passed = 0;
+        errno = 0;
+        int original = getpriority(PRIO_PROCESS, 0);
+        CHECK(errno == 0, "original thread nice readable");
+        int want = original == -10 ? -11 : -10;
+        struct pgwt_sampler_saved_sched saved = {0};
+        struct pgwt_sampler_sched applied, restored;
+        for (int cycle = 1; cycle <= 2; ++cycle) {
+            struct thread_nice worker = {0};
+            pthread_t thread;
+            int rc = pthread_create(&thread, NULL, read_thread_nice, &worker);
+            CHECK(rc == 0, "cycle %d worker creation", cycle);
+            if (rc) break;
+            CHECK(pthread_join(thread, NULL) == 0, "cycle %d worker join", cycle);
+            CHECK(!worker.err && worker.nice == original,
+                  "cycle %d worker must keep initial nice %d, read %d (errno %d)",
+                  cycle, original, worker.nice, worker.err);
+            CHECK(pgwt_sampler_save_sched(&saved) && saved.valid,
+                  "cycle %d original scheduling saved", cycle);
+            int ok = pgwt_sampler_apply_sched(want, &applied);
+            if (!ok) {
+                CHECK(applied.err == EACCES || applied.err == EPERM,
+                      "only explicit permission refusal may limit worker test");
+                printf("NOT VERIFIED: two-cycle boosted worker isolation; permission denied\n");
+                pgwt_sampler_restore_sched(&saved, &restored);
+                break;
+            }
+            errno = 0;
+            CHECK(getpriority(PRIO_PROCESS, 0) == want && !errno,
+                  "cycle %d sampling thread has requested nice", cycle);
+            CHECK(pgwt_sampler_restore_sched(&saved, &restored) && !saved.valid,
+                  "cycle %d cleanup restores once and consumes saved state", cycle);
+            CHECK(restored.requested == original && restored.applied == original,
+                  "cycle %d cleanup reports original nice", cycle);
+            CHECK(!pgwt_sampler_restore_sched(&saved, &restored) && restored.err == ENOENT,
+                  "cycle %d repeated cleanup cannot retry", cycle);
+            printf("cycle %d: worker nice=%d, sampler nice=%d, original=%d\n",
+                   cycle, worker.nice, want, original);
+        }
+        printf("two-cycle scheduling child: %d/%d checks passed\n", tests_passed, tests_run);
+        fflush(stdout);
+        _exit(tests_passed == tests_run ? 0 : 1);
+    }
+    if (child > 0) {
+        int status = 0;
+        CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+              WEXITSTATUS(status) == 0, "two-cycle worker scheduling assertions pass");
     }
 }
 
@@ -1369,8 +1467,12 @@ static void test_timer_health(void)
     }
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--sched-cycles-only")) {
+        test_sched_cycles();
+        return tests_passed == tests_run ? 0 : 1;
+    }
     test_self_read();
     test_build_batch();
     test_build_batch_garbage();
@@ -1390,6 +1492,7 @@ int main(void)
     test_sched_request_explicit();
     test_sched_request_malformed();
     test_apply_sched();
+    test_sched_cycles();
     test_timer_health();
 
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);

@@ -31,16 +31,17 @@ This gives you Active Session History continuously, plus exact, every-transition
 detail during escalation. Escalation is automatic on anomaly rules, including
 CPU saturation, and incurs the full-mode cost while active; at saturation the
 measured full mode kept about half of no-tracer throughput on the cx33 tests
-[below](#overhead). The sampler's top-5 wait-event *ranking* matches the exact tier's
-(5/5 events, every rate, every run measured) — but its CPU-share estimate still
-runs low, by a tenth to a quarter, after the
-[read-order bias](https://github.com/DmitryNFomin/pg_wait_tracer/issues/294)
-that used to account for most of it was fixed. The accuracy the test actually
-certifies is **±8.8 percentage points of per-event share**, of which about
-6.5 pp is that known, still-unexplained CPU under-read rather than sampling
-noise. See [Cross-validation: sampling vs
-exact](#cross-validation-sampling-vs-exact) for the before/after per rate, the
-derivation of that bound, and for what remains.
+[below](#overhead). The sampled CPU-share estimate can under-read under
+CPU contention. The sampler now defaults to nice **-10**: in the plain-service,
+shared-CPU-group setup on Ubuntu and EL8, this reduced the measured under-read
+([owner's decision and measurement 7](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7004963488)).
+The documented sampled-tier accuracy figures apply only when the tracer and
+PostgreSQL share a CPU scheduling group. **No accuracy figure is claimed when
+the groups differ**; the tracer warns at startup in that setup. The existing
+**±8.8 percentage point** cross-validation threshold comes from the earlier
+Ubuntu ordinary-scheduling experiment; it has not been re-derived for this
+default. See [Cross-validation: sampling vs exact](#cross-validation-sampling-vs-exact)
+for the measured setups and the remaining residual.
 
 Key capabilities:
 
@@ -1539,14 +1540,12 @@ Shared CPU resources still matter;
 daemon CPU alone does not establish application overhead. Default
 `tiered` mode automatically enables the full tier on anomaly, including CPU
 saturation, and pays its cost while active ([measurements](#overhead)). This produces
-ASH-style estimates of where time is spent. The top-5 wait-event ranking
-matches the exact tier's (5/5 events, every rate, every run measured), but
-the CPU-share *magnitude* disagreement is workload- and hardware-dependent,
-not a flat ~1 point: measured worst case at the shipped 10 Hz rate is **7.2
-percentage points** on one gate box and **2.1** on another (pgbench, 8
-clients, 60 s windows). See [Cross-validation: sampling vs
-exact](#cross-validation-sampling-vs-exact) below for the full per-rate
-table and what still drives the gap.
+ASH-style estimates of where time is spent. Sampled CPU magnitude can
+under-read under contention. The documented sampled-tier accuracy figures
+apply only when the tracer and PostgreSQL share a CPU scheduling group;
+startup warns when they differ, and no accuracy figure is claimed for that
+setup. See [Cross-validation: sampling vs exact](#cross-validation-sampling-vs-exact)
+for the measured shared-group service setups and the remaining residual.
 
 On PostgreSQL 13, a backend is **attributed from the first tick at which the
 backend's status row is initialised**, provided its shared ranges and enrolled
@@ -1622,15 +1621,40 @@ per-backend file-I/O negative control against master; that is a different binary
 and assertion. Mac-only plan inspection: `python3 -B
 tests/test_sampler_batch_live.py --pg13-far-rows --dry-run --pg-version 13`.
 
-`PGWT_SAMPLER_NICE` accepts an integer from -20 through 19 (the standard
-`nice` range) to request the daemon's own process niceness. Unset or empty
-leaves niceness unchanged; `0` only verifies the current value is zero,
-without changing it. Malformed or out-of-range values are refused with a
-warning and niceness left unchanged. The sampled tier's CPU figure remains
-a lower bound under CPU contention: measurements recorded in
-[ffd3f648 (#675)](https://github.com/DmitryNFomin/pg_wait_tracer/commit/ffd3f648)
-found that nice does not remove this bias, because nice is a CFS weight,
-not a scheduling class.
+The sampler's calling thread defaults to nice **-10**. `PGWT_SAMPLER_NICE`
+accepts an integer from -20 through 19; an explicit value is applied as given.
+Set `PGWT_SAMPLER_NICE=0` to turn the default boost off, including in a systemd
+unit with `Environment=PGWT_SAMPLER_NICE=0`. Unset uses the default;
+an invalid value (including empty) warns and uses the default. If the requested value cannot
+be applied, the daemon emits a warning and continues without retrying;
+sampled CPU can under-read more under contention without that weight.
+
+Nice changes scheduling weight within a CPU group. In measurement 7's plain
+system service with no CPU property and the tracer and PostgreSQL sharing a
+CPU group, the median deviation (largest absolute share disagreement over
+eligible events) fell from **7.45 to 4.15 pp on
+Ubuntu**, and from **9.85 to 3.55 pp on EL8** (each arm **n=8**;
+[owner decision](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7004963488)).
+Residual under-read remains. When the CPU groups differ, nice does not act
+across them: the tracer warns once at startup and **no sampled-tier accuracy
+figure is claimed for that setup**. If group evidence is unreadable or
+malformed, startup logs the reason as unknown and continues.
+
+The startup check uses the `cpu` hierarchy's path on cgroup v1 (also on a
+hybrid system, because v1 owns that controller). On cgroup v2 it walks up the
+process's cgroup path to the nearest group whose parent enables `cpu` in
+`cgroup.subtree_control`, or the root if none does. A different cgroup path
+alone therefore need not mean a different CPU group. Keep the service free of
+CPU properties: on v2 a CPU property on any sibling under `system.slice` can
+enable the controller for siblings and separate the tracer from PostgreSQL.
+On v1, a unit with a CPU property makes systemd place processes under per-slice
+CPU cgroups. On the clean-boot EL8 host, a split was observed after a transient
+`CPUShares=512` unit stopped: the postmaster was in
+`/system.slice/postgresql-18.service` and a new plain unit in `/system.slice`.
+Later readings had both in `/`; the duration was not measured
+([EL8 clean-boot observation](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7068935283)).
+In either case, the administrator sees the startup warning if the groups differ.
+See [the service example](INSTALL.md#operational-contracts-run-under-a-supervisor).
 
 **Full tier (exact, during escalation).** A **CPU hardware debug register**
 (watchpoint) traps every write to `wait_event_info` in each backend. PostgreSQL
@@ -1903,88 +1927,46 @@ first measured, and roughly 47-110x at 5,000 fires/s.
 
 #### Cross-validation: sampling vs exact
 
-Because the default tier is sampled, its accuracy is verified against the exact
-tier over the same window. The `cross_validate` tool compares per-event time
-shares both ways and the top-N event overlap. The worst-case share disagreement
-is always on **CPU**. Measured on Hetzner gate boxes (pgbench, 8 clients, 60 s
-windows), one capture per cell:
+The `cross_validate` tool compares sampled and exact per-event time shares
+over the same escalation window, plus top-event overlap. The live test starts
+the tracer as a plain transient system service, places pgbench outside the
+tracer/PostgreSQL CPU group, and reads back their groups and the sampling
+thread's nice value during the workload. A mismatched layout or a nice value
+other than **-10** is invalid, independently of the numerical comparison.
 
-| sample rate | AMD EPYC-Rome (cx33) before → after | Intel Xeon Skylake before → after |
-|---|---|---|
-| 10 Hz (shipped default) | 14.0 pp → **7.2 pp** | 3.7 pp → **2.1 pp** |
-| 50 Hz | 12.5 pp → **5.4 pp** | 3.7 pp → **0.7 pp** |
-| 100 Hz | 12.8 pp → **6.5 pp** | 11.6 pp → **4.3 pp** |
-| 200 Hz | 10.8 pp → **3.9 pp** | 15.0 pp → **1.7 pp** |
+**The accuracy figures apply only to a shared CPU scheduling group.** With a
+plain service and no CPU property, measurement 7 found median deviation
+(largest absolute share disagreement over eligible events) of **4.15 pp on
+Ubuntu** and **3.55 pp on EL8** with nice **-10**, versus **7.45** and
+**9.85 pp** without it (**n=8 per arm**). With PostgreSQL in its own CPU
+group, the EL8 arm's deviation was **10.35 pp** and nice did not help. These are
+setup-specific measurements, not portable bounds
+([measurement 7 and owner decision](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7004963488)).
+When groups differ, startup warns and **no sampled-tier accuracy figure is
+claimed**. The remaining shared-group under-read is still open.
 
-**Read every cell above as a single draw, not as an accuracy figure.** Each is
-one capture, and the quantity it reports — "max share disagreement" — is the
-*maximum* over the events clearing a 2% share floor, so it is an order
-statistic over a set whose membership changes between runs. On one box, at the
-shipped 10 Hz, this number has been observed at 0.4, 3.7, 6.0, 6.9, 7.2 and
-7.6 pp, with the maximising event sometimes `CPU` and sometimes
-`transactionid`. A "stable 6 pp regression" was filed on the strength of two
-such draws and then withdrawn; no single-run figure of this metric is citable
-without an n and a spread.
+The gate retains its historical **±8.8 pp** threshold. Its **6.52 pp** bias
+input is the earlier Ubuntu gate experiment's ordinary-scheduling arm at
+**10 Hz**, **8 clients** (median **-6.52 pp**, compared with **-3.90 pp** for
+SCHED_FIFO; [measurement restatement](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-6413027872)).
+That threshold has **not** been re-derived for the new nice default and
+service layout. Its formula and capture-validity rules remain in
+`tests/xval_tolerance.sh`; re-derivation from the shipped setup is a separate
+measurement step
+([implementation scope](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7065660887)).
+Escalated windows use the exact tier; for sampled windows, treat CPU magnitude
+as a lower bound under contention.
 
-**What the sampled tier's accuracy actually is, stated as a bound.** The gate
-(`tests/test_cross_validate_tiered.sh`) holds every swept rate to **±8.8
-percentage points**, and that number is derived rather than chosen:
-
-```
-bound = BIAS + z(K) × SE  =  6.52 + 2.5688 × 0.8937  =  8.8 pp
-```
-
-- **6.52 pp** is the systematic CPU under-read at the shipped operating point
-  (10 Hz, 8 clients, ordinary scheduling). It is *known bias*, not noise — see
-  the residual described immediately below, which is **still open**.
-- **0.8937 pp** is the binomial standard error at the worst-case share on a
-  3,130-sample capture — the thinnest seen on the diagnostic driver this input
-  was taken from. The gate's own harness runs slightly thinner (2,918–3,274
-  DB-time samples, mean 3,102, n=11), where the same SE is 0.90–0.93 pp; that
-  moves the bound by under 0.1 pp, so it is reported rather than folded in.
-  The gate separately refuses any capture below a derived **2,587**-sample
-  floor as structurally broken rather than merely noisy.
-- **2.5688** gives 95% coverage of the *maximum* of the K=5 eligible events,
-  not of one event: a 2σ per-event figure would cover about 23% of runs.
-
-So roughly three quarters of the permitted ±8.8 pp is disclosed bias and only
-about a quarter is sampling noise. **The bound is a disclosure, not a clean
-bill of health**, and it applies to the escalation-window comparison described
-here. The previous tolerance was ±10 pp, carried since the tool's first commit
-with no derivation on record; the derivation, the provenance of every input,
-and what the bound does *not* cover are in `tests/xval_tolerance.sh`, which
-`make check` re-verifies against the shipped constant on every run.
-
-A read-order bias accounted for that difference and **is fixed**: the sampler
-read a backend's `cmd_open` in its polling loop before reading `wait_event_info`
-in a later batched read, so a command opening in that gap was observed on-CPU
-but not yet "in a command" and was dropped rather than counted. It now re-reads
-the gate *after* the wait read, for the at-risk samples only, using the same
-`st_state` predicate the exact tier's uprobe uses. The direct evidence that
-nothing gate-ordered is left: the sampler used to reject **42-44%** of its own
-on-CPU observations as out-of-command while the exact tier rejected only
-**17-20%**; the two now agree to within ~1.5 pp.
-
-**A residual under-read remains, from a different cause.** The sampler still
-reports only **0.77 (10 Hz) to 0.88 (200 Hz)** of the CPU nanoseconds the exact
-tier measures over the same window — so in sampled (non-escalated) windows CPU
-share is still low and AAS/DB Time are still deflated with it, by roughly a
-tenth to a quarter rather than by half. That ratio against the **exact tier** is
-the right comparison, because both tiers define "on CPU" the same way (no wait
-event registered). Comparing either tier against the kernel's `/proc`
-`utime+stime` is *not* a clean check: `/proc` counts only time actually on a
-core, while both tiers also count runnable-but-waiting-for-a-core time, and each
-tier separately excludes 15-20% of its own on-CPU readings as out-of-command.
-The remaining gap sits **upstream of the command gate**, in how often the
-sampler observes an on-CPU reading at all (the wait-read path) — tracked
-separately from the read-order fix. Escalated/exact windows are unaffected
-either way.
-
-What still holds, and is unchanged by all of this: the top-5 wait-event
-**ranking** matched the exact tier **5/5** in every run measured, across both
-machines and all four rates. The sampler is reliable for "which wait event
-dominates"; treat its CPU-share *magnitude* as a lower bound, and escalate to
-the exact tier when you need a trustworthy CPU number rather than the ranking.
+The normal-sampling cost condition for this default was tested separately on
+dedicated-vCPU ccx23 machines: plain `systemd-run --slice=system.slice` service,
+no CPU property on any system.slice unit, tiered mode with escalation disabled
+by the pre-registered anomaly flags, pgbench **8 clients**, **300 s** runs.
+Mean paired TPS differences for nice **-10** versus unchanged nice were
+**-0.04% on Ubuntu** (**11 valid pairs**, **95% CI [-0.57%, +0.49%]**) and
+**+0.11% on EL8** (**12 pairs**, **95% CI [-0.75%, +0.97%]**). Both met the
+pre-registered no-real-cost rule; these figures measure normal sampling,
+not escalated tracing
+([measurement 8b](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7012970269)).
 
 #### What drives overhead
 

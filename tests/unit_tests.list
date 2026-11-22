@@ -25,6 +25,7 @@ test_wp_attr
 # #622: includes pgwt_exact_probe_parse_no_sema_refcnt in the pure exact core.
 test_exact_probe
 test_effective_cores
+test_cpu_group
 test_backend_status_layout
 test_sampled_attr_io
 test_sampled_attr_lifetime

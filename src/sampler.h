@@ -60,21 +60,33 @@ struct pgwt_sampler_sched {
 int pgwt_sampler_parse_nice(const char *env, int default_nice, int *out);
 
 enum pgwt_sampler_sched_request {
-    PGWT_SAMPLER_SCHED_LEAVE_ALONE = 0, /* no override given: the DEFAULT */
+    PGWT_SAMPLER_SCHED_DEFAULT = 0,     /* unset: apply nice -10 */
     PGWT_SAMPLER_SCHED_APPLY,           /* explicit, well-formed override */
     PGWT_SAMPLER_SCHED_REFUSED,         /* override present but malformed */
 };
 
-/* env == NULL or empty -> LEAVE_ALONE, *out_nice untouched.
+/* env == NULL -> DEFAULT, *out_nice = -10.
  * Well-formed integer in [-20,19] -> APPLY, *out_nice written.
- * Anything else -> REFUSED, *out_nice untouched. Pure. */
+ * Anything else -> REFUSED, *out_nice = -10 (warn, then apply default). Pure. */
 enum pgwt_sampler_sched_request
 pgwt_sampler_sched_request(const char *env, int *out_nice);
 
 /* Change only the calling thread's nice, never its scheduling policy.
- * Zero opts out of changes: read back only, failing if it is not zero.
+ * Zero explicitly restores ordinary nice 0, including from inherited niceness.
  * Returns 1 iff the requested value was verified; always fills *out. */
 int pgwt_sampler_apply_sched(int want_nice, struct pgwt_sampler_sched *out);
+
+/* Paired on the sampling thread across daemon init/cleanup. Restore before
+ * rediscovery/worker creation, so workers on later init inherit the same nice
+ * as on first init. A restore consumes the saved value even on failure. */
+struct pgwt_sampler_saved_sched {
+    int valid;
+    int nice;
+    int err;
+};
+int pgwt_sampler_save_sched(struct pgwt_sampler_saved_sched *saved);
+int pgwt_sampler_restore_sched(struct pgwt_sampler_saved_sched *saved,
+                              struct pgwt_sampler_sched *out);
 
 enum pgwt_sampler_timer_health {
     PGWT_SAMPLER_TIMER_UNKNOWN = 0, /* timer evidence unavailable or invalid */

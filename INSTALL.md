@@ -492,12 +492,12 @@ that field depends on the PostgreSQL major version:
 
 Two behaviors are by design and must be handled by your service manager:
 
-- **The daemon exits when the postmaster dies.** All resolved addresses
+- **The daemon re-attaches after a PostgreSQL restart.** All resolved addresses
   (load base, `MyProc`/`my_wait_event_info`, per-backend PGPROC slots) are
   specific to one postmaster instance; after a PostgreSQL restart they are
-  meaningless, so the daemon exits with the reason
-  `PostgreSQL (PID ...) stopped` instead of guessing. Run it under systemd
-  so it re-attaches to the new postmaster automatically:
+  meaningless. In `--daemon` mode it waits for PostgreSQL and reinitializes
+  capture with newly discovered addresses. Run it under systemd so the
+  service manager also restarts the tracer if it crashes:
 
   ```ini
   [Service]
@@ -511,6 +511,31 @@ Two behaviors are by design and must be handled by your service manager:
 
   (`--daemon` already retries discovery in a loop; `Restart=always` covers
   daemon crashes as well.)
+
+  The sampler's calling thread defaults to nice **-10**; the root service
+  above can apply it without a `Nice=` property. Set
+  `Environment=PGWT_SAMPLER_NICE=0` to turn that default off; any integer from
+  -20 through 19 is applied as requested. Invalid values warn and use the
+  default. Failure to apply the value warns once and capture continues.
+
+  Keep this example free of CPU properties: on cgroup v2, a CPU property on
+  any unit under `system.slice` can enable the controller for sibling units
+  and separate the tracer's CPU group from PostgreSQL's
+  ([placement measurements](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-6998288488)).
+  On cgroup v1, a unit with a CPU property makes systemd place processes under
+  per-slice CPU cgroups. On the clean-boot EL8 host, after a transient
+  `CPUShares=512` unit stopped, the postmaster was observed in
+  `/system.slice/postgresql-18.service` and a new plain unit in `/system.slice`.
+  Later readings had both in `/`; the duration was not measured
+  ([EL8 observation](https://github.com/DmitryNFomin/pg_wait_tracer/issues/306#issuecomment-7068935283)).
+  The startup warning identifies the groups when a split is present on either
+  cgroup version.
+  The documented sampled-tier accuracy figures apply only when both share a
+  CPU scheduling group. If they differ, the tracer warns at startup that
+  nice does not act across CPU groups and **no sampled-tier accuracy figure
+  is claimed for that setup**. Unreadable group evidence is logged as unknown;
+  neither case stops capture. See the [measured shared-group setups](README.md#cross-validation-sampling-vs-exact).
+
 
 - **Same PID namespace as PostgreSQL.** The daemon matches BPF-reported
   kernel PIDs against `/proc` and `postmaster.pid`, which assumes it shares
