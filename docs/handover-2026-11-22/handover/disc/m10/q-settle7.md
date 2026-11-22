@@ -1,0 +1,23 @@
+# To the design author (RULE 1 of CLAUDE.md): settle the points where the challenger differs, and write merge-v1 delta 7 in the mechanical format
+
+This is a written design request from the lead to the design author of contracts/merge-v1. It is not an implementation brief; scripts/lead/check-brief.sh does not apply; do not run it. Read-only: edit no file; print the delta as your final message. scratchpad = SP
+
+## Material
+- The question both advisers answered: scratchpad/a2go/disc/m10/q-gaps.md. Your answer: scratchpad/a2go/disc/m10/astra-gaps10.md. The challenger's answer: scratchpad/a2go/disc/m10/fable-gaps10.md (read it whole; it ran schedules on the built round-10 code).
+- The contract on origin/master (6f18da28): contracts/merge-v1/CONTRACT.md section 6, oracle-discovery/{ROWS.md,EXPECTED.md} (149 rows). The review and the triage as before (scratchpad/a2go/disc/review-merge-b5ae3fb6.md, scratchpad/a2go/disc/m10/triage.md). The implementation: scratchpad/wt-m10.
+- The format to produce: exactly that of your previous delta, scratchpad/a2go/disc/delta6/astra-delta6.md (REPLACE / APPEND blocks with exact anchors that a script applies; rows for ROWS.md; expected outputs for EXPECTED.md with their mutants; then the TASK text for independent answerers who see only the rows).
+
+## Agreed by both (write them as agreed)
+Q1 fault and revoke, the ADMIT not recorded, either arrival order; P2 a refuted ADMIT is not recorded; G2 a recorded quiet candidate is kept as evidence across VOID and REARM in both orders; G4 a held batch is validated while held; one delta first, then one implementation round.
+
+## Where you differ: decide, and where you keep your position say what in the challenger's argument is wrong
+1. **A new finding of the challenger's, larger than the seven items (its first section).** Measured on the built code: a valid ADMIT recorded under the latch never releases its lifetime's records (merge.c:986 tests `admitted`, which merge.c:845 leaves false under the latch), so the whole frontier stays held for the rest of the capture; ABANDON is today the only way out and the undisputed fix P1 closes it. It proposes one per-lifetime fact ("a valid ADMIT is recorded") instead of your two, and a sentence in DECISION 43: a valid ADMIT recorded under the latch removes the missing-ADMIT hold of Decision 36; that lifetime's records then release under the ordinary rules, uncertified, and commit no bound. Decide the rule and the accessor's promise together; pin the row.
+2. **G1.** You: the late TRY is retained as adverse evidence and later controls relying on the refuted proof are invalid. The challenger: "is not recorded, whatever history it names" stands; the TRY's own VOID latches, so nothing can commit afterwards; no new sentence.
+3. **G3.** You: one report per contradicting observation, with an omission allowance. The challenger: a terminal claim is refuted once and later observations contradicting an already refuted claim report nothing; otherwise one false terminal claim about a live backend voids every re-armed epoch (the driver re-arms after each fault).
+4. **The views inside a callback (T2).** You: views are defined only between primitive inputs. The challenger: the revoked OPEN must be persisted, and every view reflect it, before the VOID of the same fault is published, because a process killed between the two writes leaves a file that reads COMPLETE on a revoked proof.
+5. **The form.** You: a redundant report may be omitted once the epoch is already suspended. The challenger: do not make any count non-normative (a further fault suspends the epoch and discards every source's staged queue; the wording contradicts pinned text at CONTRACT.md:460 and :504 and EXPECTED.md:160-161); instead one exact paragraph: "A control that reports a fault is not recorded and leaves no state. Validly recorded claims survive VOID, REARM and the latch. Each recorded claim is refuted at most once, by the first observation contradicting it; that observation faults and the claim is inert afterwards. The latch removes commitments only."
+
+The lead's rule where the two of you still differ after this: the reading under which no file can read complete on evidence that was disputed, and under which publication cannot stop permanently on a valid input, wins; exact outputs stay exact.
+
+## Then write delta 7
+One delta: the agreed items, your settlement of the five above, the rows (name them H1, H2, ... ; every variant spelled out; each with its complete expected output and at least one mutant), and any existing row whose expected output changes (list each with the reason). Keep it as small as the decisions allow. End with a list "NOT DECIDED HERE" if anything remains.

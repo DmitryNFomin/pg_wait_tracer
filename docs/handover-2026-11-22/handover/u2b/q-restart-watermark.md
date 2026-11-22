@@ -1,0 +1,19 @@
+# Design question to an adviser (RULE 1 of CLAUDE.md): under load on EL8 a restarted daemon's watermark never passes its start; is that the product withholding correctly, and what should the gate's restart step assert
+
+This is a written design question from the lead to an adviser, one question, one answer. Read-only: edit no file except your answer. Do not log in to any machine. At most 30 lines. Mark every claim VERIFIED (file:line read, or command and output) or INFERRED. scratchpad = SP
+(The second design adviser is unavailable until 26 November: its account hit a usage limit. This answer stands alone until then; say where a second opinion matters most.)
+
+## Material
+- Collected results of the interrupted round: scratchpad/status/cutoff-collection.md and scratchpad/status/cutoff-raw/u2b-el8/ (readiness-table.txt, last3-polls.txt, diagnostic-load-{1,2,3}.log, diagnostic-quiet-{1,2,3}.log, final-load-{1..6}.log, reproduction-table.txt).
+- The branch: agent/947-coverage-server at e15a832e (repository <repo>; `git show e15a832e:<path>`): tests/ui_live_smoke.py (restart() and its readiness loop; the witness rule that excuses a step when real event loss is witnessed, exit 94 / 95, tests/coverage_loss.py), src/open_snapshot.c (the exact-perf tick and when a watermark is promoted; around lines 520-560 on the merge branch's copy), src/coverage_status.h, src/control.c.
+- Background: on EL8 kernel 4.18 under this load the event ring drops events (issue 871) and lifecycle INIT records can be lost (issue 959); the coverage design answers by opening a capture_loss gap and withholding numbers ("Coverage unverified ... (capture loss)"). The live gate's other steps treat a run with a strict witness of such loss as exit 94 (a scoped known-failing entry), not as a failure.
+
+## Measured (EL8, e15a832e)
+- Diagnostic copy with a 120 s watch, loaded x3: a status answer and the new boot id at 0.96-1.06 s; watermark_wall stays EQUAL to boot_start_wall for the whole 120 s (2370 polls each). Quiet x3: the watermark passes the start at 2.9-3.9 s.
+- The committed gate under load, 6 runs: zero violations of the new Live-window invariant in all six; 5 exit 1 on "restarted daemon not ready within 15s: missing watermark_wall > boot_start_wall"; 1 exit 1 on a 60 s Playwright timeout in assert_default_live on the matrix tab with a MemoryError in its log.
+
+## Questions
+1. From the code: under which conditions does a freshly started daemon leave watermark_wall equal to boot_start_wall indefinitely? Is "capture loss declared from the first tick onward" one of them and is it the only one consistent with these logs (look for loss witnesses, DROP records or gap records in the diagnostic logs)? What would distinguish it from a defect (for example a watermark that is never promoted although no loss was declared)?
+2. If it is declared loss: is the product behaving as designed (nothing certifiable, numbers withheld, said in the interface), and is the restart step's condition "watermark > start within 15 s" then simply a condition that cannot hold under witnessed loss, to be handled by the same witness rule as the other steps (exit 94), or does a restart under load deserve its own assertion (what should be true of the page and the status within N seconds: new boot visible, loss stated, no stale numbers from the old boot)? Give the assertion as sentences a test can check, and the control that keeps it able to fail (a daemon that publishes no watermark and declares no loss must be red).
+3. The sixth run (60 s timeout on the matrix tab, MemoryError in the log): what single measurement tells whether that is the harness's own process running out of memory under load or the page; does the coverage-label unit need it settled before merge?
+4. What exactly may be said to the owner about "the UI under load on EL8" from these runs, and what may not.

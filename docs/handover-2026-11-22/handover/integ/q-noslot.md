@@ -1,0 +1,13 @@
+# Question: does the "process slot" population rule remove the need to persist the no-wait-word route?
+
+Read-only: edit no file except your answer if told to write one. Answer in at most 25 lines. Mark every claim VERIFIED (file:line read) or INFERRED. scratchpad = SP
+
+## Background
+- DECISION 37(c) of contracts/merge-v1/CONTRACT.md §6 (worktree scratchpad/wt-discm) admits a pre-existing process that has no wait word (PostgreSQL 13 logger, stats collector, archiver: MyProc is NULL for life) on a proof of its permanent role, and DECISIONs 42/43 require that support to be published durably and to be revocable from the boot start. The integration design (scratchpad/a2go/integ/astra-spec.md section D, fable-challenge2.md section 2, astra-settle2.md point 1) found that this needs a new persisted record kind with reader rules for rotation, damaged tails and revocation history: at least two implementation rounds and a contract amendment, on the critical path for PostgreSQL 13.
+- Separately, a population decision is pending with the owner (scratchpad/status/draft-q8.md; design text scratchpad/a2go/disc/astra-delta3b.md and the challenge fable-challenge3b.md): option b = "count only processes that hold a PostgreSQL process slot, from taking it to giving it up, on every version"; processes that never hold one are "not a backend" and are not counted. It was asked about fork-born connection processes that never initialise.
+
+## Question
+1. Under option b, are the three PostgreSQL 13 no-slot roles outside the counted population by the same rule (they never hold a process slot)? If so, can the census discharge them as "not a backend" on the SAME proof route 37(c) already requires (role proved through the pinned binding, pointer watch enabled, NULL read after enable, fence, watch kept for life), with a later non-NULL fire still a fault that reopens coverage from the boot start through the existing boot-wide gap record?
+2. If yes: does that remove the need for any durable per-lifetime support record (nothing about these processes needs to be replayed, because they are not in the population and contribute no numbers), or does replay still need something (say exactly what, and whether an existing record already carries it)? What would the user be told (a documentation sentence instead of "present, not measured" per process)?
+3. Which contract sentences would change (DECISIONs 37(c), 42, 43 and the affected oracle rows N1-N16), and is that smaller than the persistence work it replaces? Is there any soundness loss compared with the persisted form?
+4. If no: the exact reason (a schedule or a contract sentence).

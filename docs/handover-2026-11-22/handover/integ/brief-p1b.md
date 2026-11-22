@@ -1,0 +1,51 @@
+# Brief: discovery admission, producer round P1b (fresh implementer): attribute one live failure, then finish P1's qualification on the final tree
+
+## Authorised by
+
+Owner decision, 2026-11-20, recorded verbatim on #988: "a" (build discovery admission). Round P1 (566f20d5) implemented the frozen handoff header and the P1 facts and stopped partial: its evidence and report are /private/tmp/988-p1-evidence/report.md (read it first; "Normative limitations and scope questions" at its end, and the el8 and ubuntu "final tree" sections). You are a fresh implementer. An independent code review of 566f20d5 runs at the same time; you do not wait for it.
+
+Issue #988; live comments (refreshed at dispatch):
+
+```console
+$ gh api repos/DmitryNFomin/pg_wait_tracer/issues/988/comments --paginate --jq '.[] | {id: .id, body: .body}'
+{"body":"**Quiet-baseline mechanism: agreed by both design advisers, and its control passed on both kernels (2026-11-20)**\n\nAn idle process found at startup (an idle pooled connection, an auxiliary asleep) never makes a transition, so it needs a baseline that does not wait for one. Both advisers rejected \"seed, enable, re-read the wait word\" (a transition and its reverse can hide in buffers) and my first replacement (scheduler counters plus the state letter: the kernel sets the sleeping state before it decides to sleep).\n\nAgreed mechanism (Fable found it; Astra had named the same kernel primitive): a bracket in which the kernel itself proves the task was off every runqueue.\n- `/proc/\u003cpid\u003e/syscall` prints \"running\" unless `wait_task_inactive` succeeds under the runqueue lock (not on a CPU, not queued). The task must read inactive at both ends of the bracket, and its voluntary context-switch count must be equal at both ends.\n- Inside the bracket: resolve the wait address and compare it with the armed one, read the wait word, take a fresh timestamp t, install the seed (that wait value, time t, off-CPU, a valid zero-consumption CPU base), enable the watchpoint and confirm.\n- If the bracket holds, the task executed nothing in it, so the seed is its exact state at t and the first later record needs no exclusion. A failed, denied or unreadable proof is a failed bracket, never a pass; after bounded retries the process falls back to waiting for its first record.\n- Today's seeding is not coherent for this (it opens an on-CPU stretch when the wait word is 0 and has no valid CPU base), so the producer unit changes it.\n\nControl on the real kernels (tests/results/session-20261120/quiet-witness/analysis.md on the lead's Mac): on EL8 4.18.0-553 and on Ubuntu 6.8, a sleeper reads inactive with an unchanged count, a spinner reads \"running\" in 200 of 200 reads, a sleeper woken once between the reads shows the count move from 1 to 2, and 1,000 quiet brackets gave 0 anomalies. Not measured: a PostgreSQL backend as the subject, and reads under load.\n\nNext: the consolidated merge-v1 amendment (DECISIONs 30-44 with this route), two independent answer sets from the rows alone, an isolated contract commit, then the producer and merge units.\n\nRefs #988\n","id":7047038197}
+{"body":"**Owner decisions, 2026-11-21 12:11 UTC, verbatim: \"B b a\"**\n\nAnswering three a-or-b questions put in this order:\n\n1. **The three PostgreSQL 13 helper processes with no wait state (logger, statistics collector, archiver).** Options as put: a = list each as \"present, not measured\" (needs a new record in the capture files, reader rules and a contract amendment); b = do not list or count them, and say so in the documentation. Answer: **b**.\n2. **What counts as a backend.** Options as put: a = count every connection process wherever PostgreSQL keeps a wait state; b = count a process only while it holds a PostgreSQL process slot, on every version (health checks, cancel requests and silent clients are then \"not a backend\"). Answer: **b**.\n3. **Real-time priority for the tracer's main loop** (issue 989). Options as put: a = on by default wherever the per-CPU transport is on, with `--no-rt-priority` to turn it off; b = opt-in only. Answer: **a**.\n\nWhat follows from 1 and 2 here:\n- Contract merge-v1: the no-wait-word route (DECISION 37(c)) keeps its proof and its bound but loses the durable support-publication precondition and the per-process \"present, not measured\" line (DECISION 43); rows N1, N10 and N14 get new expected answers through the usual two independent answer sets. Documentation sentence: \"On PostgreSQL 13 the logger, the statistics collector and the archiver never hold a PostgreSQL process slot. They are not backends: they are not listed and not counted.\"\n- The rule for fork-born processes that never initialise (contract delta 3b) is finalised under the process-slot rule.\n- No new record kind is added to the capture files for this.\n\nCopied here from the comment on the churn issue (comment 7062393007 there) now that no implementation round in flight cites this issue. State on 2026-11-21 17:55 UTC: the contract part of 1 is on master (6f18da28: the no-wait-word route without role-support publication; rows N1, N10, N14); the process-slot population rule of 2 is written as a draft delta and belongs to the bounded-omissions unit, not applied yet.\n\nRefs #988\n","id":7066825885}
+```
+
+CONTROLLING SCOPE DECISION: #988 comment 7047038197 "If the bracket holds, the task executed nothing in it, so the seed is its exact state at t and the first later record needs no exclusion."
+
+## Starting point
+
+Run scripts/lead/codex-task.sh on the EXISTING branch agent/988-discovery-producer at 566f20d5. First run `git log --oneline -1`; it must print 566f20d5. Otherwise print WRONG_HEAD <sha> and stop.
+
+The LAST line of .codex-commit-msg is exactly "Refs #988". Do not push. Do not run `make check` on the Mac. Do not touch contracts/. Nothing eBPF runs on the Mac. Your Linux machines, as root: EL8 (Rocky 8.10, kernel 4.18.0-553) <ip> and Ubuntu 24.04 (kernel 6.8) <ip>, the ones P1 used (its trees and logs are there; other people's scratch files under /tmp and /root: leave them). One thing at a time on each. Do not create or delete VMs. Keep raw outputs under /private/tmp/988-p1b-evidence/.
+
+**Do not stop on a scope question, and do not stop the qualification at the first failing live run.** Record every run, finish every item, and list all questions together in the report.
+
+## What was measured (not instructions)
+
+- On P1's final tree the combined live test passed 6 runs on EL8 and failed the 7th in the PostgreSQL 18 "unrelated PID reuse" arm: its guard compares a GLOBAL lifecycle-attempt vector before and after and saw [2, 0, 2, 2] become [2, 1, 3, 2] ("unrelated reuse emitted L record"). The saved log does not identify the extra records. Ubuntu passed 7 runs and its 8th was cancelled when EL8 stopped. The same arm passed 10 of 10 on both machines on the tree before P1 (704cb631).
+- The final tree's verifier matrices, full tiers and live UI smoke were not run.
+
+## Task
+
+1. **Attribute the extra lifecycle records.** Without changing what the guard asserts, make the live test record, for every lifecycle attempt in that arm, which process it belongs to (PID, start time, role or command line read from /proc at the time, parent) and when. Reproduce on EL8 until the vector changes at least twice (run the arm in a loop; report how many iterations it took; if it does not recur in 60 iterations say so and run 60 on Ubuntu too). Then decide from the records: (a) a product defect (a record emitted for the wrong lifetime, a duplicate, or a record the unrelated process should never cause): fix it inside the producer, with a host case and a mutant; (b) the records belong to another real PostgreSQL process that started or exited in that interval (an autovacuum worker, a parallel worker, a background writer restart): then the guard's premise "nothing else happens globally" is false, and the guard must be restated on the SUBJECT (no lifecycle record attributable to the reused unrelated PID or to the subject lifetime) with the global vector reported, not asserted. No retry, no tolerance, no sleep-until-quiet. Show the restated guard still fails under a mutant that emits a record for the unrelated PID.
+2. **P1's three boundary questions** (its report, questions 2 and 3): the frozen specification's section A.1 assigns the bounded refresh wrapper, scoped inspection after a history or append failure, and the final drain to round P2. P1's transitional definitions stand. Nothing to implement; if any test or comment in the tree claims more than that, correct the claim.
+3. **Finish the qualification on the final tree, on both machines:** the production and falsifier verifier matrices (no kernel program changes are expected: if `git diff 704cb631 -- src/bpf/` is not empty, report why); the flag-off byte comparison (54/54 against 5fd6a519); the PostgreSQL 13, 17 and 18 live arms, 10 runs each, every run reported; one full tier on each machine (`scripts/box-tier.sh` exactly as CI runs it for that system, phase-probe declaration EL8 0, Ubuntu 1): every `Executed:` line, the "Live UI smoke:" line, the tree hash, every failed or known-failing test by name. Host suites and mutants on the Mac as P1 ran them; both registration guards; `git diff --check`.
+
+## Excluded
+
+src/bpf/ and the transport wire format; the merge core and adapter (src/core/, src/merge_capture.*); the coordinator (src/discovery_integration.*); the daemon, src/backend.c, src/open_snapshot.c, src/percpu_transport.*; round P2's behaviours; src/discovery_admission.h (frozen: byte-identical to ae8b80e9); the server, web/, contracts/, KNOWN_FAILING, retries, tolerances.
+
+## Done
+
+Report: commit sha (from the wrapper), `git diff --stat 566f20d5`, item 1's records for each reproduced change and your classification with the evidence, the guard before and after if it changed and the mutant that keeps it able to fail, item 3's lines per machine (matrices, flag-off, live per arm x/10 with every failure quoted, `Executed:`, "Live UI smoke:"), guards, and the list of scope questions if any.
+
+## Budget
+
+Rounds: 1
+Wall-clock minutes: 300
+
+## Report by
+
+At the end of the budget, even if incomplete: at most 15 lines.
