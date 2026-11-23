@@ -260,6 +260,56 @@ else
     fail=1
 fi
 
+# #1006 unit 1 timeline mode: the same three C suites tests/unit_tests.list
+# runs on the box, built here from source under ASan/UBSan outside the tree.
+# Registered once in S0 so S1/S2/S5 never edit this step: the source lists
+# below are the frozen link closures (src/timeline_writer.c stays libc-only).
+# The event-name closure (wait_event/idle_rule/spawn/cJSON) is third-party or
+# shared code, so it is compiled without -Werror (-w) into objects first.
+step "timeline mode #1006: assembler, writer, summary (host C) and comparator"
+if timeline_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-timeline-check.XXXXXX"); then
+    timeline_cc=("${CC:-cc}" -std=gnu11 -fsanitize=address,undefined
+                 -fno-omit-frame-pointer -g -Isrc)
+    timeline_compat=()
+    if [[ $(uname -s) == Darwin ]]; then
+        timeline_compat=(-include demos/replay-compat.h)
+    fi
+    timeline_ok=1
+    for dep in wait_event idle_rule spawn cJSON; do
+        if ! "${timeline_cc[@]}" -w -DPGWT_SERVER ${timeline_compat[@]+"${timeline_compat[@]}"} \
+            -c "src/$dep.c" -o "$timeline_check_dir/$dep.o"; then
+            echo "FAIL: timeline dependency $dep compilation"
+            fail=1
+            timeline_ok=0
+        fi
+    done
+    timeline_werror=(-Wall -Wextra -Werror)
+    for suite in timeline_assemble timeline_writer timeline_summary; do
+        case $suite in
+            timeline_assemble) timeline_sources=(src/timeline_assemble.c) ;;
+            timeline_writer)   timeline_sources=(src/timeline_writer.c) ;;
+            timeline_summary)  timeline_sources=(src/timeline_summary.c src/timeline_writer.c
+                                   "$timeline_check_dir/wait_event.o" "$timeline_check_dir/idle_rule.o"
+                                   "$timeline_check_dir/spawn.o" "$timeline_check_dir/cJSON.o") ;;
+        esac
+        if [[ $timeline_ok -eq 1 ]] && "${timeline_cc[@]}" "${timeline_werror[@]}" -DPGWT_SERVER \
+            "tests/test_$suite.c" "${timeline_sources[@]}" -lm \
+            -o "$timeline_check_dir/test_$suite"; then
+            run "$timeline_check_dir/test_$suite"
+        else
+            echo "FAIL: timeline test_$suite compilation"
+            fail=1
+        fi
+    done
+    run python3 -B tests/test_timeline_assemble_diff.py \
+        --assembler-bin "$timeline_check_dir/test_timeline_assemble"
+    run python3 -B tests/test_timeline_compare.py
+    rm -rf "$timeline_check_dir"
+else
+    echo "FAIL: timeline temporary directory"
+    fail=1
+fi
+
 # Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv
 # pin mismatch is reported clearly instead of the UI suite silently skipping
 # below (see issue #118). --fast doesn't need Playwright at all.

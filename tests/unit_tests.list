@@ -1135,3 +1135,9 @@ test_coverage_drain.py
 
 # Compile/link-only capability guard: no BPF on the host.
 test_libbpf_positions.py
+
+# #1006 unit 1 timeline mode: assembler, writer/reader and summary (host C;
+# scripts/check.sh also runs them on the Mac under ASan/UBSan).
+test_timeline_assemble
+test_timeline_writer
+test_timeline_summary

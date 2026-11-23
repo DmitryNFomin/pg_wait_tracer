@@ -112,6 +112,7 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/cpu_group.c \
              $(SRC_DIR)/provider_full.c \
              $(SRC_DIR)/provider_coop.c \
+             $(SRC_DIR)/provider_timeline.c \
              $(SRC_DIR)/sampler.c \
              $(SRC_DIR)/exact_probe.c \
              $(SRC_DIR)/phase_probe.c \
@@ -149,6 +150,9 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/replay.c \
              $(SRC_DIR)/replay_accum.c \
              $(SRC_DIR)/summary_writer.c \
+             $(SRC_DIR)/timeline_assemble.c \
+             $(SRC_DIR)/timeline_writer.c \
+             $(SRC_DIR)/timeline_summary.c \
              $(SRC_DIR)/query_text.c \
              $(SRC_DIR)/pgss_resolver.c \
              $(SRC_DIR)/backend_meta.c \

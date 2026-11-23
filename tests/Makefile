@@ -87,7 +87,9 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_transport_wire test_transport_producers test_percpu_transport \
             test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure \
             test_coverage_verdict test_coverage_writer test_coverage_a2_codec \
-            test_coverage_a2_writer_io
+            test_coverage_a2_writer_io \
+            test_timeline_assemble test_timeline_writer test_timeline_summary \
+            dump_transitions
 
 .PHONY: all clean check
 
@@ -1291,6 +1293,35 @@ coverage_a2_writer_io.o: ../src/event_writer.c ../src/event_writer.h ../src/cove
 
 test_coverage_a2_writer_io: test_coverage_a2_writer_io.c coverage_a2_writer_io.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
+
+# #1006 unit 1 timeline mode. Registered once in S0 so S1 (assembler), S2
+# (writer, reader, summary) and S5 (reference export) never edit this file:
+# keep src/timeline_writer.c libc-only and the summary's closure to these
+# objects. The same sources are built on the Mac by scripts/check.sh.
+test_timeline_assemble: test_timeline_assemble.c ../src/timeline_assemble.c \
+                        ../src/timeline_assemble.h ../src/timeline_wire.h \
+                        ../src/timeline_format.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -std=gnu11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
+
+test_timeline_writer: test_timeline_writer.c ../src/timeline_writer.c \
+                      ../src/timeline_writer.h ../src/timeline_format.h \
+                      ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -std=gnu11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
+
+test_timeline_summary: test_timeline_summary.c ../src/timeline_summary.c \
+                       ../src/timeline_writer.c ../src/timeline_summary.h \
+                       ../src/timeline_writer.h ../src/timeline_format.h \
+                       $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                       $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -std=gnu11 -Wall -Wextra -Werror -DPGWT_SERVER -o $@ $(filter %.c %.o,$^) -lm
+
+# dump_transitions: the trap reference export of the two-tracer acceptance
+# run (S5). Same server objects as dump_markers (no BPF skeleton).
+dump_transitions: dump_transitions.c $(BUILD)/server_event_reader.o \
+                  $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
+                  $(BUILD)/server_idle_rule.o $(BUILD)/server_spawn.o \
+                  $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
 
 # Pilot helpers are built in an external temporary directory by the registered
 # Python route test; no generated fixtures or helper binaries enter the tree.
